@@ -312,7 +312,13 @@ class GrgaSearchApp(tk.Tk):
         ttk.Label(right, text="匹配内容").pack(anchor=tk.W)
         content_frame = ttk.Frame(right)
         content_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        self.content = tk.Text(content_frame, wrap=tk.NONE, state=tk.DISABLED)
+        self.content = tk.Text(
+            content_frame,
+            wrap=tk.NONE,
+            state=tk.DISABLED,
+            spacing1=self._scale_size(3),
+            spacing3=self._scale_size(3),
+        )
         self.match_color_tags = []
         for index, color in enumerate(MATCH_COLORS):
             tag = f"match{index}"
