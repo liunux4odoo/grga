@@ -6,11 +6,15 @@ import sys
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from grga.search import build_rga_command_preview, check_environment, search_directory
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "grga", "settings.json")
+DEFAULT_DPI = 96
+DEFAULT_TK_SCALING = DEFAULT_DPI / 72
+MIN_DISPLAY_SCALE = 1.0
+MAX_DISPLAY_SCALE = 2.5
 DEFAULT_GITIGNORE_PATTERNS = [
     "__pycache__/",
     "node_modules/",
@@ -39,7 +43,6 @@ class GrgaSearchApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("GRGA Search")
-        self.geometry("1100x700")
         self.matches_by_file = {}
         self.match_tag_by_text = {}
         self.search_thread = None
@@ -53,6 +56,8 @@ class GrgaSearchApp(tk.Tk):
         self.last_search_result = None
 
         settings = self._load_settings()
+        self.display_scale = self._configure_display_scale(settings)
+        self.geometry(f"{self._scale_size(1100)}x{self._scale_size(700)}")
 
         self.directory_var = tk.StringVar(value=settings.get("directory") or os.getcwd())
         self.mode_var = tk.StringVar(value=settings.get("mode", "auto"))
@@ -87,6 +92,47 @@ class GrgaSearchApp(tk.Tk):
         if not isinstance(data, dict):
             return {}
         return data
+
+    def _configure_display_scale(self, settings):
+        scale = self._read_display_scale_setting(settings)
+        if scale is None:
+            scale = self._detect_display_scale()
+        scale = max(MIN_DISPLAY_SCALE, min(MAX_DISPLAY_SCALE, scale))
+        self.tk.call("tk", "scaling", DEFAULT_TK_SCALING * scale)
+        self._scale_named_fonts(scale)
+        return scale
+
+    def _scale_named_fonts(self, scale):
+        if scale <= 1.0:
+            return
+        for name in tkfont.names(self):
+            named = tkfont.nametofont(name)
+            size = named.cget("size")
+            if size >= 0:
+                continue
+            named.configure(size=-int(round(abs(size) * scale)))
+
+    def _read_display_scale_setting(self, settings):
+        for value in (os.environ.get("GRGA_DISPLAY_SCALE"), settings.get("display_scale")):
+            try:
+                scale = float(value)
+            except (TypeError, ValueError):
+                continue
+            if scale > 0:
+                self.display_scale_setting = settings.get("display_scale")
+                return scale
+        self.display_scale_setting = settings.get("display_scale")
+        return None
+
+    def _detect_display_scale(self):
+        try:
+            dpi = self.winfo_fpixels("1i")
+        except tk.TclError:
+            return 1.0
+        return dpi / DEFAULT_DPI
+
+    def _scale_size(self, value):
+        return max(1, int(round(value * self.display_scale)))
 
     def _check_environment_on_startup(self):
         result = check_environment()
@@ -136,6 +182,8 @@ class GrgaSearchApp(tk.Tk):
             "file_globs": self.file_globs_var.get(),
             "keyword": self.keyword_var.get(),
         }
+        if self.display_scale_setting not in (None, ""):
+            data["display_scale"] = self.display_scale_setting
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
             with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
@@ -778,7 +826,22 @@ class GrgaSearchApp(tk.Tk):
         return number
 
 
+def _enable_process_dpi_awareness():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
 def main():
+    _enable_process_dpi_awareness()
     app = GrgaSearchApp()
     app.mainloop()
 
