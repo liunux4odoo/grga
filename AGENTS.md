@@ -8,9 +8,9 @@
 
 ## Python 运行与验证
 
-- 本项目使用 Python 3；本机 `python` 指向 Python 2.7，运行、语法检查和测试时使用 `python3`。
-- 修改 Python 代码后，至少运行 `python3 -m py_compile grga_search.py grga_gui.py` 做语法检查。
-- 涉及搜索逻辑变更时，优先补充最小后端验证脚本，直接调用 `grga_search.search_directory` 验证核心行为。
+- 本项目使用 `/media/lqw/DATA/apps/miniforge3/envs/py312/bin/python3` 运行 Python 命令、语法检查、测试和安装库。
+- 修改 Python 代码后，至少运行 `/media/lqw/DATA/apps/miniforge3/envs/py312/bin/python3 -m py_compile src/grga/search.py src/grga/gui.py src/grga/cli.py src/grga/__init__.py src/grga/__main__.py` 做语法检查。
+- 涉及搜索逻辑变更时，优先补充最小后端验证脚本，直接调用 `grga.search.search_directory` 验证核心行为。
 
 ## 功能实现偏好
 

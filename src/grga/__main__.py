@@ -1,4 +1,4 @@
-from grga.gui import main
+from grga.cli import main
 
 
 if __name__ == "__main__":
