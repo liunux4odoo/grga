@@ -13,6 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Download bundled tools into src/grga/data/tools/<platform>.")
     parser.add_argument("names", nargs="*", help="Tool names. Defaults to all tools supported on this platform.")
     parser.add_argument("--base-url", help="Optional URL prefix for GitHub download mirrors.")
+    parser.add_argument("--force", "--update", action="store_true", help="Re-download tools even if they already exist.")
     parser.add_argument("--list", action="store_true", help="List supported tools for this platform.")
     return parser.parse_args()
 
@@ -25,7 +26,7 @@ def main():
             print(name)
         return 0
     try:
-        results = install_tools(names=args.names or None, force=True, base_url=args.base_url)
+        results = install_tools(names=args.names or None, force=args.force, base_url=args.base_url, progress=lambda message: print(message, flush=True))
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -91,7 +91,7 @@ def tool_specs():
             repo="phiresky/ripgrep-all",
             asset_patterns={
                 "linux-x86_64": r"ripgrep_all-.*-x86_64-unknown-linux-musl\.tar\.gz$",
-                "linux-aarch64": r"ripgrep_all-.*-aarch64-unknown-linux-musl\.tar\.gz$",
+                "linux-aarch64": r"ripgrep_all-.*-aarch64-unknown-linux-(?:musl|gnu)\.tar\.gz$",
                 "macos-x86_64": r"ripgrep_all-.*-x86_64-apple-darwin\.tar\.gz$",
                 "macos-aarch64": r"ripgrep_all-.*-aarch64-apple-darwin\.tar\.gz$",
                 "windows-x86_64": r"ripgrep_all-.*-x86_64-pc-windows-msvc\.zip$",
@@ -214,12 +214,16 @@ def tool_version(path):
     return first_line[0] if first_line else None
 
 
-def install_tools(names=None, force=False, base_url=None):
+def install_tools(names=None, force=False, base_url=None, progress=None):
     selected = normalize_tool_names(names)
+    if selected:
+        _emit_progress(progress, "tools: " + ", ".join(selected))
     manifest = load_manifest()
     installed = []
-    for name in selected:
-        installed.append(install_tool(name, force=force, base_url=base_url, manifest=manifest))
+    total = len(selected)
+    for index, name in enumerate(selected, 1):
+        _emit_progress(progress, f"[{index}/{total}] {name}: start")
+        installed.append(install_tool(name, force=force, base_url=base_url, manifest=manifest, progress=progress))
         save_manifest(manifest)
     return installed
 
@@ -249,24 +253,31 @@ def supported_tool_names():
     return [name for name, spec in tool_specs().items() if key in spec.asset_patterns]
 
 
-def install_tool(name, force=False, base_url=None, manifest=None):
+def install_tool(name, force=False, base_url=None, manifest=None, progress=None):
     name = normalize_tool_names([name])[0]
     specs = tool_specs()
     spec = specs[name]
     target_dir = current_tools_dir() / spec.name
-    if target_dir.exists() and not force:
-        return {"name": name, "status": "exists", "path": _installed_path_for_spec(spec)}
+    installed_path = _installed_path_for_spec(spec)
+    if installed_path and not force:
+        _emit_progress(progress, f"{name}: already installed")
+        return {"name": name, "status": "exists", "path": installed_path}
 
+    _emit_progress(progress, f"{name}: fetching release metadata from {spec.repo}")
     release = latest_release(spec.repo, base_url=base_url)
+    _emit_progress(progress, f"{name}: selecting asset for {platform_key()}")
     asset = select_asset(spec, release)
-    archive = download_asset(asset["browser_download_url"], asset["name"], base_url=base_url)
+    _emit_progress(progress, f"{name}: downloading {asset['name']}")
+    archive = download_asset(asset["browser_download_url"], asset["name"], base_url=base_url, progress=progress)
     with tempfile.TemporaryDirectory(prefix=f"grga-{name}-") as tmp:
         extracted = Path(tmp) / "extracted"
         extracted.mkdir(parents=True, exist_ok=True)
+        _emit_progress(progress, f"{name}: extracting {asset['name']}")
         unpack_archive(archive, extracted)
         _remove_download_archive(archive)
         replacement = Path(tmp) / spec.name
         replacement.mkdir(parents=True, exist_ok=True)
+        _emit_progress(progress, f"{name}: collecting executables")
         copied = copy_executables(spec, extracted, replacement)
         if not copied:
             raise RuntimeError(f"no executable matched for {name} in {asset['name']}")
@@ -283,11 +294,13 @@ def install_tool(name, force=False, base_url=None, manifest=None):
         "asset": asset["name"],
         "path": _manifest_path_for_spec(spec),
     }
-    return {"name": name, "status": "installed", "path": _installed_path_for_spec(spec), "version": release.get("tag_name")}
+    result = {"name": name, "status": "installed", "path": _installed_path_for_spec(spec), "version": release.get("tag_name")}
+    _emit_progress(progress, f"{name}: installed")
+    return result
 
 
-def update_tools(names=None, base_url=None):
-    return install_tools(names=names, force=True, base_url=base_url)
+def update_tools(names=None, base_url=None, progress=None):
+    return install_tools(names=names, force=True, base_url=base_url, progress=progress)
 
 
 def load_manifest():
@@ -333,23 +346,34 @@ def select_asset(spec, release):
     raise RuntimeError(f"no release asset matched {spec.name} for {key}: {names}")
 
 
-def download_asset(url, filename, base_url=None):
+def download_asset(url, filename, base_url=None, progress=None):
     target_dir = current_tools_dir() / ".downloads"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / filename
     download_url = _rewrite_url(url, base_url)
-    _download_file(download_url, target)
+    _download_file(download_url, target, progress=progress, label=filename)
     return target
 
 
-def _download_file(url, target):
+def _download_file(url, target, progress=None, label=None):
     last_error = None
+    label = label or target.name
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "grga-toolchain"})
             with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT) as response:
+                total = _content_length(response)
+                downloaded = 0
+                last_reported = -1
                 with open(target, "wb") as handle:
-                    shutil.copyfileobj(response, handle)
+                    while True:
+                        chunk = response.read(65536)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+                        last_reported = _report_download(progress, label, downloaded, total, last_reported)
+            _emit_progress(progress, f"{label}: download complete ({_format_size(downloaded)})")
             return
         except (OSError, urllib.error.URLError) as exc:
             last_error = exc
@@ -358,8 +382,53 @@ def _download_file(url, target):
             except OSError:
                 pass
             if attempt < DOWNLOAD_RETRIES:
+                _emit_progress(progress, f"{label}: retry {attempt}/{DOWNLOAD_RETRIES - 1} after error: {exc}")
                 time.sleep(attempt)
     raise RuntimeError(f"download failed: {url}: {last_error}")
+
+
+def _content_length(response):
+    try:
+        return int(response.headers.get("Content-Length", 0)) or None
+    except (TypeError, ValueError):
+        return None
+
+
+def _report_download(progress, label, downloaded, total, last_reported):
+    if progress is None:
+        return last_reported
+    if total:
+        percent = int(downloaded * 100 / total)
+        if percent >= last_reported + 5 or percent == 100:
+            _emit_progress(progress, f"{label}: {percent}% ({_format_size(downloaded)}/{_format_size(total)})")
+            return percent
+        return last_reported
+    step = downloaded // (1024 * 1024)
+    if step != last_reported:
+        _emit_progress(progress, f"{label}: {_format_size(downloaded)} downloaded")
+        return step
+    return last_reported
+
+
+def _format_size(num):
+    if not num:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB"]
+    value = float(num)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} {unit}"
+        value /= 1024
+    return f"{num} B"
+
+
+def _emit_progress(progress, message):
+    if progress is None:
+        return
+    try:
+        progress(message)
+    except Exception:
+        pass
 
 
 def unpack_archive(archive, target):

@@ -52,11 +52,11 @@ def search_command(
     keywords: List[str] = typer.Argument(..., help="Search keywords or query expression."),
     directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Directory to search."),
     pattern_mode: str = typer.Option("auto", "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
-    case_sensitive: bool = typer.Option(True, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
     max_count: Optional[int] = typer.Option(None, "--max-count", "-n", help="Maximum number of matches."),
     timeout: float = typer.Option(600.0, "--timeout", "-t", help="Search timeout in seconds."),
-    before_context: int = typer.Option(5, "--before-context", "-B", help="Lines of leading context."),
-    after_context: int = typer.Option(5, "--after-context", "-A", help="Lines of trailing context."),
+    before_context: int = typer.Option(3, "--before-context", "-B", help="Lines of leading context."),
+    after_context: int = typer.Option(3, "--after-context", "-A", help="Lines of trailing context."),
     multiline: bool = typer.Option(False, "--multiline", help="Enable multiline search."),
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Search relative file paths only."),
@@ -100,10 +100,10 @@ def search_command(
 def preview_command(
     keywords: List[str] = typer.Argument(..., help="Search keywords or query expression."),
     pattern_mode: str = typer.Option("auto", "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
-    case_sensitive: bool = typer.Option(True, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
     max_count: Optional[int] = typer.Option(None, "--max-count", "-n", help="Maximum number of matches."),
-    before_context: int = typer.Option(5, "--before-context", "-B", help="Lines of leading context."),
-    after_context: int = typer.Option(5, "--after-context", "-A", help="Lines of trailing context."),
+    before_context: int = typer.Option(3, "--before-context", "-B", help="Lines of leading context."),
+    after_context: int = typer.Option(3, "--after-context", "-A", help="Lines of trailing context."),
     multiline: bool = typer.Option(False, "--multiline", help="Enable multiline search."),
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Preview path-only search command."),
@@ -181,7 +181,7 @@ def tools_install_command(
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Optional URL prefix for GitHub download mirrors."),
 ):
     try:
-        result = install_tools(names=names, force=force, base_url=base_url)
+        result = install_tools(names=names, force=force, base_url=base_url, progress=lambda message: typer.echo(message))
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
@@ -195,7 +195,7 @@ def tools_update_command(
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Optional URL prefix for GitHub download mirrors."),
 ):
     try:
-        result = update_tools(names=names, base_url=base_url)
+        result = update_tools(names=names, base_url=base_url, progress=lambda message: typer.echo(message))
     except Exception as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)

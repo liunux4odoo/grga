@@ -65,8 +65,8 @@ class GrgaSearchApp(tk.Tk):
         self.max_count_var = tk.StringVar(value=settings.get("max_count", ""))
         self.timeout_var = tk.StringVar(value=settings.get("timeout", "600"))
         self.auto_delay_var = tk.StringVar(value=settings.get("auto_delay", "3"))
-        self.before_context_var = tk.StringVar(value=settings.get("before_context", "5"))
-        self.after_context_var = tk.StringVar(value=settings.get("after_context", "5"))
+        self.before_context_var = tk.StringVar(value=settings.get("before_context", "3"))
+        self.after_context_var = tk.StringVar(value=settings.get("after_context", "3"))
         self.multiline_var = tk.BooleanVar(value=settings.get("multiline", False))
         self.path_only_var = tk.BooleanVar(value=settings.get("path_only", False))
         self.file_globs_var = tk.StringVar(value=settings.get("file_globs", ""))
@@ -262,6 +262,8 @@ class GrgaSearchApp(tk.Tk):
         self.keyword_entry = ttk.Entry(search_bar, textvariable=self.keyword_var)
         self.keyword_entry.pack(side=tk.LEFT, padx=(4, 6), fill=tk.X, expand=True)
         self.keyword_entry.bind("<Return>", lambda event: self._start_search())
+        search_button = ttk.Button(search_bar, text="检索", command=self._start_search)
+        search_button.pack(side=tk.LEFT, padx=(0, 6))
         clear_button = ttk.Button(search_bar, text="排除", command=self._clear_search)
         clear_button.pack(side=tk.LEFT)
         copy_button = ttk.Button(search_bar, text="复制结果", command=self._copy_results_to_clipboard)
@@ -288,6 +290,7 @@ class GrgaSearchApp(tk.Tk):
             (path_only_check, "normal"),
             (file_globs_entry, "normal"),
             (self.keyword_entry, "normal"),
+            (search_button, "normal"),
             (clear_button, "normal"),
             (copy_button, "normal"),
         ]
@@ -314,11 +317,14 @@ class GrgaSearchApp(tk.Tk):
         content_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         self.content = tk.Text(
             content_frame,
-            wrap=tk.NONE,
+            wrap=tk.CHAR,
             state=tk.DISABLED,
             spacing1=self._scale_size(3),
+            spacing2=self._scale_size(3),
             spacing3=self._scale_size(3),
         )
+        self._content_font = tkfont.nametofont(self.content.cget("font"))
+        self._indent_tags = set()
         self.match_color_tags = []
         for index, color in enumerate(MATCH_COLORS):
             tag = f"match{index}"
@@ -328,9 +334,7 @@ class GrgaSearchApp(tk.Tk):
         self.content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         content_y = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=self.content.yview)
         content_y.pack(side=tk.RIGHT, fill=tk.Y)
-        content_x = ttk.Scrollbar(right, orient=tk.HORIZONTAL, command=self.content.xview)
-        content_x.pack(fill=tk.X)
-        self.content.configure(yscrollcommand=content_y.set, xscrollcommand=content_x.set)
+        self.content.configure(yscrollcommand=content_y.set)
 
         ttk.Label(root, textvariable=self.status_var).pack(fill=tk.X, pady=(6, 0))
 
@@ -442,8 +446,8 @@ class GrgaSearchApp(tk.Tk):
                 pattern_mode=self.mode_var.get(),
                 case_sensitive=self.case_var.get(),
                 max_count=max_count,
-                before_context=self._parse_int_or_default(self.before_context_var.get(), 5),
-                after_context=self._parse_int_or_default(self.after_context_var.get(), 5),
+                before_context=self._parse_int_or_default(self.before_context_var.get(), 3),
+                after_context=self._parse_int_or_default(self.after_context_var.get(), 3),
                 multiline=self.multiline_var.get(),
                 glob_patterns=self.file_globs_var.get(),
                 path_only=self.path_only_var.get(),
@@ -712,6 +716,7 @@ class GrgaSearchApp(tk.Tk):
         lines = []
         ranges = []
         separators = []
+        indents = []
         current_line = 1
         previous_line_number = None
         for match in self.matches_by_file.get(path, []):
@@ -723,6 +728,7 @@ class GrgaSearchApp(tk.Tk):
             text = match.get("text", "")
             prefix = f"{line_number}: "
             lines.append(prefix + text)
+            indents.append((current_line, prefix))
             for submatch in match.get("submatches", []):
                 start = submatch.get("start")
                 end = submatch.get("end")
@@ -730,7 +736,7 @@ class GrgaSearchApp(tk.Tk):
                     ranges.append((f"{current_line}.{len(prefix) + start}", f"{current_line}.{len(prefix) + end}", self._match_tag(submatch.get("match", ""))))
             current_line += 1
             previous_line_number = line_number
-        self._set_content("\n".join(lines), ranges, separators)
+        self._set_content("\n".join(lines), ranges, separators, indents)
 
     def _format_error_message(self, error):
         error = str(error).strip() or "unknown error"
@@ -760,18 +766,30 @@ class GrgaSearchApp(tk.Tk):
             return ["检查关键字中的正则表达式语法", "如果只是普通文本搜索，可以把模式切换为 auto 或 glob"]
         return ["检查搜索目录、关键字和参数是否正确", "可复制下方详细错误用于排查"]
 
-    def _set_content(self, text, ranges=None, separators=None):
+    def _set_content(self, text, ranges=None, separators=None, indents=None):
         self.content.configure(state=tk.NORMAL)
         self.content.delete("1.0", tk.END)
         for tag in self.match_color_tags:
             self.content.tag_remove(tag, "1.0", tk.END)
         self.content.tag_remove("separator", "1.0", tk.END)
+        for tag in self._indent_tags:
+            self.content.tag_remove(tag, "1.0", tk.END)
         self.content.insert("1.0", text)
+        for line, prefix in indents or []:
+            self.content.tag_add(self._indent_tag(prefix), f"{line}.0", f"{line}.end")
         for start, end, tag in ranges or []:
             self.content.tag_add(tag, start, end)
         for line in separators or []:
             self.content.tag_add("separator", f"{line}.0", f"{line}.end")
         self.content.configure(state=tk.DISABLED)
+
+    def _indent_tag(self, prefix):
+        width = self._content_font.measure(prefix)
+        tag = f"indent{width}"
+        if tag not in self._indent_tags:
+            self.content.tag_configure(tag, lmargin2=width)
+            self._indent_tags.add(tag)
+        return tag
 
     def _match_tag(self, text):
         key = text or "__match__"
@@ -806,7 +824,7 @@ class GrgaSearchApp(tk.Tk):
     def _parse_context_int(self, value, label):
         value = value.strip()
         if not value:
-            return 5
+            return 3
         try:
             number = int(value)
         except ValueError:

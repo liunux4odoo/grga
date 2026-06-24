@@ -53,11 +53,11 @@ def search_directory(
     directory,
     keywords,
     pattern_mode="auto",
-    case_sensitive=True,
+    case_sensitive=False,
     max_count=None,
     timeout=600,
-    before_context=5,
-    after_context=5,
+    before_context=3,
+    after_context=3,
     multiline=False,
     glob_patterns=None,
     glob_exclude=False,
@@ -184,10 +184,10 @@ def search_directory(
 def build_rga_command_preview(
     keywords,
     pattern_mode="auto",
-    case_sensitive=True,
+    case_sensitive=False,
     max_count=None,
-    before_context=5,
-    after_context=5,
+    before_context=3,
+    after_context=3,
     multiline=False,
     glob_patterns=None,
     glob_exclude=False,
@@ -261,7 +261,7 @@ def _is_ignorable_search_error(error):
     return "preprocessor command failed" in lower or "error: copying adapter output to stdout" in lower
 
 
-def _search_relative_paths(rg_path, target, query, case_sensitive=True, max_count=None, glob_patterns=None, timeout=600):
+def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_count=None, glob_patterns=None, timeout=600):
     flags = 0 if case_sensitive else re.IGNORECASE
     compiled_terms = [re.compile(term["pattern"], flags) for term in query["terms"]]
 
@@ -534,7 +534,7 @@ def _path_submatches(path, compiled_patterns):
     return submatches
 
 
-def _build_command(rga_path, query, case_sensitive=True, max_count=None, before_context=5, after_context=5, multiline=False, glob_patterns=None, glob_exclude=False):
+def _build_command(rga_path, query, case_sensitive=False, max_count=None, before_context=3, after_context=3, multiline=False, glob_patterns=None, glob_exclude=False):
     command = [rga_path, "--json", "--line-number", "--column", "--no-require-git"]
     if query["pcre2"]:
         command.append("-P")
