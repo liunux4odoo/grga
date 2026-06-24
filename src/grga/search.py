@@ -1,6 +1,5 @@
 import fnmatch
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -13,6 +12,10 @@ PatternMode = str
 
 def _find_rga_command():
     return find_tool("rga")
+
+
+def _find_rg_command():
+    return find_tool("rg")
 
 
 def check_environment():
@@ -60,15 +63,13 @@ def search_directory(
     glob_exclude=False,
     path_only=False,
 ):
-    rga_path = _find_rga_command()
-
     target = Path(directory).expanduser().resolve()
-    if not os.path.exists(str(target)):
+    if not target.exists():
         return json.dumps(
             {"ok": False, "error": f"directory does not exist: {target}", "matches": []},
             ensure_ascii=False,
         )
-    if not os.path.isdir(str(target)):
+    if not target.is_dir():
         return json.dumps(
             {"ok": False, "error": f"path is not a directory: {target}", "matches": []},
             ensure_ascii=False,
@@ -83,24 +84,34 @@ def search_directory(
         )
 
     if path_only:
-        matches = _search_relative_paths(
+        rg_path = _find_rg_command()
+        if rg_path is None:
+            return json.dumps(
+                {"ok": False, "error": "rg command not found", "matches": []},
+                ensure_ascii=False,
+            )
+        path_result = _search_relative_paths(
+            rg_path,
             target,
             query,
             case_sensitive=case_sensitive,
             max_count=max_count,
             glob_patterns=glob_patterns,
-            glob_exclude=glob_exclude,
+            timeout=timeout,
         )
+        if not path_result.get("ok"):
+            return json.dumps(path_result, ensure_ascii=False)
         return json.dumps(
             {
                 "ok": True,
                 "patterns": patterns,
                 "directory": str(target),
-                "matches": matches,
+                "matches": path_result.get("matches", []),
             },
             ensure_ascii=False,
         )
 
+    rga_path = _find_rga_command()
     if rga_path is None:
         return json.dumps(
             {"ok": False, "error": "rga command not found", "matches": []},
@@ -250,38 +261,55 @@ def _is_ignorable_search_error(error):
     return "preprocessor command failed" in lower or "error: copying adapter output to stdout" in lower
 
 
-def _search_relative_paths(target, query, case_sensitive=True, max_count=None, glob_patterns=None, glob_exclude=False):
-    matches = []
+def _search_relative_paths(rg_path, target, query, case_sensitive=True, max_count=None, glob_patterns=None, timeout=600):
     flags = 0 if case_sensitive else re.IGNORECASE
     compiled_terms = [re.compile(term["pattern"], flags) for term in query["terms"]]
-    normalized_globs = _normalize_glob_patterns(glob_patterns)
-    ignore_patterns = _load_gitignore_patterns(target)
-    for root, dirs, files in os.walk(target):
-        dirs.sort()
-        files.sort()
-        for name in files:
-            path = Path(root) / name
-            relative_path = path.relative_to(target).as_posix()
-            if not _path_allowed_by_gitignore(relative_path, ignore_patterns):
-                continue
-            if not _path_allowed_by_globs(relative_path, normalized_globs, glob_exclude):
-                continue
-            if not _evaluate_query_ast(query["ast"], relative_path, flags):
-                continue
-            submatches = _path_submatches(relative_path, compiled_terms)
-            matches.append(
-                {
-                    "path": relative_path,
-                    "line_number": 1,
-                    "absolute_offset": None,
-                    "text": relative_path,
-                    "is_context": False,
-                    "submatches": submatches,
-                }
-            )
-            if max_count is not None and len(matches) >= max_count:
-                return matches
-    return matches
+
+    command = [rg_path, "--files", "--no-require-git"]
+    for glob_pattern in _normalize_glob_patterns(glob_patterns):
+        command.extend(["--iglob", glob_pattern])
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "rg file listing timed out", "matches": []}
+
+    if completed.returncode not in (0, 1):
+        error = completed.stderr.strip() or "rg file listing failed"
+        return {"ok": False, "error": error, "matches": []}
+
+    matches = []
+    for line in completed.stdout.splitlines():
+        relative_path = line.replace("\\", "/")
+        if relative_path.startswith("./"):
+            relative_path = relative_path[2:]
+        if not relative_path:
+            continue
+        if not _evaluate_query_ast(query["ast"], relative_path, flags):
+            continue
+        submatches = _path_submatches(relative_path, compiled_terms)
+        matches.append(
+            {
+                "path": relative_path,
+                "line_number": 1,
+                "absolute_offset": None,
+                "text": relative_path,
+                "is_context": False,
+                "submatches": submatches,
+            }
+        )
+        if max_count is not None and len(matches) >= max_count:
+            break
+    return {"ok": True, "matches": matches}
 
 
 def _tokenize_query(text):
@@ -493,68 +521,6 @@ def _apply_query_submatches(matches, query, case_sensitive):
             continue
         match["submatches"] = _path_submatches(match.get("text", ""), compiled_terms)
     return matches
-
-
-def _path_allowed_by_globs(path, glob_patterns, glob_exclude=False):
-    if not glob_patterns:
-        return True
-    has_include = any(not pattern.startswith("!") for pattern in glob_patterns)
-    allowed = not has_include
-    for pattern in glob_patterns:
-        negated = pattern.startswith("!")
-        raw_pattern = pattern[1:] if negated else pattern
-        if _path_matches_iglob(path, raw_pattern):
-            allowed = not negated
-    return allowed
-
-
-def _path_matches_iglob(path, pattern):
-    path = path.casefold()
-    pattern = pattern.casefold()
-    return fnmatch.fnmatch(path, pattern) or (pattern.startswith("**/") and fnmatch.fnmatch(path, pattern[3:]))
-
-
-def _load_gitignore_patterns(target):
-    gitignore_path = Path(target) / ".gitignore"
-    try:
-        with open(gitignore_path, "r", encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-    except OSError:
-        return []
-    patterns = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        patterns.append(stripped)
-    return patterns
-
-
-def _path_allowed_by_gitignore(path, patterns):
-    if not patterns:
-        return True
-    allowed = True
-    for pattern in patterns:
-        negated = pattern.startswith("!")
-        raw_pattern = pattern[1:] if negated else pattern
-        if _path_matches_gitignore(path, raw_pattern):
-            allowed = negated
-    return allowed
-
-
-def _path_matches_gitignore(path, pattern):
-    pattern = pattern.lstrip("/")
-    if pattern.endswith("/"):
-        pattern = pattern + "**"
-    candidates = [pattern]
-    if not pattern.startswith("**/"):
-        candidates.append("**/" + pattern)
-    for candidate in candidates:
-        if fnmatch.fnmatch(path, candidate):
-            return True
-        if candidate.startswith("**/") and fnmatch.fnmatch(path, candidate[3:]):
-            return True
-    return False
 
 
 def _path_submatches(path, compiled_patterns):
