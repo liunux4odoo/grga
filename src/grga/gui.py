@@ -336,7 +336,9 @@ class GrgaSearchApp(tk.Tk):
         content_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.content.configure(yscrollcommand=content_y.set)
 
-        ttk.Label(root, textvariable=self.status_var).pack(fill=tk.X, pady=(6, 0))
+        self.status_label = ttk.Label(root, textvariable=self.status_var)
+        self.status_label.pack(fill=tk.X, pady=(6, 0))
+        self.status_label.bind("<Button-1>", self._show_warning_details)
 
     def _bind_search_traces(self):
         self.directory_var.trace_add("write", lambda *args: self._on_directory_changed())
@@ -667,6 +669,7 @@ class GrgaSearchApp(tk.Tk):
         if not result.get("ok"):
             title, details = self._format_error_message(result.get("error", "unknown error"))
             self.status_var.set(title)
+            self.status_label.configure(cursor="")
             self._set_content(details)
             return
 
@@ -680,11 +683,60 @@ class GrgaSearchApp(tk.Tk):
 
         count = sum(1 for item in result.get("matches", []) if not item.get("is_context"))
         file_count = len(self.matches_by_file)
-        warning_suffix = "，部分文件已跳过" if result.get("warning") else ""
+        has_warning = bool(result.get("warning") or result.get("skipped_files"))
+        warning_suffix = "，部分文件已跳过（点击查看）" if has_warning else ""
         self.status_var.set(f"Done: {count} matches in {file_count} files{warning_suffix}")
+        self.status_label.configure(cursor="hand2" if has_warning else "")
         if self.file_list.size() > 0:
             self.file_list.selection_set(0)
             self._show_file_by_index(0)
+
+    def _show_warning_details(self, event=None):
+        result = self.last_search_result or {}
+        warning = result.get("warning", "")
+        skipped = result.get("skipped_files") or []
+        if not warning and not skipped:
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("跳过文件详情")
+        dialog.transient(self)
+        dialog.geometry(f"{self._scale_size(760)}x{self._scale_size(520)}")
+
+        frame = ttk.Frame(dialog, padding=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        text = tk.Text(frame, wrap=tk.WORD, state=tk.NORMAL)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text.configure(yscrollcommand=scrollbar.set)
+
+        text.insert("1.0", self._format_warning_details(warning, skipped))
+        text.configure(state=tk.DISABLED)
+        text.focus_set()
+
+    def _format_warning_details(self, warning, skipped):
+        lines = []
+        if skipped:
+            lines.append(f"共有 {len(skipped)} 条跳过记录：")
+            lines.append("")
+            for index, item in enumerate(skipped, 1):
+                path = item.get("path") or "未知文件"
+                reason = item.get("reason") or "未知原因"
+                detail = item.get("detail") or ""
+                lines.append(f"{index}. {path}")
+                lines.append(f"   原因：{reason}")
+                if detail:
+                    lines.append(f"   详情：{detail}")
+                lines.append("")
+        else:
+            lines.append("部分文件已跳过，但无法解析出具体文件清单。")
+            lines.append("")
+        if warning:
+            lines.append("原始警告：")
+            lines.append(warning)
+        return "\n".join(lines).strip()
 
     def _show_selected_file(self, event=None):
         selection = self.file_list.curselection()

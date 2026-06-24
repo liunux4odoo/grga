@@ -157,6 +157,7 @@ def search_directory(
                     "patterns": patterns,
                     "directory": str(target),
                     "warning": error,
+                    "skipped_files": _parse_skipped_files(error),
                     "matches": matches,
                 },
                 ensure_ascii=False,
@@ -259,6 +260,58 @@ def _normalize_glob_patterns(glob_patterns):
 def _is_ignorable_search_error(error):
     lower = error.lower()
     return "preprocessor command failed" in lower or "error: copying adapter output to stdout" in lower
+
+
+def _parse_skipped_files(stderr):
+    stderr = (stderr or "").strip()
+    if not stderr:
+        return []
+
+    skipped = []
+    seen = set()
+    current_path = None
+    for raw_line in stderr.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        path = _extract_skipped_path(line)
+        if path:
+            current_path = path
+        reason = _classify_skip_reason(line)
+        if reason is None:
+            continue
+        key = (current_path, reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        skipped.append({"path": current_path, "reason": reason, "detail": line})
+
+    if not skipped:
+        skipped.append({"path": None, "reason": "部分文件预处理失败", "detail": stderr})
+    return skipped
+
+
+def _extract_skipped_path(line):
+    for marker in ("rga-preproc:", "for input:", "while running"):
+        index = line.find(marker)
+        if index != -1:
+            candidate = line[index + len(marker):].strip().strip("'\"")
+            candidate = candidate.split(": ", 1)[0].strip().strip("'\"")
+            if candidate and ("/" in candidate or candidate.startswith("./")):
+                return candidate
+    match = re.search(r"([\w./\-]+\.[A-Za-z0-9]+)", line)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _classify_skip_reason(line):
+    lower = line.lower()
+    if "preprocessor command failed" in lower:
+        return "预处理命令失败"
+    if "error: copying adapter output to stdout" in lower:
+        return "适配器输出复制失败"
+    return None
 
 
 def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_count=None, glob_patterns=None, timeout=600):

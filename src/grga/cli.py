@@ -30,6 +30,9 @@ def _print_result(result):
 
     if result.get("warning"):
         typer.echo(f"warning: {result['warning']}", err=True)
+    skipped = result.get("skipped_files") or []
+    if skipped:
+        typer.echo(f"skipped: {len(skipped)} records", err=True)
 
     matches = result.get("matches", [])
     for item in matches:
