@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
-from grga_search import build_rga_command_preview, check_environment, search_directory
+from grga.search import build_rga_command_preview, check_environment, search_directory
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "grga", "settings.json")
 DEFAULT_GITIGNORE_PATTERNS = [

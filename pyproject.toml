@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grga"
+version = "0.1.0"
+description = "A Tkinter GUI for ripgrep-all search"
+requires-python = ">=3.8"
+authors = [{ name = "grga maintainers" }]
+keywords = ["ripgrep", "rga", "search", "gui"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Desktop Environment",
+    "Topic :: Text Processing :: Indexing",
+]
+dependencies = []
+
+[project.scripts]
+grga-win = "grga.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

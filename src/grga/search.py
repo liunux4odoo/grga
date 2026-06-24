@@ -187,7 +187,7 @@ def build_rga_command_preview(
     if not query["patterns"]:
         return ""
     if path_only:
-        command = ["python3", "grga_search.py", "--path-only"]
+        command = ["python3", "-m", "grga.search", "--path-only"]
         if not case_sensitive:
             command.append("--ignore-case")
         if max_count is not None:
