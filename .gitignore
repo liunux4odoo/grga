@@ -1,3 +1,6 @@
+# Tool download caches
+src/grga/data/tools/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

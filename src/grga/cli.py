@@ -5,8 +5,11 @@ from typing import List, Optional
 import typer
 
 from grga.search import build_rga_command_preview, check_environment, search_directory
+from grga.toolchain import check_tools, current_tools_dir, install_tools, platform_key, supported_tool_names, tool_specs, tools_root, update_tools
 
 app = typer.Typer(no_args_is_help=True, help="Search files with ripgrep-all helpers.")
+tools_app = typer.Typer(no_args_is_help=True, help="Manage bundled command line tools.")
+app.add_typer(tools_app, name="tools")
 
 
 def _join_keywords(keywords):
@@ -137,6 +140,72 @@ def check_command(json_output: bool = typer.Option(False, "--json", help="Print 
     for error in result.get("errors", []):
         typer.echo(f"error: {error}", err=True)
     raise typer.Exit(0 if result.get("ok") else 1)
+
+
+@tools_app.command("check")
+def tools_check_command(json_output: bool = typer.Option(False, "--json", help="Print raw JSON result.")):
+    result = check_tools()
+    if json_output:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    typer.echo(f"platform: {result['platform']}")
+    typer.echo(f"tools_dir: {result['tools_dir']}")
+    for name, info in result["tools"].items():
+        typer.echo(f"{name}: {info['path'] or 'missing'} ({info['source']})")
+        if info.get("version"):
+            typer.echo(f"  {info['version']}")
+
+
+@tools_app.command("path")
+def tools_path_command():
+    typer.echo(str(current_tools_dir()))
+
+
+@tools_app.command("root")
+def tools_root_command():
+    typer.echo(str(tools_root()))
+
+
+@tools_app.command("list")
+def tools_list_command():
+    supported = set(supported_tool_names())
+    for name, spec in tool_specs().items():
+        status = "supported" if name in supported else "unsupported"
+        typer.echo(f"{name}: {spec.repo} ({status})")
+
+
+@tools_app.command("install")
+def tools_install_command(
+    names: Optional[List[str]] = typer.Argument(None, help="Tool names to install. Defaults to all supported tools."),
+    force: bool = typer.Option(False, "--force", help="Reinstall tools even if they already exist."),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="Optional URL prefix for GitHub download mirrors."),
+):
+    try:
+        result = install_tools(names=names, force=force, base_url=base_url)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    for item in result:
+        typer.echo(json.dumps(item, ensure_ascii=False))
+
+
+@tools_app.command("update")
+def tools_update_command(
+    names: Optional[List[str]] = typer.Argument(None, help="Tool names to update. Defaults to all supported tools."),
+    base_url: Optional[str] = typer.Option(None, "--base-url", help="Optional URL prefix for GitHub download mirrors."),
+):
+    try:
+        result = update_tools(names=names, base_url=base_url)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    for item in result:
+        typer.echo(json.dumps(item, ensure_ascii=False))
+
+
+@tools_app.command("platform")
+def tools_platform_command():
+    typer.echo(platform_key())
 
 
 @app.command("gui")

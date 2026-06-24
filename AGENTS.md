@@ -9,8 +9,17 @@
 ## Python 运行与验证
 
 - 本项目使用 `/media/lqw/DATA/apps/miniforge3/envs/py312/bin/python3` 运行 Python 命令、语法检查、测试和安装库。
-- 修改 Python 代码后，至少运行 `/media/lqw/DATA/apps/miniforge3/envs/py312/bin/python3 -m py_compile src/grga/search.py src/grga/gui.py src/grga/cli.py src/grga/__init__.py src/grga/__main__.py` 做语法检查。
+- 修改 Python 代码后，至少运行 `/media/lqw/DATA/apps/miniforge3/envs/py312/bin/python3 -m py_compile src/grga/search.py src/grga/gui.py src/grga/cli.py src/grga/toolchain.py src/grga/__init__.py src/grga/__main__.py` 做语法检查。
 - 涉及搜索逻辑变更时，优先补充最小后端验证脚本，直接调用 `grga.search.search_directory` 验证核心行为。
+
+## 内置命令行工具工作流
+
+- 项目倾向于把 `rg`、`rga`、`rga-preproc`、`pandoc`、`pdftotext`、`fzf` 等二进制文件直接集成到本地 wheel 包里，减少用户手动配置系统命令。
+- 构建 wheel 前，使用 `/media/lqw/DATA/apps/miniforge3/envs/py312/bin/python3 scripts/download-tools.py` 下载当前平台工具到 `src/grga/data/tools/<platform>/`。
+- 需要指定工具时，可运行 `/media/lqw/DATA/apps/miniforge3/envs/py312/bin/python3 scripts/download-tools.py rg rga pandoc fzf`。
+- 运行时工具查找顺序为：wheel 内置工具优先，找不到再回退系统 `PATH`。
+- 下载工具时可使用 `grga tools install` 或 `grga tools update`；网络受限时优先先在可联网环境填充 `src/grga/data/tools/`，再构建和分发 wheel。
+- 不要在代码中写死开发机上的绝对工具路径；仅测试命令可临时使用本机路径。
 
 ## 功能实现偏好
 

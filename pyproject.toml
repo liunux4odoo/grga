@@ -26,3 +26,6 @@ grga-gui = "grga.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+grga = ["data/tools/**/*"]

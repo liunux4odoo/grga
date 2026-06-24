@@ -3,23 +3,23 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
+
+from grga.toolchain import find_tool
 
 PatternMode = str
 
 
 def _find_rga_command():
-    rga_path = shutil.which("rga")
-    return rga_path
+    return find_tool("rga")
 
 
 def check_environment():
-    rg = shutil.which("rg")
-    rga = shutil.which("rga")
-    rga_preproc = shutil.which("rga-preproc")
-    pandoc = shutil.which("pandoc")
+    rg = find_tool("rg")
+    rga = find_tool("rga")
+    rga_preproc = find_tool("rga-preproc")
+    pandoc = find_tool("pandoc")
 
     errors = []
     warnings = []
