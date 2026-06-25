@@ -26,11 +26,12 @@ grga --help
 ## 命令概览
 
 ```text
-grga search   执行搜索
-grga preview  预览底层搜索命令
-grga check    检查搜索运行环境
-grga gui      启动图形界面
-grga tools    管理内置命令行工具
+grga search       执行搜索
+grga deep-search  使用 LLM 规划关键词并迭代深度检索
+grga preview      预览底层搜索命令
+grga check        检查搜索运行环境
+grga gui          启动图形界面
+grga tools        管理内置命令行工具
 ```
 
 ## 搜索文件内容
@@ -216,6 +217,87 @@ grga search keyword --json
   "matches": []
 }
 ```
+
+## 深度检索
+
+`deep-search` 使用 OpenAI 兼容客户端调用 LLM，把自然语言查询转换为 `grga` 查询表达式，检索后再从结果中抽取关键词并迭代扩展查询。
+
+```bash
+grga deep-search "查找支付超时相关错误" \
+  --directory /path/to/project \
+  --llm-base-url https://api.example.com/v1 \
+  --llm-api-key sk-xxx \
+  --llm-model model-name
+```
+
+LLM 参数也可以通过环境变量配置：
+
+```text
+GRGA_OPENAI_BASE_URL
+GRGA_OPENAI_API_KEY
+GRGA_OPENAI_MODEL
+```
+
+也可以写入用户配置文件，适合保存相对固定的深度检索参数：
+
+```text
+~/.config/grga/settings.json
+```
+
+示例：
+
+```json
+{
+  "deep_search": {
+    "llm_base_url": "https://api.example.com/v1",
+    "llm_api_key": "sk-xxx",
+    "llm_model_name": "model-name",
+    "pattern_mode": null,
+    "case_sensitive": null,
+    "max_count": null,
+    "timeout": null,
+    "before_context": null,
+    "after_context": null,
+    "multiline": null,
+    "path_only": null,
+    "max_related_keywords": 8,
+    "repeat_count": 1,
+    "max_extract_segments": 20,
+    "db_path": "~/.config/grga/deep_keywords.db",
+    "decay_factor": 0.9,
+    "min_keyword_count": 0.1,
+    "global_library": false
+  }
+}
+```
+
+其中与普通检索同名的参数默认为 `null`，表示沿用普通检索的配置；只有显式设置时才覆盖。
+
+命令行参数优先级最高；未传命令行参数时读取配置文件。对于 `pattern_mode`、`case_sensitive`、`max_count`、`timeout`、`before_context`、`after_context`、`multiline`、`path_only` 等与普通检索同名的参数，若 `deep_search` 配置中值为 `null`（即默认值），会自动回退到普通检索的对应设置值；如果普通检索也未设置，最终使用内建默认值。读取配置文件时会检查 `deep_search` 中的固定 key，缺失项会自动补充为默认值并保存回 `settings.json`。`llm_base_url`、`llm_api_key`、`llm_model_name` 如果仍为空，会继续回退到上面的环境变量。
+
+常用参数：
+
+```text
+--max-related-keywords 8   每轮最多选择的相关关键词数量
+--repeat-count 1           追加迭代检索次数
+--max-extract-segments 20  每轮发送给 LLM 抽取关键词的结果段落数量
+--db-path PATH             SQLite 关键字库路径
+--global-library           查询规划时使用全库关键字
+--directory-library        查询规划时只使用当前目录关键字（默认）
+--decay-factor 0.9         每次运行前对当前目录关键字频率做衰减
+--min-keyword-count 0.1    衰减后低于该值的记录会被删除
+--json                     输出机器可读 JSON
+```
+
+关键字库默认保存在：
+
+```text
+~/.config/grga/deep_keywords.db
+```
+
+关键字库使用 SQLite 存储，包含用户查询共现词、文档抽取共现词、单词频率和关键词来源文件/行号。默认只读取当前搜索目录对应的历史关键字；使用 `--global-library` 可让 LLM 查询规划参考全库历史。循环过程中如果无法抽取候选关键词，或 LLM 选出的相关关键词没有新的 seed，会提前停止。
+
+深度检索的普通搜索参数与 `search` 基本一致，包括 `--mode`、`--ignore-case`、`--max-count`、`--timeout`、`--before-context`、`--after-context`、`--multiline`、`--iglob` 和 `--path-only`。
 
 ## 预览底层命令
 

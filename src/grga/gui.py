@@ -9,6 +9,7 @@ from datetime import datetime
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from grga.search import build_rga_command_preview, check_environment, search_directory
+from grga.deep_search import load_deep_search_config
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "grga", "settings.json")
 DEFAULT_DPI = 96
@@ -80,6 +81,7 @@ class GrgaSearchApp(tk.Tk):
         self._update_command_preview()
         self.keyword_entry.focus_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._ensure_deep_search_config()
         self.after(50, self._ensure_current_directory_gitignore)
         self.after(100, self._check_environment_on_startup)
 
@@ -92,6 +94,12 @@ class GrgaSearchApp(tk.Tk):
         if not isinstance(data, dict):
             return {}
         return data
+
+    def _ensure_deep_search_config(self):
+        try:
+            load_deep_search_config(CONFIG_PATH)
+        except Exception:
+            pass
 
     def _configure_display_scale(self, settings):
         scale = self._read_display_scale_setting(settings)
@@ -168,7 +176,8 @@ class GrgaSearchApp(tk.Tk):
         return gitignore_path
 
     def _save_settings(self):
-        data = {
+        data = self._load_settings()
+        data.update({
             "directory": self.directory_var.get(),
             "mode": self.mode_var.get(),
             "case_sensitive": self.case_var.get(),
@@ -181,7 +190,7 @@ class GrgaSearchApp(tk.Tk):
             "path_only": self.path_only_var.get(),
             "file_globs": self.file_globs_var.get(),
             "keyword": self.keyword_var.get(),
-        }
+        })
         if self.display_scale_setting not in (None, ""):
             data["display_scale"] = self.display_scale_setting
         try:

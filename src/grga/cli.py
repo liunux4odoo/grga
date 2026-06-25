@@ -4,6 +4,7 @@ from typing import List, Optional
 
 import typer
 
+from grga.deep_search import deep_search_directory, resolve_deep_search_options
 from grga.search import build_rga_command_preview, check_environment, search_directory
 from grga.toolchain import check_tools, current_tools_dir, install_tools, platform_key, supported_tool_names, tool_specs, tools_root, update_tools
 
@@ -97,6 +98,90 @@ def search_command(
         raise typer.Exit(0 if result.get("ok") else 1)
 
     _print_result(result)
+
+
+@app.command("deep-search")
+def deep_search_command(
+    keywords: List[str] = typer.Argument(..., help="Natural language query for LLM-assisted deep search."),
+    directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Directory to search."),
+    pattern_mode: Optional[str] = typer.Option(None, "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
+    case_sensitive: Optional[bool] = typer.Option(None, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
+    max_count: Optional[int] = typer.Option(None, "--max-count", "-n", help="Maximum matches per search iteration."),
+    timeout: Optional[float] = typer.Option(None, "--timeout", "-t", help="Search timeout in seconds."),
+    before_context: Optional[int] = typer.Option(None, "--before-context", "-B", help="Lines of leading context."),
+    after_context: Optional[int] = typer.Option(None, "--after-context", "-A", help="Lines of trailing context."),
+    multiline: Optional[bool] = typer.Option(None, "--multiline/--no-multiline", help="Enable multiline search."),
+    file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
+    path_only: Optional[bool] = typer.Option(None, "--path-only/--content-search", help="Search relative file paths only."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="OpenAI-compatible API base URL."),
+    llm_api_key: Optional[str] = typer.Option(None, "--llm-api-key", help="OpenAI-compatible API key."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="OpenAI-compatible model name."),
+    max_related_keywords: Optional[int] = typer.Option(None, "--max-related-keywords", help="Maximum related keywords selected for follow-up iterations."),
+    repeat_count: Optional[int] = typer.Option(None, "--repeat-count", help="Number of follow-up search iterations."),
+    max_extract_segments: Optional[int] = typer.Option(None, "--max-extract-segments", help="Maximum matched segments sent to LLM per iteration."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", help="SQLite keyword library path."),
+    decay_factor: Optional[float] = typer.Option(None, "--decay-factor", help="Decay multiplier applied to keyword counts before each run (0-1)."),
+    min_keyword_count: Optional[float] = typer.Option(None, "--min-keyword-count", help="Drop keyword records whose count falls below this threshold."),
+    global_library: Optional[bool] = typer.Option(None, "--global-library/--directory-library", help="Use the whole keyword library or only the current directory scope."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+):
+    query = _join_keywords(keywords)
+    if not query:
+        typer.echo("query cannot be empty", err=True)
+        raise typer.Exit(2)
+
+    options = resolve_deep_search_options(
+        {
+            "llm_base_url": llm_base_url,
+            "llm_api_key": llm_api_key,
+            "llm_model_name": llm_model,
+            "pattern_mode": pattern_mode,
+            "case_sensitive": case_sensitive,
+            "max_count": max_count,
+            "timeout": timeout,
+            "before_context": before_context,
+            "after_context": after_context,
+            "multiline": multiline,
+            "path_only": path_only,
+            "max_related_keywords": max_related_keywords,
+            "repeat_count": repeat_count,
+            "max_extract_segments": max_extract_segments,
+            "db_path": str(db_path) if db_path else None,
+            "decay_factor": decay_factor,
+            "min_keyword_count": min_keyword_count,
+            "global_library": global_library,
+        }
+    )
+
+    raw = deep_search_directory(
+        str(directory),
+        query,
+        llm_base_url=options["llm_base_url"],
+        llm_api_key=options["llm_api_key"],
+        llm_model_name=options["llm_model_name"],
+        pattern_mode=_validate_pattern_mode(options["pattern_mode"]),
+        case_sensitive=options["case_sensitive"],
+        max_count=options["max_count"],
+        timeout=options["timeout"],
+        before_context=options["before_context"],
+        after_context=options["after_context"],
+        multiline=options["multiline"],
+        glob_patterns=file_globs,
+        path_only=options["path_only"],
+        max_related_keywords=options["max_related_keywords"],
+        repeat_count=options["repeat_count"],
+        max_extract_segments=options["max_extract_segments"],
+        db_path=options["db_path"],
+        decay_factor=options["decay_factor"],
+        min_keyword_count=options["min_keyword_count"],
+        global_library=options["global_library"],
+    )
+    result = json.loads(raw)
+    if json_output:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        raise typer.Exit(0 if result.get("ok") else 1)
+    _print_result(result)
+
 
 
 @app.command("preview")

@@ -18,7 +18,7 @@ classifiers = [
     "Topic :: Desktop Environment",
     "Topic :: Text Processing :: Indexing",
 ]
-dependencies = ["typer>=0.9"]
+dependencies = ["typer>=0.9", "openai>=1.0"]
 
 [project.optional-dependencies]
 standalone = ["pyinstaller>=6.0"]
