@@ -1,5 +1,6 @@
 import itertools
 import json
+import logging
 import os
 import re
 import shlex
@@ -12,6 +13,13 @@ from pathlib import Path
 from typing import Iterable
 
 from grga.search import _normalize_glob_patterns
+
+_logger = logging.getLogger("grga.deep_search")
+
+
+def _log_debug(debug_enabled, message):
+    if debug_enabled:
+        _logger.debug(message)
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "grga"
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
@@ -320,6 +328,7 @@ def deep_search_directory(
     min_keyword_count=DEFAULT_MIN_COUNT,
     global_library=False,
     grga_command=None,
+    debug=False,
 ):
     try:
         result = _deep_search_directory(
@@ -345,6 +354,7 @@ def deep_search_directory(
             min_keyword_count=min_keyword_count,
             global_library=global_library,
             grga_command=grga_command,
+            debug=debug,
         )
     except Exception as exc:
         result = {"ok": False, "error": str(exc), "matches": []}
@@ -374,7 +384,9 @@ def _deep_search_directory(
     min_keyword_count=DEFAULT_MIN_COUNT,
     global_library=False,
     grga_command=None,
+    debug=False,
 ):
+    _log_debug(debug, f"深度搜索开始: query={query}, directory={directory}")
     if not query:
         return {"ok": False, "error": "query cannot be empty", "matches": []}
     if max_related_keywords <= 0:
@@ -387,19 +399,27 @@ def _deep_search_directory(
     target = Path(directory).expanduser().resolve()
     directory_key = str(target)
     database_file = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    _log_debug(debug, f"数据库路径: {database_file}")
     client, model_name = _make_openai_client(llm_base_url, llm_api_key, llm_model_name)
+    _log_debug(debug, f"使用模型: {model_name}")
 
     library = KeywordLibrary(database_file, decay_factor=decay_factor, min_count=min_keyword_count)
     try:
         library.decay(directory_key)
+        _log_debug(debug, "关键词库衰减完成")
+
+        history = library.history(directory_key, [], limit=30, global_library=global_library)
+        _log_debug(debug, f"关键词历史记录数: {len(history)}")
 
         initial_plan = _build_query_plan(
             client,
             model_name,
             query,
-            library.history(directory_key, [], limit=30, global_library=global_library),
+            history,
             max_related_keywords,
+            debug=debug,
         )
+        _log_debug(debug, f"初始查询计划: keywords={initial_plan.get('keywords', [])}, expression={initial_plan.get('query_expression')}")
         current_expression = _clean_expression(initial_plan.get("query_expression")) or _terms_to_or_expression(initial_plan.get("keywords", [])) or query
         current_keywords = _normalize_keywords(initial_plan.get("keywords", []))
         library.add_keywords("user", directory_key, current_keywords)
@@ -413,8 +433,11 @@ def _deep_search_directory(
 
         while True:
             normalized_expression = _normalize_expression_key(current_expression)
+            _log_debug(debug, f"--- 迭代 {iteration} ---")
+            _log_debug(debug, f"当前查询表达式: {normalized_expression}")
             if normalized_expression in seen_expressions:
                 stop_reason = "duplicate_expression"
+                _log_debug(debug, f"停止: 表达式重复")
                 break
             seen_expressions.add(normalized_expression)
 
@@ -433,6 +456,7 @@ def _deep_search_directory(
                 grga_command=grga_command,
             )
             if not search_result.get("ok"):
+                _log_debug(debug, f"搜索失败: {search_result.get('error')}")
                 if iteration == 0:
                     return search_result
                 iterations.append({"index": iteration, "query_expression": normalized_expression, "error": search_result.get("error")})
@@ -440,11 +464,15 @@ def _deep_search_directory(
                 break
 
             matches = search_result.get("matches", [])
+            match_count = sum(1 for item in matches if not item.get("is_context"))
+            _log_debug(debug, f"搜索完成: {match_count} 个匹配（不含上下文）, 总数 {len(matches)}")
             all_matches.extend(matches)
             segments = _segments_from_matches(matches, max_extract_segments)
+            _log_debug(debug, f"提取的段落数: {len(segments)}")
             candidate_keywords = []
             if segments:
-                for item in _extract_segment_keywords(client, model_name, query, segments):
+                extracted = _extract_segment_keywords(client, model_name, query, segments, debug=debug)
+                for item in extracted:
                     keywords = item.get("keywords", [])
                     if not keywords:
                         continue
@@ -452,21 +480,24 @@ def _deep_search_directory(
                     library.add_sources(directory_key, keywords, item.get("path", ""), item.get("line_number"))
                     candidate_keywords.extend(keywords)
                 library.commit()
+                _log_debug(debug, f"从段落提取的关键词数: {len(candidate_keywords)}")
 
             iteration_record = {
                 "index": iteration,
                 "query_expression": normalized_expression,
-                "match_count": sum(1 for item in matches if not item.get("is_context")),
+                "match_count": match_count,
                 "extracted_keywords": _top_keywords(candidate_keywords, max_related_keywords),
             }
 
             if iteration >= repeat_count:
                 iterations.append(iteration_record)
                 stop_reason = "max_iterations"
+                _log_debug(debug, f"停止: 达到最大迭代数 ({repeat_count})")
                 break
             if not candidate_keywords:
                 iterations.append(iteration_record)
                 stop_reason = "no_candidates"
+                _log_debug(debug, "停止: 没有候选关键词")
                 break
 
             next_plan = _select_related_plan(
@@ -476,26 +507,31 @@ def _deep_search_directory(
                 candidate_keywords,
                 library.history(directory_key, candidate_keywords, limit=30, global_library=global_library),
                 max_related_keywords,
+                debug=debug,
             )
             next_keywords = _normalize_keywords(next_plan.get("keywords", []))
             new_seeds = [item for item in next_keywords if item.casefold() not in used_keywords]
             iteration_record["next_query_expression"] = next_plan.get("query_expression")
             iteration_record["new_seeds"] = new_seeds
             iterations.append(iteration_record)
+            _log_debug(debug, f"下一轮关键词: {next_keywords}, 新种子: {new_seeds}")
 
             if not new_seeds:
                 stop_reason = "no_new_seeds"
+                _log_debug(debug, "停止: 没有新种子关键词")
                 break
 
             used_keywords.update(item.casefold() for item in new_seeds)
             next_expression = _clean_expression(next_plan.get("query_expression")) or _terms_to_or_expression(new_seeds)
             if not next_expression:
                 stop_reason = "no_new_seeds"
+                _log_debug(debug, "停止: 下一轮表达式为空")
                 break
             current_expression = next_expression
             iteration += 1
 
         merged_matches = _merge_and_sort_matches(all_matches)
+        _log_debug(debug, f"深度搜索完成: 共 {len(merged_matches)} 个去重结果, 停止原因: {stop_reason}")
         return {
             "ok": True,
             "query": query,
@@ -537,7 +573,7 @@ def _first_env(names):
     return None
 
 
-def _build_query_plan(client, model_name, query, history, max_keywords):
+def _build_query_plan(client, model_name, query, history, max_keywords, debug=False):
     payload = _chat_json(
         client,
         model_name,
@@ -558,11 +594,12 @@ def _build_query_plan(client, model_name, query, history, max_keywords):
                 ),
             },
         ],
+        debug=debug,
     )
     return _normalize_plan(payload)
 
 
-def _extract_segment_keywords(client, model_name, query, segments, max_keywords_per_segment=12):
+def _extract_segment_keywords(client, model_name, query, segments, max_keywords_per_segment=12, debug=False):
     payload = _chat_json(
         client,
         model_name,
@@ -581,6 +618,7 @@ def _extract_segment_keywords(client, model_name, query, segments, max_keywords_
                 ),
             },
         ],
+        debug=debug,
     )
     items = payload.get("segments", []) if isinstance(payload, dict) else []
     segment_index = {segment["id"]: segment for segment in segments}
@@ -604,7 +642,7 @@ def _extract_segment_keywords(client, model_name, query, segments, max_keywords_
     return normalized
 
 
-def _select_related_plan(client, model_name, query, candidates, history, max_keywords):
+def _select_related_plan(client, model_name, query, candidates, history, max_keywords, debug=False):
     payload = _chat_json(
         client,
         model_name,
@@ -626,6 +664,7 @@ def _select_related_plan(client, model_name, query, candidates, history, max_key
                 ),
             },
         ],
+        debug=debug,
     )
     return _normalize_plan(payload)
 
@@ -638,7 +677,11 @@ def _extractor_system_prompt():
     return "你是文档关键词抽取器。只输出 JSON 对象。为每个段落提取有检索价值的实体、名词、动词或短语，去掉泛词、虚词和重复词。"
 
 
-def _chat_json(client, model_name, messages):
+def _chat_json(client, model_name, messages, debug=False):
+    if debug:
+        _log_debug(True, f"发送给 LLM ({model_name}):")
+        for msg in messages:
+            _log_debug(True, f"  [{msg['role']}] {str(msg['content'])[:500]}")
     try:
         response = client.chat.completions.create(model=model_name, messages=messages, temperature=0.1, response_format={"type": "json_object"})
     except Exception as exc:
@@ -646,6 +689,8 @@ def _chat_json(client, model_name, messages):
             raise
         response = client.chat.completions.create(model=model_name, messages=messages, temperature=0.1)
     content = response.choices[0].message.content or "{}"
+    if debug:
+        _log_debug(True, f"LLM 返回: {content[:1000]}")
     return _loads_json_object(content)
 
 

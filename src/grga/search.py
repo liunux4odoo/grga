@@ -1,11 +1,52 @@
 import fnmatch
 import json
+import logging
 import re
 import shlex
 import subprocess
 from pathlib import Path
 
 from grga.toolchain import add_tools_to_path, find_tool
+
+_logger = logging.getLogger("grga.search")
+
+
+def _log_debug(debug_enabled, message):
+    if debug_enabled:
+        _logger.debug(message)
+
+
+def configure_logging(debug=False, log_dir=None):
+    """Configure logging for grga. When debug is enabled, logs go to both console and file."""
+    if not debug:
+        return
+    log_dir = Path(log_dir) if log_dir else Path.home() / ".config" / "grga"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "debug.log"
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # Suppress verbose logs from low-level libraries
+    for noisy_logger in ["httpcore", "httpx", "openai", "urllib3", "requests"]:
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+    formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(formatter)
+    root.addHandler(console_handler)
+
+    # File handler
+    file_handler = logging.FileHandler(str(log_file), mode="a", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    _logger.debug(f"Debug logging enabled, output: {log_file}")
+
 
 PatternMode = str
 
@@ -65,30 +106,40 @@ def search_directory(
     glob_patterns=None,
     glob_exclude=False,
     path_only=False,
+    debug=False,
 ):
     target = Path(directory).expanduser().resolve()
+    _log_debug(debug, f"搜索目录: {target}")
     if not target.exists():
+        _log_debug(debug, f"错误: 目录不存在: {target}")
         return json.dumps(
             {"ok": False, "error": f"directory does not exist: {target}", "matches": []},
             ensure_ascii=False,
         )
     if not target.is_dir():
+        _log_debug(debug, f"错误: 路径不是目录: {target}")
         return json.dumps(
             {"ok": False, "error": f"path is not a directory: {target}", "matches": []},
             ensure_ascii=False,
         )
 
-    query = _compile_search_query(keywords, pattern_mode)
+    query = _compile_search_query(keywords, pattern_mode, debug=debug)
     patterns = query["patterns"]
     if not patterns:
+        _log_debug(debug, "错误: 关键词为空")
         return json.dumps(
             {"ok": False, "error": "keywords cannot be empty", "matches": []},
             ensure_ascii=False,
         )
+    _log_debug(debug, f"编译后的查询模式: {patterns}")
+    _log_debug(debug, f"解析后的查询词: {query.get('terms', [])}")
 
     if path_only:
+        _log_debug(debug, "模式: 仅搜索路径")
         rg_path = _find_rg_command()
+        _log_debug(debug, f"rg 路径: {rg_path}")
         if rg_path is None:
+            _log_debug(debug, "错误: 未找到 rg 命令")
             return json.dumps(
                 {"ok": False, "error": "rg command not found", "matches": []},
                 ensure_ascii=False,
@@ -101,9 +152,12 @@ def search_directory(
             max_count=max_count,
             glob_patterns=glob_patterns,
             timeout=timeout,
+            debug=debug,
         )
         if not path_result.get("ok"):
+            _log_debug(debug, f"路径搜索失败: {path_result.get('error')}")
             return json.dumps(path_result, ensure_ascii=False)
+        _log_debug(debug, f"路径搜索完成，找到 {len(path_result.get('matches', []))} 个匹配")
         return json.dumps(
             {
                 "ok": True,
@@ -114,8 +168,11 @@ def search_directory(
             ensure_ascii=False,
         )
 
+    _log_debug(debug, "模式: 内容搜索")
     rga_path = _find_rga_command()
+    _log_debug(debug, f"rga 路径: {rga_path}")
     if rga_path is None:
+        _log_debug(debug, "错误: 未找到 rga 命令")
         return json.dumps(
             {"ok": False, "error": "rga command not found", "matches": []},
             ensure_ascii=False,
@@ -132,6 +189,7 @@ def search_directory(
         glob_patterns=glob_patterns,
         glob_exclude=glob_exclude,
     )
+    _log_debug(debug, f"执行命令: {' '.join(command)}")
 
     try:
         completed = subprocess.run(
@@ -145,26 +203,38 @@ def search_directory(
             check=False,
         )
     except subprocess.TimeoutExpired:
+        _log_debug(debug, "错误: 搜索超时")
         return json.dumps(
             {"ok": False, "error": "rga search timed out", "matches": []},
             ensure_ascii=False,
         )
 
+    _log_debug(debug, f"命令返回码: {completed.returncode}")
+    _log_debug(debug, f"stdout 长度: {len(completed.stdout)}")
+    if completed.stderr.strip():
+        _log_debug(debug, f"stderr: {completed.stderr.strip()[:500]}")
+
     matches = _apply_query_submatches(_parse_rga_json(completed.stdout), query, case_sensitive)
+    _log_debug(debug, f"解析后的匹配数量: {len(matches)}")
+
     if completed.returncode not in (0, 1):
         error = completed.stderr.strip() or "rga search failed"
         if _is_ignorable_search_error(error):
+            _log_debug(debug, f"可忽略的错误: {error[:200]}")
+            skipped = _parse_skipped_files(error)
+            _log_debug(debug, f"跳过文件数: {len(skipped)}")
             return json.dumps(
                 {
                     "ok": True,
                     "patterns": patterns,
                     "directory": str(target),
                     "warning": error,
-                    "skipped_files": _parse_skipped_files(error),
+                    "skipped_files": skipped,
                     "matches": matches,
                 },
                 ensure_ascii=False,
             )
+        _log_debug(debug, f"搜索失败: {error}")
         return json.dumps(
             {
                 "ok": False,
@@ -174,6 +244,7 @@ def search_directory(
             ensure_ascii=False,
         )
 
+    _log_debug(debug, f"搜索成功，共 {len(matches)} 个结果（含上下文）")
     return json.dumps(
         {
             "ok": True,
@@ -236,17 +307,25 @@ def _normalize_query_text(keywords):
     return " || ".join(item.strip() for item in keywords if isinstance(item, str) and item.strip())
 
 
-def _compile_search_query(keywords, pattern_mode):
+def _compile_search_query(keywords, pattern_mode, debug=False):
     text = _normalize_query_text(keywords)
+    _log_debug(debug, f"原始查询文本: {repr(text)}")
+    _log_debug(debug, f"匹配模式: {pattern_mode}")
     if not text:
         return {"ast": None, "patterns": [], "pcre2": False, "terms": []}
-    ast = _parse_query(_tokenize_query(text))
+    tokens = _tokenize_query(text)
+    _log_debug(debug, f"分词结果: {tokens}")
+    ast = _parse_query(tokens)
+    _log_debug(debug, f"AST 结构: {ast}")
     ast = _compile_query_terms(ast, pattern_mode)
     if ast is None:
         return {"ast": None, "patterns": [], "pcre2": False, "terms": []}
     has_and = _ast_has_kind(ast, "and")
+    _log_debug(debug, f"包含 AND 逻辑: {has_and}")
     pattern = _compile_query_pattern(ast, has_and)
-    return {"ast": ast, "patterns": [pattern], "pcre2": has_and, "terms": _query_terms(ast)}
+    terms = _query_terms(ast)
+    _log_debug(debug, f"查询词项: {terms}")
+    return {"ast": ast, "patterns": [pattern], "pcre2": has_and, "terms": terms}
 
 
 def _normalize_glob_patterns(glob_patterns):
@@ -317,13 +396,15 @@ def _classify_skip_reason(line):
     return None
 
 
-def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_count=None, glob_patterns=None, timeout=600):
+def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_count=None, glob_patterns=None, timeout=600, debug=False):
     flags = 0 if case_sensitive else re.IGNORECASE
     compiled_terms = [re.compile(term["pattern"], flags) for term in query["terms"]]
+    _log_debug(debug, f"编译的正则词项: {[term['pattern'] for term in query['terms']]}")
 
     command = [rg_path, "--files", "--no-require-git"]
     for glob_pattern in _normalize_glob_patterns(glob_patterns):
         command.extend(["--iglob", glob_pattern])
+    _log_debug(debug, f"路径搜索命令: {' '.join(command)}")
 
     try:
         completed = subprocess.run(
@@ -337,13 +418,20 @@ def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_cou
             check=False,
         )
     except subprocess.TimeoutExpired:
+        _log_debug(debug, "错误: rg 文件列表超时")
         return {"ok": False, "error": "rg file listing timed out", "matches": []}
 
+    _log_debug(debug, f"rg 返回码: {completed.returncode}")
     if completed.returncode not in (0, 1):
         error = completed.stderr.strip() or "rg file listing failed"
+        _log_debug(debug, f"路径搜索失败: {error}")
         return {"ok": False, "error": error, "matches": []}
 
+    file_count = len(completed.stdout.splitlines())
+    _log_debug(debug, f"找到文件总数: {file_count}")
+
     matches = []
+    skipped_count = 0
     for line in completed.stdout.splitlines():
         relative_path = line.replace("\\", "/")
         if relative_path.startswith("./"):
@@ -351,6 +439,7 @@ def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_cou
         if not relative_path:
             continue
         if not _evaluate_query_ast(query["ast"], relative_path, flags):
+            skipped_count += 1
             continue
         submatches = _path_submatches(relative_path, compiled_terms)
         matches.append(
@@ -365,6 +454,8 @@ def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_cou
         )
         if max_count is not None and len(matches) >= max_count:
             break
+
+    _log_debug(debug, f"路径过滤后匹配: {len(matches)} 个，跳过: {skipped_count} 个")
     return {"ok": True, "matches": matches}
 
 

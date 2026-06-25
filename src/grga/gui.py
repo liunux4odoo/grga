@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
-from grga.search import build_rga_command_preview, check_environment, search_directory
+from grga.search import build_rga_command_preview, check_environment, configure_logging, search_directory
 from grga.deep_search import load_deep_search_config
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "grga", "settings.json")
@@ -72,6 +72,7 @@ class GrgaSearchApp(tk.Tk):
         self.path_only_var = tk.BooleanVar(value=settings.get("path_only", False))
         self.file_globs_var = tk.StringVar(value=settings.get("file_globs", ""))
         self.keyword_var = tk.StringVar(value=settings.get("keyword", ""))
+        self.debug_var = tk.BooleanVar(value=settings.get("debug", False))
         self.status_var = tk.StringVar(value="Ready")
 
         self.suspend_search_trace = False
@@ -190,6 +191,7 @@ class GrgaSearchApp(tk.Tk):
             "path_only": self.path_only_var.get(),
             "file_globs": self.file_globs_var.get(),
             "keyword": self.keyword_var.get(),
+            "debug": self.debug_var.get(),
         })
         if self.display_scale_setting not in (None, ""):
             data["display_scale"] = self.display_scale_setting
@@ -256,6 +258,9 @@ class GrgaSearchApp(tk.Tk):
         path_only_check = ttk.Checkbutton(params, text="仅匹配路径", variable=self.path_only_var)
         path_only_check.pack(side=tk.LEFT, padx=(10, 0))
 
+        debug_check = ttk.Checkbutton(params, text="调试输出", variable=self.debug_var)
+        debug_check.pack(side=tk.LEFT)
+
         file_globs_bar = ttk.Frame(root)
         file_globs_bar.pack(fill=tk.X, pady=(8, 0))
 
@@ -297,6 +302,7 @@ class GrgaSearchApp(tk.Tk):
             (after_entry, "normal"),
             (multiline_check, "normal"),
             (path_only_check, "normal"),
+            (debug_check, "normal"),
             (file_globs_entry, "normal"),
             (self.keyword_entry, "normal"),
             (search_button, "normal"),
@@ -634,6 +640,7 @@ class GrgaSearchApp(tk.Tk):
             self.multiline_var.get(),
             self.file_globs_var.get(),
             self.path_only_var.get(),
+            self.debug_var.get(),
         )
         self._set_input_enabled(False)
         self.search_thread = threading.Thread(target=self._run_search, args=args)
@@ -645,7 +652,8 @@ class GrgaSearchApp(tk.Tk):
         for widget, normal_state in self.input_widgets:
             widget.configure(state=normal_state if enabled else state)
 
-    def _run_search(self, directory, keywords, pattern_mode, case_sensitive, max_count, timeout, before_context, after_context, multiline, glob_patterns, path_only):
+    def _run_search(self, directory, keywords, pattern_mode, case_sensitive, max_count, timeout, before_context, after_context, multiline, glob_patterns, path_only, debug):
+        configure_logging(debug=debug)
         try:
             raw = search_directory(
                 directory,
@@ -659,6 +667,7 @@ class GrgaSearchApp(tk.Tk):
                 multiline=multiline,
                 glob_patterns=glob_patterns,
                 path_only=path_only,
+                debug=debug,
             )
             result = json.loads(raw)
         except Exception as exc:

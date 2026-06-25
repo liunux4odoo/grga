@@ -5,12 +5,24 @@ from typing import List, Optional
 import typer
 
 from grga.deep_search import deep_search_directory, resolve_deep_search_options
-from grga.search import build_rga_command_preview, check_environment, search_directory
+from grga.search import build_rga_command_preview, check_environment, configure_logging, search_directory
 from grga.toolchain import check_tools, current_tools_dir, install_tools, platform_key, supported_tool_names, tool_specs, tools_root, update_tools
 
 app = typer.Typer(no_args_is_help=True, help="Search files with ripgrep-all helpers.")
 tools_app = typer.Typer(no_args_is_help=True, help="Manage bundled command line tools.")
 app.add_typer(tools_app, name="tools")
+
+CONFIG_PATH = Path.home() / ".config" / "grga" / "settings.json"
+
+
+def _get_config_debug() -> bool:
+    """Read debug setting from config file."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return bool(config.get("debug", False))
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def _join_keywords(keywords):
@@ -65,11 +77,15 @@ def search_command(
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Search relative file paths only."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
     query = _join_keywords(keywords)
     if not query:
         typer.echo("keywords cannot be empty", err=True)
         raise typer.Exit(2)
+
+    effective_debug = debug or _get_config_debug()
+    configure_logging(debug=effective_debug)
 
     try:
         raw = search_directory(
@@ -84,6 +100,7 @@ def search_command(
             multiline=multiline,
             glob_patterns=file_globs,
             path_only=path_only,
+            debug=effective_debug,
         )
         result = json.loads(raw)
     except Exception as exc:
@@ -124,11 +141,15 @@ def deep_search_command(
     min_keyword_count: Optional[float] = typer.Option(None, "--min-keyword-count", help="Drop keyword records whose count falls below this threshold."),
     global_library: Optional[bool] = typer.Option(None, "--global-library/--directory-library", help="Use the whole keyword library or only the current directory scope."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
     query = _join_keywords(keywords)
     if not query:
         typer.echo("query cannot be empty", err=True)
         raise typer.Exit(2)
+
+    effective_debug = debug or _get_config_debug()
+    configure_logging(debug=effective_debug)
 
     options = resolve_deep_search_options(
         {
@@ -175,6 +196,7 @@ def deep_search_command(
         decay_factor=options["decay_factor"],
         min_keyword_count=options["min_keyword_count"],
         global_library=options["global_library"],
+        debug=effective_debug,
     )
     result = json.loads(raw)
     if json_output:
