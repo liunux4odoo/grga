@@ -5,20 +5,23 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from grga.toolchain import find_tool
+from grga.toolchain import add_tools_to_path, find_tool
 
 PatternMode = str
 
 
 def _find_rga_command():
+    add_tools_to_path()
     return find_tool("rga")
 
 
 def _find_rg_command():
+    add_tools_to_path()
     return find_tool("rg")
 
 
 def check_environment():
+    add_tools_to_path()
     rg = find_tool("rg")
     rga = find_tool("rga")
     rga_preproc = find_tool("rga-preproc")

@@ -20,6 +20,9 @@ classifiers = [
 ]
 dependencies = ["typer>=0.9"]
 
+[project.optional-dependencies]
+standalone = ["pyinstaller>=6.0"]
+
 [project.scripts]
 grga = "grga.cli:main"
 grga-gui = "grga.gui:main"
