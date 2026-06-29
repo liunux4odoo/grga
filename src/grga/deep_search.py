@@ -419,9 +419,20 @@ def _deep_search_directory(
             max_related_keywords,
             debug=debug,
         )
-        _log_debug(debug, f"初始查询计划: keywords={initial_plan.get('keywords', [])}, expression={initial_plan.get('query_expression')}")
-        current_expression = _clean_expression(initial_plan.get("query_expression")) or _terms_to_or_expression(initial_plan.get("keywords", [])) or query
-        current_keywords = _normalize_keywords(initial_plan.get("keywords", []))
+        _log_debug(debug, f"初始查询计划: groups={initial_plan.get('keyword_groups', [])}")
+        
+        # 从 keyword_groups 生成两两组合的查询；如果没有分组则降级为表达式
+        keyword_groups = initial_plan.get("keyword_groups")
+        current_expressions = _keyword_groups_to_queries(keyword_groups)
+        if not current_expressions:
+            fallback_expr = _clean_expression(initial_plan.get("query_expression")) or _terms_to_or_expression(initial_plan.get("keywords", [])) or query
+            current_expressions = [fallback_expr]
+        
+        # 展开所有关键词用于去重和历史记录
+        all_keywords = []
+        for group in keyword_groups or []:
+            all_keywords.extend(group)
+        current_keywords = _normalize_keywords(all_keywords or initial_plan.get("keywords", []))
         library.add_keywords("user", directory_key, current_keywords)
         library.commit()
 
@@ -431,14 +442,14 @@ def _deep_search_directory(
         seen_expressions = set()
         iteration = 0
 
-        while True:
+        # 执行所有两两组合的批量搜索（最简版本：只执行一轮，不做迭代扩展）
+        for current_expression in current_expressions:
             normalized_expression = _normalize_expression_key(current_expression)
-            _log_debug(debug, f"--- 迭代 {iteration} ---")
-            _log_debug(debug, f"当前查询表达式: {normalized_expression}")
+            _log_debug(debug, f"--- 搜索 {iteration} ---")
+            _log_debug(debug, f"查询表达式: {normalized_expression}")
             if normalized_expression in seen_expressions:
-                stop_reason = "duplicate_expression"
-                _log_debug(debug, f"停止: 表达式重复")
-                break
+                _log_debug(debug, f"跳过: 表达式重复")
+                continue
             seen_expressions.add(normalized_expression)
 
             search_result = _run_grga_search(
@@ -457,85 +468,33 @@ def _deep_search_directory(
             )
             if not search_result.get("ok"):
                 _log_debug(debug, f"搜索失败: {search_result.get('error')}")
-                if iteration == 0:
-                    return search_result
                 iterations.append({"index": iteration, "query_expression": normalized_expression, "error": search_result.get("error")})
-                stop_reason = "search_failed"
-                break
+                iteration += 1
+                continue
 
             matches = search_result.get("matches", [])
             match_count = sum(1 for item in matches if not item.get("is_context"))
             _log_debug(debug, f"搜索完成: {match_count} 个匹配（不含上下文）, 总数 {len(matches)}")
+            
+            # 为每个匹配标记来自哪个查询表达式（用于后续排序）
+            for match in matches:
+                match["from_query"] = normalized_expression
             all_matches.extend(matches)
-            segments = _segments_from_matches(matches, max_extract_segments)
-            _log_debug(debug, f"提取的段落数: {len(segments)}")
-            candidate_keywords = []
-            if segments:
-                extracted = _extract_segment_keywords(client, model_name, query, segments, debug=debug)
-                for item in extracted:
-                    keywords = item.get("keywords", [])
-                    if not keywords:
-                        continue
-                    library.add_keywords("document", directory_key, keywords)
-                    library.add_sources(directory_key, keywords, item.get("path", ""), item.get("line_number"))
-                    candidate_keywords.extend(keywords)
-                library.commit()
-                _log_debug(debug, f"从段落提取的关键词数: {len(candidate_keywords)}")
-
-            iteration_record = {
+            
+            iterations.append({
                 "index": iteration,
                 "query_expression": normalized_expression,
                 "match_count": match_count,
-                "extracted_keywords": _top_keywords(candidate_keywords, max_related_keywords),
-            }
-
-            if iteration >= repeat_count:
-                iterations.append(iteration_record)
-                stop_reason = "max_iterations"
-                _log_debug(debug, f"停止: 达到最大迭代数 ({repeat_count})")
-                break
-            if not candidate_keywords:
-                iterations.append(iteration_record)
-                stop_reason = "no_candidates"
-                _log_debug(debug, "停止: 没有候选关键词")
-                break
-
-            next_plan = _select_related_plan(
-                client,
-                model_name,
-                query,
-                candidate_keywords,
-                library.history(directory_key, candidate_keywords, limit=30, global_library=global_library),
-                max_related_keywords,
-                debug=debug,
-            )
-            next_keywords = _normalize_keywords(next_plan.get("keywords", []))
-            new_seeds = [item for item in next_keywords if item.casefold() not in used_keywords]
-            iteration_record["next_query_expression"] = next_plan.get("query_expression")
-            iteration_record["new_seeds"] = new_seeds
-            iterations.append(iteration_record)
-            _log_debug(debug, f"下一轮关键词: {next_keywords}, 新种子: {new_seeds}")
-
-            if not new_seeds:
-                stop_reason = "no_new_seeds"
-                _log_debug(debug, "停止: 没有新种子关键词")
-                break
-
-            used_keywords.update(item.casefold() for item in new_seeds)
-            next_expression = _clean_expression(next_plan.get("query_expression")) or _terms_to_or_expression(new_seeds)
-            if not next_expression:
-                stop_reason = "no_new_seeds"
-                _log_debug(debug, "停止: 下一轮表达式为空")
-                break
-            current_expression = next_expression
+            })
             iteration += 1
 
-        merged_matches = _merge_and_sort_matches(all_matches)
+        stop_reason = "batch_complete"
+        merged_matches = _merge_and_sort_matches(all_matches, keyword_groups)
         _log_debug(debug, f"深度搜索完成: 共 {len(merged_matches)} 个去重结果, 停止原因: {stop_reason}")
         return {
             "ok": True,
             "query": query,
-            "initial_query_expression": initial_plan.get("query_expression") or current_expression,
+            "initial_query_expression": "; ".join(current_expressions),
             "patterns": [item["query_expression"] for item in iterations if item.get("query_expression")],
             "directory": directory_key,
             "iterations": iterations,
@@ -588,7 +547,7 @@ def _build_query_plan(client, model_name, query, history, max_keywords, debug=Fa
                         "max_keywords": max_keywords,
                         "history": history,
                         "syntax": "term、\"phrase with spaces\"、A || B、A && B、(A || B) && C。未显式连接的相邻项按 OR 处理。",
-                        "output_schema": {"keywords": ["关键词"], "query_expression": "grga 查询表达式"},
+                        "output_schema": {"keyword_groups": [["核心词", "近义词1", "近义词2"]], "query_expression": "grga 查询表达式（可选，代码会优先用 keyword_groups）"},
                     },
                     ensure_ascii=False,
                 ),
@@ -658,7 +617,7 @@ def _select_related_plan(client, model_name, query, candidates, history, max_key
                         "candidate_keywords": _top_keywords(candidates, max(50, max_keywords * 5)),
                         "history": history,
                         "syntax": "用 || 组合同义词、近义词，用 && 表示必须共现的概念，可使用括号分组。",
-                        "output_schema": {"keywords": ["关键词"], "query_expression": "grga 查询表达式"},
+                        "output_schema": {"keyword_groups": [["核心词", "近义词1", "近义词2"]], "query_expression": "grga 查询表达式（可选，代码会优先用 keyword_groups）"},
                     },
                     ensure_ascii=False,
                 ),
@@ -670,7 +629,26 @@ def _select_related_plan(client, model_name, query, candidates, history, max_key
 
 
 def _planner_system_prompt():
-    return "你是检索查询规划器。只输出 JSON 对象。关键词必须是有检索价值的实体、名词、动词或短语。避免泛词、虚词、形容词和过长句子。查询表达式必须符合 grga 语法。"
+    return """你是检索查询规划器。只输出 JSON 对象。
+
+将用户查询分解为 **概念组**：每个组是一个核心概念及其近义词、同义词。同一组内的词是可替换关系（OR）。
+
+【输出规则】
+1. 每个概念组包含 1-3 个近义词
+2. 组之间是不同的核心概念
+3. 总共产出 2-5 个概念组
+4. 关键词必须是有检索价值的实体、名词、动词或短语。避免泛词、虚词、形容词和过长句子
+
+【示例】
+查询："神经网络在图像分类中的应用"
+输出：
+{
+  "keyword_groups": [
+    ["神经网络", "深度学习", "深度神经网络"],
+    ["图像分类", "图片识别", "视觉分类"],
+    ["应用", "使用", "实践"]
+  ]
+}"""
 
 
 def _extractor_system_prompt():
@@ -713,8 +691,25 @@ def _loads_json_object(content):
 
 def _normalize_plan(payload):
     if not isinstance(payload, dict):
-        return {"keywords": [], "query_expression": ""}
-    return {"keywords": _normalize_keywords(payload.get("keywords", [])), "query_expression": _clean_expression(payload.get("query_expression"))}
+        return {"keyword_groups": [], "keywords": [], "query_expression": ""}
+    keyword_groups = payload.get("keyword_groups")
+    if not isinstance(keyword_groups, list):
+        keyword_groups = []
+    cleaned_groups = []
+    for group in keyword_groups:
+        if isinstance(group, str):
+            terms = _normalize_keywords([group])
+        elif isinstance(group, list):
+            terms = _normalize_keywords(group)
+        else:
+            continue
+        if terms:
+            cleaned_groups.append(terms)
+    return {
+        "keyword_groups": cleaned_groups,
+        "keywords": _normalize_keywords(payload.get("keywords", [])),
+        "query_expression": _clean_expression(payload.get("query_expression")),
+    }
 
 
 def _clean_expression(value):
@@ -750,6 +745,23 @@ def _terms_to_or_expression(keywords):
     if len(terms) == 1:
         return terms[0]
     return "(" + " || ".join(terms) + ")"
+
+
+def _keyword_groups_to_queries(keyword_groups):
+    """将关键词分组转换为两两组合的查询列表。
+    
+    例如：[[a,a1], [b,b1], [c,c1]] -> [(a||a1) && (b||b1), (a||a1) && (c||c1), (b||b1) && (c||c1)]
+    """
+    if not keyword_groups or len(keyword_groups) < 2:
+        return []
+    group_exprs = [_terms_to_or_expression(group) for group in keyword_groups if group]
+    if len(group_exprs) < 2:
+        return []
+    queries = []
+    import itertools
+    for left, right in itertools.combinations(group_exprs, 2):
+        queries.append(f"{left} && {right}")
+    return queries
 
 
 def _quote_query_term(term):
@@ -858,21 +870,55 @@ def _top_keywords(keywords, limit):
     return [item for item, _ in counter.most_common(limit)]
 
 
-def _merge_and_sort_matches(matches):
+def _merge_and_sort_matches(matches, keyword_groups=None):
+    """合并去重并按匹配的关键字组数量排序。
+    
+    如果一条结果被多个两两组合查询命中，说明它匹配了更多的概念组，
+    排序时优先展示（按 from_query 数量降序）。
+    """
     deduped = {}
     for item in matches:
         key = (item.get("path", ""), item.get("line_number"), item.get("text", ""))
         existing = deduped.get(key)
-        if existing is None or (existing.get("is_context") and not item.get("is_context")):
+        if existing is None:
             deduped[key] = item
-    return sorted(deduped.values(), key=_match_sort_key)
+        elif existing.get("is_context") and not item.get("is_context"):
+            deduped[key] = item
+        else:
+            # 合并 from_query 信息
+            existing_queries = set()
+            if isinstance(existing.get("from_query"), str):
+                existing_queries.add(existing["from_query"])
+            elif isinstance(existing.get("from_query"), set):
+                existing_queries = existing["from_query"]
+            if isinstance(item.get("from_query"), str):
+                existing_queries.add(item["from_query"])
+            elif isinstance(item.get("from_query"), set):
+                existing_queries.update(item["from_query"])
+            deduped[key]["from_query"] = existing_queries
+
+    # 清理 from_query 并计算匹配深度
+    results = []
+    for item in deduped.values():
+        from_queries = item.get("from_query")
+        if isinstance(from_queries, (set, list)):
+            item["_match_depth"] = len(from_queries)
+        else:
+            item["_match_depth"] = 1
+        item.pop("from_query", None)
+        results.append(item)
+
+    return sorted(results, key=_match_sort_key)
 
 
 def _match_sort_key(item):
+    """排序键：先按匹配深度降序，再按文件路径、行号升序。"""
     line_number = item.get("line_number")
     if not isinstance(line_number, int):
         line_number = 0
-    return (str(item.get("path", "")), line_number, 1 if item.get("is_context") else 0, str(item.get("text", "")))
+    # 优先按 _match_depth 降序（取负值放在元组第一个位置）
+    depth = -(item.get("_match_depth", 1))
+    return (depth, str(item.get("path", "")), line_number, 1 if item.get("is_context") else 0, str(item.get("text", "")))
 
 
 def _normalize_expression_key(expression):

@@ -58,7 +58,7 @@ class GrgaSearchApp(tk.Tk):
 
         settings = self._load_settings()
         self.display_scale = self._configure_display_scale(settings)
-        self.geometry(f"{self._scale_size(1100)}x{self._scale_size(700)}")
+        self.geometry(f"{self._scale_size(1250)}x{self._scale_size(700)}")
 
         self.directory_var = tk.StringVar(value=settings.get("directory") or os.getcwd())
         self.mode_var = tk.StringVar(value=settings.get("mode", "auto"))
@@ -107,19 +107,75 @@ class GrgaSearchApp(tk.Tk):
         if scale is None:
             scale = self._detect_display_scale()
         scale = max(MIN_DISPLAY_SCALE, min(MAX_DISPLAY_SCALE, scale))
-        self.tk.call("tk", "scaling", DEFAULT_TK_SCALING * scale)
+        # 关键：不使用tk scaling位图拉伸，只设置基准缩放
+        # Linux上Tk scaling会模糊渲染，改为直接使用大磅值字体
+        self.tk.call("tk", "scaling", DEFAULT_TK_SCALING)
         self._scale_named_fonts(scale)
         return scale
 
     def _scale_named_fonts(self, scale):
-        if scale <= 1.0:
-            return
+        # 优先选择中文支持好的字体（避免中文发虚）
+        preferred_fonts = [
+            "SimSun",               # 宋体（Windows）
+            "Song",                 # 宋体
+            "宋体",
+            "AR PL UMing CN",       # 文鼎明体
+            "AR PL UKai CN",
+            "Noto Sans CJK SC",     # 谷歌开源
+            "Noto Sans CJK",
+            "Source Han Sans CN",   # 思源黑体
+            "Source Han Sans",
+            "WenQuanYi Zen Hei",    # 文泉驿正黑
+            "WenQuanYi Micro Hei",  # 文泉驿微米黑
+            "Droid Sans Fallback",
+            "Noto Sans",
+            "Ubuntu",
+            "DejaVu Sans",
+        ]
+
+        # 从首选列表中选择第一个可用的字体（使用模糊匹配）
+        available_fonts = tkfont.families()
+        # 打印前50个字体供调试
+        print(f"[DEBUG] 系统字体总数: {len(available_fonts)}")
+        print(f"[DEBUG] 部分字体: {sorted(available_fonts)[:50]}")
+        
+        font_family = None
+        for f in preferred_fonts:
+            # 模糊匹配：只要字体名包含目标字符串就行
+            for af in available_fonts:
+                if f.lower() in af.lower():
+                    font_family = af
+                    print(f"[DEBUG] 匹配字体: {af} (匹配: {f})")
+                    break
+            if font_family:
+                break
+        
+        if font_family is None:
+            print(f"[DEBUG] 未找到首选字体，推荐安装: fonts-noto-cjk")
+
         for name in tkfont.names(self):
             named = tkfont.nametofont(name)
-            size = named.cget("size")
-            if size >= 0:
-                continue
-            named.configure(size=-int(round(abs(size) * scale)))
+            current_size = named.cget("size")
+
+            # 设置更好的字体族以启用抗锯齿
+            if font_family:
+                named.configure(family=font_family)
+
+            # 关键：所有字体都转换为正磅值，避免像素拉伸导致模糊
+            # 负数=像素大小（会被tk scaling拉伸，模糊）
+            # 正数=磅值大小（按DPI正确渲染，清晰）
+            # Linux高DPI基础放大：即使display_scale=1也放大到合适大小
+            base_scale = 1.75 if sys.platform == "linux" else 1.0  # 增大到1.5倍
+            actual_scale = max(scale, base_scale)
+            if current_size < 0:
+                # 像素大小 -> 转换为磅值再放大
+                base_point = abs(current_size) / DEFAULT_TK_SCALING
+                new_size = max(13, int(round(base_point * actual_scale)))
+            else:
+                # 已经是磅值，直接放大
+                new_size = max(13, int(round(current_size * actual_scale)))
+
+            named.configure(size=new_size)
 
     def _read_display_scale_setting(self, settings):
         for value in (os.environ.get("GRGA_DISPLAY_SCALE"), settings.get("display_scale")):
@@ -141,7 +197,9 @@ class GrgaSearchApp(tk.Tk):
         return dpi / DEFAULT_DPI
 
     def _scale_size(self, value):
-        return max(1, int(round(value * self.display_scale)))
+        # 控件只需要轻微放大以适应大字体，避免双重放大导致卡死
+        widget_scale = min(self.display_scale, 1.4)
+        return max(1, int(round(value * widget_scale)))
 
     def _check_environment_on_startup(self):
         result = check_environment()
@@ -210,64 +268,72 @@ class GrgaSearchApp(tk.Tk):
         root = ttk.Frame(self, padding=8)
         root.pack(fill=tk.BOTH, expand=True)
 
-        params = ttk.Frame(root)
-        params.pack(fill=tk.X)
-
+        # 第一行：目录设置
+        dir_bar = ttk.Frame(root)
+        dir_bar.pack(fill=tk.X)
         self.input_widgets = []
 
-        ttk.Label(params, text="目录").pack(side=tk.LEFT)
-        directory_entry = ttk.Entry(params, textvariable=self.directory_var, width=45)
+        ttk.Label(dir_bar, text="搜索目录").pack(side=tk.LEFT)
+        directory_entry = ttk.Entry(dir_bar, textvariable=self.directory_var, width=50)
         directory_entry.pack(side=tk.LEFT, padx=(4, 6), fill=tk.X, expand=True)
-        browse_button = ttk.Button(params, text="浏览", command=self._browse_directory)
+        browse_button = ttk.Button(dir_bar, text="浏览", command=self._browse_directory)
         browse_button.pack(side=tk.LEFT, padx=(0, 6))
+        gitignore_button = ttk.Button(dir_bar, text="编辑 .gitignore", command=self._edit_gitignore)
+        gitignore_button.pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(params, text="排除规则由目录内 .gitignore 控制").pack(side=tk.LEFT, padx=(0, 4))
-        gitignore_button = ttk.Button(params, text="编辑 .gitignore", command=self._edit_gitignore)
-        gitignore_button.pack(side=tk.LEFT, padx=(0, 10))
+        # 第二行：搜索模式与匹配控制
+        mode_bar = ttk.Frame(root)
+        mode_bar.pack(fill=tk.X, pady=(6, 0))
 
-        ttk.Label(params, text="模式").pack(side=tk.LEFT)
-        mode_combo = ttk.Combobox(params, textvariable=self.mode_var, values=("auto", "regex", "glob"), width=8, state="readonly")
+        ttk.Label(mode_bar, text="匹配模式").pack(side=tk.LEFT)
+        mode_combo = ttk.Combobox(mode_bar, textvariable=self.mode_var, values=("auto", "regex", "glob"), width=8, state="readonly")
         mode_combo.pack(side=tk.LEFT, padx=(4, 10))
 
-        case_check = ttk.Checkbutton(params, text="区分大小写", variable=self.case_var)
-        case_check.pack(side=tk.LEFT, padx=(0, 10))
-
-        ttk.Label(params, text="最大匹配").pack(side=tk.LEFT)
-        max_count_entry = ttk.Entry(params, textvariable=self.max_count_var, width=8)
+        ttk.Label(mode_bar, text="最大结果").pack(side=tk.LEFT)
+        max_count_entry = ttk.Entry(mode_bar, textvariable=self.max_count_var, width=8)
         max_count_entry.pack(side=tk.LEFT, padx=(4, 10))
 
-        ttk.Label(params, text="超时").pack(side=tk.LEFT)
-        timeout_entry = ttk.Entry(params, textvariable=self.timeout_var, width=6)
-        timeout_entry.pack(side=tk.LEFT, padx=(4, 10))
+        case_check = ttk.Checkbutton(mode_bar, text="区分大小写", variable=self.case_var)
+        case_check.pack(side=tk.LEFT, padx=(10, 10))
 
-        ttk.Label(params, text="自动延迟").pack(side=tk.LEFT)
-        auto_delay_entry = ttk.Entry(params, textvariable=self.auto_delay_var, width=5)
-        auto_delay_entry.pack(side=tk.LEFT, padx=(4, 10))
+        multiline_check = ttk.Checkbutton(mode_bar, text="跨行匹配", variable=self.multiline_var)
+        multiline_check.pack(side=tk.LEFT, padx=(0, 10))
 
-        ttk.Label(params, text="前行数").pack(side=tk.LEFT)
-        before_entry = ttk.Entry(params, textvariable=self.before_context_var, width=5)
-        before_entry.pack(side=tk.LEFT, padx=(4, 10))
+        path_only_check = ttk.Checkbutton(mode_bar, text="仅匹配路径", variable=self.path_only_var)
+        path_only_check.pack(side=tk.LEFT, padx=(0, 10))
 
-        ttk.Label(params, text="后行数").pack(side=tk.LEFT)
-        after_entry = ttk.Entry(params, textvariable=self.after_context_var, width=5)
-        after_entry.pack(side=tk.LEFT, padx=(4, 10))
-
-        multiline_check = ttk.Checkbutton(params, text="跨行匹配", variable=self.multiline_var)
-        multiline_check.pack(side=tk.LEFT)
-
-        path_only_check = ttk.Checkbutton(params, text="仅匹配路径", variable=self.path_only_var)
-        path_only_check.pack(side=tk.LEFT, padx=(10, 0))
-
-        debug_check = ttk.Checkbutton(params, text="调试输出", variable=self.debug_var)
+        debug_check = ttk.Checkbutton(mode_bar, text="调试输出", variable=self.debug_var)
         debug_check.pack(side=tk.LEFT)
 
-        file_globs_bar = ttk.Frame(root)
-        file_globs_bar.pack(fill=tk.X, pady=(8, 0))
+        # 第三行：上下文与性能设置
+        ctx_bar = ttk.Frame(root)
+        ctx_bar.pack(fill=tk.X, pady=(6, 0))
 
-        ttk.Label(file_globs_bar, text="文件范围").pack(side=tk.LEFT)
+        ttk.Label(ctx_bar, text="显示前").pack(side=tk.LEFT)
+        before_entry = ttk.Entry(ctx_bar, textvariable=self.before_context_var, width=5)
+        before_entry.pack(side=tk.LEFT, padx=(4, 6))
+        ttk.Label(ctx_bar, text="行 后").pack(side=tk.LEFT)
+        after_entry = ttk.Entry(ctx_bar, textvariable=self.after_context_var, width=5)
+        after_entry.pack(side=tk.LEFT, padx=(4, 6))
+        ttk.Label(ctx_bar, text="行").pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(ctx_bar, text="超时").pack(side=tk.LEFT)
+        timeout_entry = ttk.Entry(ctx_bar, textvariable=self.timeout_var, width=6)
+        timeout_entry.pack(side=tk.LEFT, padx=(4, 10))
+
+        ttk.Label(ctx_bar, text="秒 自动延迟").pack(side=tk.LEFT)
+        auto_delay_entry = ttk.Entry(ctx_bar, textvariable=self.auto_delay_var, width=5)
+        auto_delay_entry.pack(side=tk.LEFT, padx=(4, 6))
+        ttk.Label(ctx_bar, text="秒").pack(side=tk.LEFT)
+
+        # 第四行：文件范围
+        file_globs_bar = ttk.Frame(root)
+        file_globs_bar.pack(fill=tk.X, pady=(6, 0))
+
+        ttk.Label(file_globs_bar, text="文件过滤").pack(side=tk.LEFT)
         file_globs_entry = ttk.Entry(file_globs_bar, textvariable=self.file_globs_var)
         file_globs_entry.pack(side=tk.LEFT, padx=(4, 6), fill=tk.X, expand=True)
-        ttk.Label(file_globs_bar, text="留空=所有文件，多个 --iglob 模式用空格分隔，! 表示排除").pack(side=tk.LEFT)
+        ttk.Label(file_globs_bar, text="（留空=全部，多个模式用空格分隔，!开头表示排除）").pack(side=tk.LEFT)
 
         search_bar = ttk.Frame(root)
         search_bar.pack(fill=tk.X, pady=(8, 8))
@@ -921,18 +987,57 @@ class GrgaSearchApp(tk.Tk):
 
 
 def _enable_process_dpi_awareness():
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
+    if sys.platform == "win32":
         try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
-            pass
+            import ctypes
 
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except (AttributeError, OSError):
+                pass
+    elif sys.platform == "linux":
+        # Linux: 设置Xft抗锯齿和子像素渲染
+        try:
+            import subprocess
+            # 合并现有X资源和抗锯齿设置
+            xresources = []
+            try:
+                result = subprocess.run(
+                    ["xrdb", "-query"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    xresources = result.stdout.splitlines()
+            except Exception:
+                pass
+            
+            # 添加或替换Xft抗锯齿设置
+            new_resources = []
+            xft_keys = {"Xft.antialias", "Xft.rgba", "Xft.hinting", "Xft.hintstyle"}
+            for line in xresources:
+                key = line.split(":", 1)[0].strip() if ":" in line else ""
+                if key not in xft_keys:
+                    new_resources.append(line)
+            
+            new_resources.extend([
+                "Xft.antialias: 1",
+                "Xft.rgba: rgb",
+                "Xft.hinting: 1",
+                "Xft.hintstyle: hintslight",
+            ])
+            
+            subprocess.run(
+                ["xrdb", "-merge"],
+                input="\n".join(new_resources) + "\n",
+                text=True,
+                timeout=2
+            )
+        except Exception:
+            pass
 
 def main():
     _enable_process_dpi_awareness()
