@@ -421,9 +421,8 @@ def _deep_search_directory(
         )
         _log_debug(debug, f"初始查询计划: groups={initial_plan.get('keyword_groups', [])}")
         
-        # 从 keyword_groups 生成两两组合的查询；如果没有分组则降级为表达式
         keyword_groups = initial_plan.get("keyword_groups")
-        current_expressions = _keyword_groups_to_queries(keyword_groups)
+        current_expressions = _keyword_groups_to_queries(keyword_groups, query=query)
         if not current_expressions:
             fallback_expr = _clean_expression(initial_plan.get("query_expression")) or _terms_to_or_expression(initial_plan.get("keywords", [])) or query
             current_expressions = [fallback_expr]
@@ -442,7 +441,6 @@ def _deep_search_directory(
         seen_expressions = set()
         iteration = 0
 
-        # 执行所有两两组合的批量搜索（最简版本：只执行一轮，不做迭代扩展）
         for current_expression in current_expressions:
             normalized_expression = _normalize_expression_key(current_expression)
             _log_debug(debug, f"--- 搜索 {iteration} ---")
@@ -547,7 +545,7 @@ def _build_query_plan(client, model_name, query, history, max_keywords, debug=Fa
                         "max_keywords": max_keywords,
                         "history": history,
                         "syntax": "term、\"phrase with spaces\"、A || B、A && B、(A || B) && C。未显式连接的相邻项按 OR 处理。",
-                        "output_schema": {"keyword_groups": [["核心词", "近义词1", "近义词2"]], "query_expression": "grga 查询表达式（可选，代码会优先用 keyword_groups）"},
+                        "output_schema": {"keyword_groups": [["核心实体", "别名1", "别名2"]], "query_expression": "grga 查询表达式（可选，代码会优先用 keyword_groups）"},
                     },
                     ensure_ascii=False,
                 ),
@@ -568,7 +566,7 @@ def _extract_segment_keywords(client, model_name, query, segments, max_keywords_
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "task": "逐段提取有检索价值的实体、名词、动词等关键词",
+                        "task": "逐段提取有检索价值的实体、名词和短语关键词",
                         "query": query,
                         "segments": segments,
                         "output_schema": {"segments": [{"id": "段落ID", "keywords": ["关键词"]}]},
@@ -617,7 +615,7 @@ def _select_related_plan(client, model_name, query, candidates, history, max_key
                         "candidate_keywords": _top_keywords(candidates, max(50, max_keywords * 5)),
                         "history": history,
                         "syntax": "用 || 组合同义词、近义词，用 && 表示必须共现的概念，可使用括号分组。",
-                        "output_schema": {"keyword_groups": [["核心词", "近义词1", "近义词2"]], "query_expression": "grga 查询表达式（可选，代码会优先用 keyword_groups）"},
+                        "output_schema": {"keyword_groups": [["核心实体", "别名1", "别名2"]], "query_expression": "grga 查询表达式（可选，代码会优先用 keyword_groups）"},
                     },
                     ensure_ascii=False,
                 ),
@@ -631,28 +629,35 @@ def _select_related_plan(client, model_name, query, candidates, history, max_key
 def _planner_system_prompt():
     return """你是检索查询规划器。只输出 JSON 对象。
 
-将用户查询分解为 **概念组**：每个组是一个核心概念及其近义词、同义词。同一组内的词是可替换关系（OR）。
+将用户查询拆成 **概念组**：同一组内必须是同一实体、同一称呼、同一别名、同义词或近义词，组内词是可替换关系（OR）。只有用户查询同时包含多个必须共现的独立概念时，才输出多个概念组；不要把同一人物、同一对象的外号、评价、身份词拆成多个概念组。
 
 【输出规则】
-1. 每个概念组包含 1-3 个近义词
-2. 组之间是不同的核心概念
-3. 总共产出 2-5 个概念组
-4. 关键词必须是有检索价值的实体、名词、动词或短语。避免泛词、虚词、形容词和过长句子
+1. 单个人名、地名、外号、术语或短语查询，只输出 1 个概念组
+2. 每个概念组包含 1-5 个可替换关键词
+3. 多个概念组之间表示必须同时出现的不同核心概念
+4. 关键词必须是有检索价值的实体、名词或短语。避免泛词、虚词、形容词和过长句子
 
 【示例】
+查询："二愣子"
+输出：
+{
+  "keyword_groups": [
+    ["二愣子", "二楞子", "愣头青", "憨子"]
+  ]
+}
+
 查询："神经网络在图像分类中的应用"
 输出：
 {
   "keyword_groups": [
     ["神经网络", "深度学习", "深度神经网络"],
-    ["图像分类", "图片识别", "视觉分类"],
-    ["应用", "使用", "实践"]
+    ["图像分类", "图片识别", "视觉分类"]
   ]
 }"""
 
 
 def _extractor_system_prompt():
-    return "你是文档关键词抽取器。只输出 JSON 对象。为每个段落提取有检索价值的实体、名词、动词或短语，去掉泛词、虚词和重复词。"
+    return "你是文档关键词抽取器。只输出 JSON 对象。为每个段落提取有检索价值的实体、名词或短语，去掉泛词、虚词和重复词。"
 
 
 def _chat_json(client, model_name, messages, debug=False):
@@ -747,21 +752,30 @@ def _terms_to_or_expression(keywords):
     return "(" + " || ".join(terms) + ")"
 
 
-def _keyword_groups_to_queries(keyword_groups):
-    """将关键词分组转换为两两组合的查询列表。
-    
-    例如：[[a,a1], [b,b1], [c,c1]] -> [(a||a1) && (b||b1), (a||a1) && (c||c1), (b||b1) && (c||c1)]
-    """
-    if not keyword_groups or len(keyword_groups) < 2:
+def _keyword_groups_to_queries(keyword_groups, query=None):
+    groups = [group for group in (keyword_groups or []) if group]
+    if not groups:
         return []
-    group_exprs = [_terms_to_or_expression(group) for group in keyword_groups if group]
+    if len(groups) == 1 or _is_single_concept_query(query):
+        terms = []
+        for group in groups:
+            terms.extend(group)
+        expression = _terms_to_or_expression(terms)
+        return [expression] if expression else []
+    group_exprs = [_terms_to_or_expression(group) for group in groups]
+    group_exprs = [item for item in group_exprs if item]
     if len(group_exprs) < 2:
-        return []
-    queries = []
-    import itertools
-    for left, right in itertools.combinations(group_exprs, 2):
-        queries.append(f"{left} && {right}")
-    return queries
+        return group_exprs
+    return [" && ".join(group_exprs)]
+
+
+def _is_single_concept_query(query):
+    text = str(query or "").strip()
+    if not text:
+        return False
+    if any(marker in text for marker in ("&&", "||", "，", ",", "；", ";", "和", "与", "及", "以及")):
+        return False
+    return len(re.findall(r"[\w\u4e00-\u9fff]+", text)) <= 1
 
 
 def _quote_query_term(term):

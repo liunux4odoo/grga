@@ -1,6 +1,7 @@
 import html
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -9,7 +10,7 @@ from datetime import datetime
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from grga.search import build_rga_command_preview, check_environment, configure_logging, search_directory
-from grga.deep_search import load_deep_search_config
+from grga.deep_search import DEFAULT_API_KEY_ENV_NAMES, DEFAULT_MODEL_ENV_NAMES, deep_search_directory, load_deep_search_config
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "grga", "settings.json")
 DEFAULT_DPI = 96
@@ -57,6 +58,8 @@ class GrgaSearchApp(tk.Tk):
         self.last_search_result = None
 
         settings = self._load_settings()
+        self.deep_search_config = self._ensure_deep_search_config()
+        self.deep_search_available = self._has_deep_search_llm_config(self.deep_search_config)
         self.display_scale = self._configure_display_scale(settings)
         self.geometry(f"{self._scale_size(1250)}x{self._scale_size(700)}")
 
@@ -70,6 +73,7 @@ class GrgaSearchApp(tk.Tk):
         self.after_context_var = tk.StringVar(value=settings.get("after_context", "3"))
         self.multiline_var = tk.BooleanVar(value=settings.get("multiline", False))
         self.path_only_var = tk.BooleanVar(value=settings.get("path_only", False))
+        self.deep_search_var = tk.BooleanVar(value=bool(settings.get("deep_search_enabled", False)) and self.deep_search_available)
         self.file_globs_var = tk.StringVar(value=settings.get("file_globs", ""))
         self.keyword_var = tk.StringVar(value=settings.get("keyword", ""))
         self.debug_var = tk.BooleanVar(value=settings.get("debug", False))
@@ -82,7 +86,6 @@ class GrgaSearchApp(tk.Tk):
         self._update_command_preview()
         self.keyword_entry.focus_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._ensure_deep_search_config()
         self.after(50, self._ensure_current_directory_gitignore)
         self.after(100, self._check_environment_on_startup)
 
@@ -98,9 +101,20 @@ class GrgaSearchApp(tk.Tk):
 
     def _ensure_deep_search_config(self):
         try:
-            load_deep_search_config(CONFIG_PATH)
+            return load_deep_search_config(CONFIG_PATH)
         except Exception:
-            pass
+            return {}
+
+    def _has_deep_search_llm_config(self, config):
+        api_key = self._first_text(config.get("llm_api_key"), *(os.environ.get(name) for name in DEFAULT_API_KEY_ENV_NAMES))
+        model_name = self._first_text(config.get("llm_model_name"), *(os.environ.get(name) for name in DEFAULT_MODEL_ENV_NAMES))
+        return bool(api_key and model_name)
+
+    def _first_text(self, *values):
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 
     def _configure_display_scale(self, settings):
         scale = self._read_display_scale_setting(settings)
@@ -247,6 +261,7 @@ class GrgaSearchApp(tk.Tk):
             "after_context": self.after_context_var.get(),
             "multiline": self.multiline_var.get(),
             "path_only": self.path_only_var.get(),
+            "deep_search_enabled": self.deep_search_var.get() and self.deep_search_available,
             "file_globs": self.file_globs_var.get(),
             "keyword": self.keyword_var.get(),
             "debug": self.debug_var.get(),
@@ -301,6 +316,9 @@ class GrgaSearchApp(tk.Tk):
 
         path_only_check = ttk.Checkbutton(mode_bar, text="仅匹配路径", variable=self.path_only_var)
         path_only_check.pack(side=tk.LEFT, padx=(0, 10))
+
+        deep_search_check = ttk.Checkbutton(mode_bar, text="深度搜索", variable=self.deep_search_var, state="normal" if self.deep_search_available else "disabled")
+        deep_search_check.pack(side=tk.LEFT, padx=(0, 10))
 
         debug_check = ttk.Checkbutton(mode_bar, text="调试输出", variable=self.debug_var)
         debug_check.pack(side=tk.LEFT)
@@ -368,6 +386,7 @@ class GrgaSearchApp(tk.Tk):
             (after_entry, "normal"),
             (multiline_check, "normal"),
             (path_only_check, "normal"),
+            (deep_search_check, "normal" if self.deep_search_available else "disabled"),
             (debug_check, "normal"),
             (file_globs_entry, "normal"),
             (self.keyword_entry, "normal"),
@@ -433,6 +452,7 @@ class GrgaSearchApp(tk.Tk):
             self.after_context_var,
             self.multiline_var,
             self.path_only_var,
+            self.deep_search_var,
             self.file_globs_var,
             self.keyword_var,
         ):
@@ -523,6 +543,10 @@ class GrgaSearchApp(tk.Tk):
             self._set_command_preview("")
             return
         max_count = self._parse_int_or_none(self.max_count_var.get())
+        if self.deep_search_var.get() and self.deep_search_available:
+            command = self._build_deep_search_command_preview(keywords, max_count)
+            self._set_command_preview(command)
+            return
         try:
             command = build_rga_command_preview(
                 keywords,
@@ -538,6 +562,33 @@ class GrgaSearchApp(tk.Tk):
         except Exception as exc:
             command = str(exc)
         self._set_command_preview(command)
+
+    def _build_deep_search_command_preview(self, keywords, max_count):
+        command = [sys.executable, "-m", "grga", "deep-search", keywords, "--directory", ".", "--mode", self.mode_var.get()]
+        command.append("--case-sensitive" if self.case_var.get() else "--ignore-case")
+        if max_count is not None:
+            command.extend(["--max-count", str(max_count)])
+        command.extend(["--timeout", str(self._parse_float_or_default(self.timeout_var.get(), 600))])
+        command.extend(["--before-context", str(self._parse_int_or_default(self.before_context_var.get(), 3))])
+        command.extend(["--after-context", str(self._parse_int_or_default(self.after_context_var.get(), 3))])
+        if self.multiline_var.get():
+            command.append("--multiline")
+        if self.path_only_var.get():
+            command.append("--path-only")
+        for glob_pattern in self._split_glob_patterns(self.file_globs_var.get()):
+            command.extend(["--iglob", glob_pattern])
+        return " ".join(self._quote_command_part(part) for part in command)
+
+    def _split_glob_patterns(self, value):
+        if not isinstance(value, str):
+            return []
+        try:
+            return [item.strip() for item in shlex.split(value) if item.strip()]
+        except ValueError:
+            return [item.strip() for item in value.split() if item.strip()]
+
+    def _quote_command_part(self, part):
+        return shlex.quote(str(part))
 
     def _set_command_preview(self, text):
         self.command_text.configure(state=tk.NORMAL)
@@ -569,7 +620,7 @@ class GrgaSearchApp(tk.Tk):
             lines.append(f"- 搜索完成时间：{self.last_search_finished_at.strftime('%Y-%m-%d %H:%M:%S')}")
         lines.append(f"- 搜索目录：{self.directory_var.get()}")
         lines.append(f"- 关键字：{self.keyword_var.get().strip()}")
-        lines.append(f"- rga 命令：`{self.last_search_command or self._get_command_preview_text()}`")
+        lines.append(f"- 检索命令：`{self.last_search_command or self._get_command_preview_text()}`")
         if result.get("ok"):
             match_count = sum(1 for item in result.get("matches", []) if not item.get("is_context"))
             file_count = len(self.matches_by_file)
@@ -646,6 +697,15 @@ class GrgaSearchApp(tk.Tk):
         except ValueError:
             return default
 
+    def _parse_float_or_default(self, value, default):
+        value = value.strip()
+        if not value:
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            return default
+
     def _auto_delay_ms(self):
         try:
             delay = float(self.auto_delay_var.get().strip())
@@ -693,7 +753,7 @@ class GrgaSearchApp(tk.Tk):
         self.last_search_finished_at = None
         self.last_search_command = self._get_command_preview_text()
         self.last_search_result = None
-        self.status_var.set("Searching...")
+        self.status_var.set("Deep searching..." if self.deep_search_var.get() and self.deep_search_available else "Searching...")
         args = (
             self.directory_var.get(),
             keywords,
@@ -707,6 +767,7 @@ class GrgaSearchApp(tk.Tk):
             self.file_globs_var.get(),
             self.path_only_var.get(),
             self.debug_var.get(),
+            self.deep_search_var.get() and self.deep_search_available,
         )
         self._set_input_enabled(False)
         self.search_thread = threading.Thread(target=self._run_search, args=args)
@@ -718,27 +779,65 @@ class GrgaSearchApp(tk.Tk):
         for widget, normal_state in self.input_widgets:
             widget.configure(state=normal_state if enabled else state)
 
-    def _run_search(self, directory, keywords, pattern_mode, case_sensitive, max_count, timeout, before_context, after_context, multiline, glob_patterns, path_only, debug):
+    def _run_search(self, directory, keywords, pattern_mode, case_sensitive, max_count, timeout, before_context, after_context, multiline, glob_patterns, path_only, debug, deep_search):
         configure_logging(debug=debug)
         try:
-            raw = search_directory(
-                directory,
-                keywords,
-                pattern_mode=pattern_mode,
-                case_sensitive=case_sensitive,
-                max_count=max_count,
-                timeout=timeout,
-                before_context=before_context,
-                after_context=after_context,
-                multiline=multiline,
-                glob_patterns=glob_patterns,
-                path_only=path_only,
-                debug=debug,
-            )
+            if deep_search:
+                raw = deep_search_directory(
+                    directory,
+                    keywords,
+                    llm_base_url=self.deep_search_config.get("llm_base_url"),
+                    llm_api_key=self.deep_search_config.get("llm_api_key"),
+                    llm_model_name=self.deep_search_config.get("llm_model_name"),
+                    pattern_mode=pattern_mode,
+                    case_sensitive=case_sensitive,
+                    max_count=max_count,
+                    timeout=timeout,
+                    before_context=before_context,
+                    after_context=after_context,
+                    multiline=multiline,
+                    glob_patterns=glob_patterns,
+                    path_only=path_only,
+                    max_related_keywords=self._deep_config_int("max_related_keywords", 8),
+                    repeat_count=self._deep_config_int("repeat_count", 1),
+                    max_extract_segments=self._deep_config_int("max_extract_segments", 20),
+                    db_path=self.deep_search_config.get("db_path"),
+                    decay_factor=self._deep_config_float("decay_factor", 0.9),
+                    min_keyword_count=self._deep_config_float("min_keyword_count", 0.1),
+                    global_library=bool(self.deep_search_config.get("global_library", False)),
+                    debug=debug,
+                )
+            else:
+                raw = search_directory(
+                    directory,
+                    keywords,
+                    pattern_mode=pattern_mode,
+                    case_sensitive=case_sensitive,
+                    max_count=max_count,
+                    timeout=timeout,
+                    before_context=before_context,
+                    after_context=after_context,
+                    multiline=multiline,
+                    glob_patterns=glob_patterns,
+                    path_only=path_only,
+                    debug=debug,
+                )
             result = json.loads(raw)
         except Exception as exc:
             result = {"ok": False, "error": str(exc), "matches": []}
         self.after(0, lambda: self._on_search_done(result))
+
+    def _deep_config_int(self, key, default):
+        try:
+            return int(self.deep_search_config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _deep_config_float(self, key, default):
+        try:
+            return float(self.deep_search_config.get(key, default))
+        except (TypeError, ValueError):
+            return default
 
     def _on_search_done(self, result):
         self.last_search_finished_at = datetime.now()
