@@ -29,6 +29,11 @@ def md_eval_fixture(fixtures_dir: Path) -> Path:
     return fixtures_dir / "md_eval"
 
 
+@pytest.fixture(scope="session")
+def cross_heading_fixture(fixtures_dir: Path) -> Path:
+    return fixtures_dir / "cross_heading"
+
+
 @pytest.fixture
 def clean_env(monkeypatch):
     for key in list(os.environ):

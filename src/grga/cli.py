@@ -11,6 +11,8 @@ from grga.toolchain import check_tools, current_tools_dir, install_tools, platfo
 app = typer.Typer(no_args_is_help=True, help="Search files with ripgrep-all helpers.")
 tools_app = typer.Typer(no_args_is_help=True, help="Manage bundled command line tools.")
 app.add_typer(tools_app, name="tools")
+index_app = typer.Typer(no_args_is_help=True, help="Build and manage the L2 graph index.")
+app.add_typer(index_app, name="index")
 
 CONFIG_PATH = Path.home() / ".config" / "grga" / "settings.json"
 
@@ -171,7 +173,7 @@ def deep_search_command(
     max_related_keywords: Optional[int] = typer.Option(None, "--max-related-keywords", help="Maximum related keywords selected for follow-up iterations."),
     repeat_count: Optional[int] = typer.Option(None, "--repeat-count", help="Number of follow-up search iterations."),
     max_extract_segments: Optional[int] = typer.Option(None, "--max-extract-segments", help="Maximum matched segments sent to LLM per iteration."),
-    db_path: Optional[Path] = typer.Option(None, "--db-path", help="SQLite keyword library path."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite keyword library path."),
     decay_factor: Optional[float] = typer.Option(None, "--decay-factor", help="Decay multiplier applied to keyword counts before each run (0-1)."),
     min_keyword_count: Optional[float] = typer.Option(None, "--min-keyword-count", help="Drop keyword records whose count falls below this threshold."),
     global_library: Optional[bool] = typer.Option(None, "--global-library/--directory-library", help="Use the whole keyword library or only the current directory scope."),
@@ -416,6 +418,81 @@ def expand_command(
 
     typer.echo(f"# {path_part}:{context.range[0]}-{context.range[1]}  level={context.level}" + ("  truncated" if context.truncated else ""), err=True)
     typer.echo(context.text)
+
+
+@index_app.command("build")
+def index_build_command(
+    scope: Path = typer.Option(Path("."), "--scope", "-s", exists=True, resolve_path=True, help="Directory (or file) to index."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    min_term_count: int = typer.Option(2, "--min-count", help="Minimum occurrences for a keyword to be indexed."),
+    max_terms: int = typer.Option(200, "--max-terms", help="Maximum keywords stored per file."),
+    max_file_kb: int = typer.Option(512, "--max-file-kb", help="Skip files larger than this many KiB."),
+    append: bool = typer.Option(False, "--append", help="Accumulate onto existing rows instead of replacing the scope."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
+):
+    """Build ``keyword_docs`` / ``heading_docs`` for a directory scope.
+
+    The v1 tables (keyword_counts / keyword_pairs) are never modified.
+    """
+    from grga.graph.build import build_graph_index
+
+    stats = build_graph_index(
+        scope,
+        db_path=str(db_path) if db_path else None,
+        max_terms_per_file=max_terms,
+        min_term_count=min_term_count,
+        max_file_bytes=max_file_kb * 1024,
+        replace=not append,
+        progress=(None if json_output else (lambda message: typer.echo(message, err=True))),
+    )
+    if json_output:
+        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        return
+    typer.echo(
+        f"indexed {stats.files_indexed}/{stats.files_scanned} files, "
+        f"{stats.keyword_docs_written} keyword rows, "
+        f"{stats.heading_docs_written} heading rows "
+        f"({stats.md_files_indexed} md) in {stats.elapsed_seconds:.2f}s"
+    )
+
+
+@app.command("related")
+def related_command(
+    keywords: List[str] = typer.Argument(..., help="Seed keywords."),
+    mode: str = typer.Option("graph", "--mode", "-m", help="Relation mode: graph | dir | heading."),
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of related documents."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to a previously indexed scope."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+):
+    """List documents related to the given keywords via the L2 graph."""
+    from grga.related import VALID_MODES, related as related_docs
+
+    if mode not in VALID_MODES:
+        typer.echo(f"mode must be one of: {', '.join(VALID_MODES)}", err=True)
+        raise typer.Exit(2)
+    seeds = [item for item in keywords if item.strip()]
+    if not seeds:
+        typer.echo("keywords cannot be empty", err=True)
+        raise typer.Exit(2)
+
+    results = related_docs(
+        seeds,
+        mode=mode,
+        limit=limit,
+        db_path=str(db_path) if db_path else None,
+        directory=str(directory) if directory else None,
+    )
+    if json_output:
+        typer.echo(json.dumps([r.to_dict() for r in results], ensure_ascii=False, indent=2))
+        return
+    if not results:
+        typer.echo("no related documents found", err=True)
+        raise typer.Exit(0)
+    for item in results:
+        kw = ("  <- " + ", ".join(item.keywords)) if item.keywords else ""
+        typer.echo(f"{item.score:.4f}  {item.doc_path}{kw}")
+    typer.echo(f"{len(results)} related documents ({mode})", err=True)
 
 
 def main():
