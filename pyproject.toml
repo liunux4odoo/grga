@@ -33,7 +33,7 @@ grga-gui = "grga.gui:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-grga = ["data/tools/**/*"]
+grga = ["data/tools/**/*", "prompts/*.txt"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"

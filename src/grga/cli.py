@@ -456,6 +456,130 @@ def index_build_command(
     )
 
 
+@index_app.command("promote")
+def index_promote_command(
+    threshold: float = typer.Option(3, "--threshold", "-t", help="Minimum vote_count for a pair to be promoted."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to votes recorded for this scope."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be promoted without writing."),
+    repromote: bool = typer.Option(False, "--repromote", help="Promote qualifying pairs again even if already promoted."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
+):
+    """Merge high-vote LLM keyword pairs into ``keyword_pairs`` (L3 -> L2 refeed).
+
+    Only pairs with ``vote_count >= threshold`` graduate. The
+    ``llm_extension_votes`` records are never deleted, so the refeed stays
+    auditable and reversible.
+    """
+    from grga.graph.promote import promote_votes
+
+    stats = promote_votes(
+        threshold=threshold,
+        directory=str(directory) if directory else None,
+        db_path=str(db_path) if db_path else None,
+        dry_run=dry_run,
+        repromote=repromote,
+    )
+    if json_output:
+        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        return
+    verb = "would promote" if dry_run else "promoted"
+    typer.echo(
+        f"{verb} {stats.promoted}/{stats.candidates} candidate pairs "
+        f"(threshold={stats.threshold:g}, skipped {stats.skipped_already_promoted} already promoted)"
+    )
+    for pair in stats.pairs:
+        mark = " [already]" if pair.already_promoted else ""
+        typer.echo(f"  {pair.vote_count:g}  {pair.keyword_a} <-> {pair.keyword_b}{mark}")
+
+
+@app.command("suggest")
+def suggest_command(
+    query: List[str] = typer.Argument(..., help="Original query (natural language or keyword expression)."),
+    intent: str = typer.Option("expand", "--intent", "-i", help="Suggest intent: expand | rerank | reformulate."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Scope key for vote recording."),
+    hits_json: Optional[Path] = typer.Option(None, "--hits", exists=True, dir_okay=False, help="JSON file with prior hits (a list, or a search result object with 'matches')."),
+    max_hits: int = typer.Option(20, "--max-hits", help="Maximum hits sent to the LLM."),
+    no_votes: bool = typer.Option(False, "--no-votes", help="Do not record keyword-pair votes (read-only)."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="OpenAI-compatible API base URL."),
+    llm_api_key: Optional[str] = typer.Option(None, "--llm-api-key", help="OpenAI-compatible API key."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="OpenAI-compatible model name."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    debug: bool = typer.Option(False, "--debug", help="Print debug information."),
+):
+    """L3 LLM suggestion: expand keywords, rerank hits, or reformulate a query.
+
+    Emitted keyword pairs are voted into ``llm_extension_votes`` unless
+    ``--no-votes`` is set; run ``grga index promote`` later to graduate them.
+    """
+    from grga.suggest import VALID_INTENTS, suggest as run_suggest
+
+    if intent not in VALID_INTENTS:
+        typer.echo(f"intent must be one of: {', '.join(VALID_INTENTS)}", err=True)
+        raise typer.Exit(2)
+    text = _join_keywords(query)
+    if not text:
+        typer.echo("query cannot be empty", err=True)
+        raise typer.Exit(2)
+
+    hits: List = []
+    if hits_json is not None:
+        try:
+            with open(hits_json, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (OSError, ValueError) as exc:
+            typer.echo(f"failed to read hits: {exc}", err=True)
+            raise typer.Exit(2)
+        if isinstance(loaded, dict):
+            hits = loaded.get("matches") or []
+        elif isinstance(loaded, list):
+            hits = loaded
+
+    try:
+        suggestion = run_suggest(
+            text,
+            hits,
+            intent=intent,
+            directory=str(directory) if directory else None,
+            max_hits=max_hits,
+            record_votes_enabled=not no_votes,
+            db_path=str(db_path) if db_path else None,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
+            llm_model_name=llm_model,
+            debug=debug,
+        )
+    except Exception as exc:
+        if json_output:
+            typer.echo(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+    if json_output:
+        typer.echo(json.dumps(suggestion.to_dict(), ensure_ascii=False, indent=2))
+        return
+    if suggestion.reason:
+        typer.echo(f"# {suggestion.reason}", err=True)
+    if suggestion.keywords:
+        typer.echo("keywords: " + ", ".join(suggestion.keywords))
+    if suggestion.queries:
+        for q in suggestion.queries:
+            typer.echo(f"query: {q}")
+    if suggestion.ranking:
+        typer.echo("ranking: " + ", ".join(str(i) for i in suggestion.ranking))
+    if suggestion.keyword_pairs:
+        typer.echo("pairs: " + ", ".join(f"{a}<->{b}" for a, b in suggestion.keyword_pairs))
+    if suggestion.votes:
+        typer.echo(
+            f"votes recorded: {suggestion.votes['pairs_recorded']} pairs "
+            f"(+{suggestion.votes['votes_added']:g})",
+            err=True,
+        )
+    typer.echo(f"tokens: {suggestion.tokens_used} ({suggestion.model})", err=True)
+
+
 @app.command("related")
 def related_command(
     keywords: List[str] = typer.Argument(..., help="Seed keywords."),

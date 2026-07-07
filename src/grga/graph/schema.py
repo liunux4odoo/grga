@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 SCHEMA_VERSION = 2
 
@@ -25,6 +25,41 @@ V1_TABLES = ("keyword_counts", "keyword_pairs", "keyword_sources")
 
 # v2 tables owned by this module.
 V2_TABLES = ("keyword_docs", "heading_docs", "llm_extension_votes")
+
+
+def resolve_scope_key(directory: Optional[Union[str, Path]]) -> Optional[str]:
+    """Canonicalise a directory scope for the graph tables.
+
+    Single source of truth shared by :mod:`grga.graph.votes` and
+    :mod:`grga.graph.promote` so the "unscoped" concept never drifts:
+
+    * ``None`` -> ``None`` meaning *no scope filter* (match every scope).
+    * ``""`` (or whitespace) -> ``""`` meaning the *unscoped* rows, i.e.
+      votes recorded without a directory. This is a real, filterable key.
+    * a real path -> its resolved absolute string.
+
+    Callers store rows using the ``""``-vs-path distinction and filter with
+    ``scope_key is None`` (no ``WHERE``) vs ``scope_key == ""`` / a path
+    (``WHERE directory = ?``). Because ``""`` round-trips instead of
+    collapsing to ``None``, "promote only unscoped votes" is expressible.
+    """
+    if directory is None:
+        return None
+    text = str(directory).strip()
+    if not text:
+        return ""
+    return str(Path(text).expanduser().resolve())
+
+
+def scope_write_key(directory: Optional[Union[str, Path]]) -> str:
+    """Return the value to *store* in a ``directory`` column.
+
+    Writers always need a concrete string, so ``None`` and ``""`` both map
+    to the unscoped sentinel ``""`` (whereas :func:`resolve_scope_key`
+    keeps ``None`` distinct for read-time filtering).
+    """
+    key = resolve_scope_key(directory)
+    return "" if key is None else key
 
 
 def connect(path: Union[str, Path]) -> sqlite3.Connection:
