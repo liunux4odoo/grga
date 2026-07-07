@@ -129,3 +129,14 @@ def test_paragraphs_contain_hits(docs_fixture: Path):
     heading_lines = [c.start_line for c in doc.chapters]
     for line in heading_lines:
         assert doc.paragraph_for_line(line) is not None
+
+
+def test_empty_file_total_lines_is_zero(tmp_path: Path):
+    # Regression: empty file must yield total_lines == 0, not 1.
+    empty = tmp_path / "empty.md"
+    empty.write_text("", encoding="utf-8")
+    doc = parse_markdown(empty)
+    assert doc.error is None
+    assert doc.total_lines == 0
+    assert doc.chapters == []
+    assert doc.paragraphs == []

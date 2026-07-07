@@ -245,9 +245,7 @@ def parse_markdown(path: str | Path) -> StructureDoc:
     except OSError as exc:
         return StructureDoc(path=str(path), mtime=mtime, total_lines=0, error=f"read: {exc}")
 
-    total_lines = text.count("\n") + (0 if text.endswith("\n") else 1)
-    if total_lines == 0 and text:
-        total_lines = 1
+    total_lines = 0 if not text else text.count("\n") + (0 if text.endswith("\n") else 1)
     try:
         headings = _extract_headings(text)
         chapters = _build_chapters(headings, total_lines)

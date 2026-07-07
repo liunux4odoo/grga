@@ -52,6 +52,22 @@ def test_expand_missing_file_returns_hit_text():
     assert ctx.text == "fallback"
 
 
+def test_expand_lines_out_of_range_line_clamps_not_inverts(docs_fixture: Path):
+    # Regression: line number beyond EOF must clamp, not produce inverted range.
+    hit = _hit("install.md", 9999)
+    ctx = expand(hit, level="lines", size=3, base_dir=docs_fixture)
+    assert ctx.level == "lines"
+    assert ctx.range[0] <= ctx.range[1]
+    assert ctx.text  # non-empty, tail of file
+    assert ctx.range[1] <= 31
+
+
+def test_expand_chapter_out_of_range_degrades_without_inversion(docs_fixture: Path, sidecar_env):
+    hit = _hit("install.md", 9999)
+    ctx = expand(hit, level="chapter", size=3, base_dir=docs_fixture)
+    assert ctx.range[0] <= ctx.range[1]
+
+
 # --- paragraph ---------------------------------------------------------------
 
 

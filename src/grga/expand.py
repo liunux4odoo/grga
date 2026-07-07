@@ -79,10 +79,10 @@ def _read_lines(path: Path) -> List[str]:
 
 
 def _expand_lines(hit: Hit, lines: List[str], size: int) -> Context:
-    line_idx = max(1, hit.line_number)
     total = len(lines)
+    line_idx = max(1, min(hit.line_number, total)) if total else max(1, hit.line_number)
     if size <= 0:
-        start = end = min(line_idx, total)
+        start = end = min(line_idx, total) if total else line_idx
         text = lines[start - 1] if 1 <= start <= total else hit.text
         return Context(hit=hit, text=text, level="lines", range=(start, end), truncated=False)
     start = max(1, line_idx - size)
