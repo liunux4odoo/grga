@@ -36,6 +36,26 @@ def _validate_pattern_mode(pattern_mode):
     return pattern_mode
 
 
+def _format_metadata(item):
+    parts = []
+    idx = item.get("occurrence_index")
+    total = item.get("total_occurrences")
+    if isinstance(idx, int) and isinstance(total, int) and total > 0:
+        parts.append(f"[{idx}/{total}]")
+    ratio = item.get("line_ratio")
+    if isinstance(ratio, (int, float)) and ratio > 0:
+        parts.append(f"ratio={ratio:.2f}")
+    nearby = item.get("nearby_hits")
+    if isinstance(nearby, int) and nearby > 0:
+        parts.append(f"nearby={nearby}")
+    heading_path = item.get("heading_path")
+    if isinstance(heading_path, list) and heading_path:
+        parts.append("heading=" + ">".join(heading_path))
+    if not parts:
+        return ""
+    return " ".join(parts) + " "
+
+
 def _print_result(result):
     if not result.get("ok"):
         typer.echo(result.get("error", "search failed"), err=True)
@@ -58,10 +78,13 @@ def _print_result(result):
         line_number = item.get("line_number")
         text = item.get("text", "")
         separator = "-" if item.get("is_context") else ":"
+        meta = ""
+        if not item.get("is_context") and item.get("total_occurrences"):
+            meta = _format_metadata(item)
         if isinstance(line_number, int):
-            typer.echo(f"{path}{separator}{line_number}{separator}{text}")
+            typer.echo(f"{path}{separator}{line_number}{separator}{meta}{text}")
         else:
-            typer.echo(f"{path}{separator}{text}")
+            typer.echo(f"{path}{separator}{meta}{text}")
 
     match_count = sum(1 for item in matches if not item.get("is_context"))
     file_count = len({item.get("path", "") for item in matches})
@@ -82,6 +105,7 @@ def search_command(
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Search relative file paths only."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    metadata: bool = typer.Option(True, "--metadata/--no-metadata", help="Attach Layer 2 hit metadata (occurrence, ratio, nearby)."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
     query = _join_keywords(keywords)
@@ -114,6 +138,12 @@ def search_command(
         else:
             typer.echo(str(exc), err=True)
         raise typer.Exit(1)
+
+    if metadata:
+        from grga.meta import annotate_result_inplace, annotate_structure_inplace
+
+        annotate_result_inplace(result, base_dir=str(directory))
+        annotate_structure_inplace(result, base_dir=str(directory))
 
     if json_output:
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
@@ -149,6 +179,7 @@ def deep_search_command(
     min_results: Optional[int] = typer.Option(None, "--min-results", help="Minimum unique matches before tiered search stops relaxing."),
     max_tiers: Optional[int] = typer.Option(None, "--max-tiers", help="Maximum number of tiered query expressions to run."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    metadata: bool = typer.Option(True, "--metadata/--no-metadata", help="Attach Layer 2 hit metadata (occurrence, ratio, nearby)."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
     query = _join_keywords(keywords)
@@ -213,6 +244,11 @@ def deep_search_command(
         debug=effective_debug,
     )
     result = json.loads(raw)
+    if metadata:
+        from grga.meta import annotate_result_inplace, annotate_structure_inplace
+
+        annotate_result_inplace(result, base_dir=str(directory))
+        annotate_structure_inplace(result, base_dir=str(directory))
     if json_output:
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         raise typer.Exit(0 if result.get("ok") else 1)
@@ -337,6 +373,49 @@ def gui_command():
     from grga.gui import main as gui_main
 
     gui_main()
+
+
+@app.command("expand")
+def expand_command(
+    target: str = typer.Argument(..., help="Hit target as 'PATH:LINE' (e.g. docs/foo.md:42)."),
+    level: str = typer.Option("chapter", "--level", "-l", help="Expansion level: lines | paragraph | chapter | document."),
+    size: int = typer.Option(3, "--size", "-s", help="Line window size for --level lines (+/- size)."),
+    directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Base directory the hit path is relative to."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON context."),
+):
+    """Expand a search hit into a wider context block.
+
+    Levels degrade predictably: chapter -> paragraph -> lines(+/-size) -> lines(+/-0).
+    The returned ``level`` field reflects the level actually achieved.
+    """
+    from grga.expand import expand as expand_hit
+    from grga.models import Hit
+
+    if ":" not in target:
+        typer.echo("target must look like 'PATH:LINE'", err=True)
+        raise typer.Exit(2)
+    path_part, _, line_part = target.rpartition(":")
+    try:
+        line_number = int(line_part)
+    except ValueError:
+        typer.echo(f"invalid line number: {line_part!r}", err=True)
+        raise typer.Exit(2)
+    if not path_part or line_number <= 0:
+        typer.echo("target must look like 'PATH:LINE' with LINE > 0", err=True)
+        raise typer.Exit(2)
+    if level not in ("lines", "paragraph", "chapter", "document"):
+        typer.echo(f"level must be one of: lines, paragraph, chapter, document", err=True)
+        raise typer.Exit(2)
+
+    hit = Hit(path=path_part, line_number=line_number, text="")
+    context = expand_hit(hit, level=level, size=size, base_dir=str(directory))
+
+    if json_output:
+        typer.echo(json.dumps(context.to_dict(), ensure_ascii=False, indent=2))
+        return
+
+    typer.echo(f"# {path_part}:{context.range[0]}-{context.range[1]}  level={context.level}" + ("  truncated" if context.truncated else ""), err=True)
+    typer.echo(context.text)
 
 
 def main():

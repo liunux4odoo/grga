@@ -22,6 +22,8 @@ dependencies = ["typer>=0.9", "openai>=1.0"]
 
 [project.optional-dependencies]
 standalone = ["pyinstaller>=6.0"]
+test = ["pytest>=7.0"]
+v2 = ["markdown-it-py>=3.0"]
 
 [project.scripts]
 grga = "grga.cli:main"
@@ -32,3 +34,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 grga = ["data/tools/**/*"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+pythonpath = ["src"]
+filterwarnings = ["ignore::DeprecationWarning"]

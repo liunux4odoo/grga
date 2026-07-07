@@ -86,3 +86,6 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 *.db
+
+# v2 structure index sidecars (built lazily from source docs)
+.grga/
