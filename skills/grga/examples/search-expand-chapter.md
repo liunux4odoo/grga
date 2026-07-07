@@ -25,8 +25,8 @@ jq '.matches
     | .[0] | {path, line_number, heading_path}' /tmp/hits.json
 # -> {"path":"./install.md","line_number":1,"heading_path":["安装指南"]}
 
-# 3) Expand to the enclosing chapter
-grga expand "install.md:5" \
+# 3) Expand to the enclosing chapter (use the line_number from step 2)
+grga expand "install.md:1" \
     --directory tests/fixtures/docs \
     --level chapter \
     --json
@@ -36,7 +36,7 @@ grga expand "install.md:5" \
 
 ```json
 {
-  "hit": {"path": "install.md", "line_number": 5, "text": "", "…": "…"},
+  "hit": {"path": "install.md", "line_number": 1, "text": "", "…": "…"},
   "text": "# 安装指南\n\n本文档介绍如何安装本项目。\n\n## macOS\n\n在 macOS 上使用 brew 安装：\n\n```bash\nbrew install grga\n```\n…",
   "level": "chapter",
   "range": [1, 31],

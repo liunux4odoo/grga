@@ -7,6 +7,19 @@ description: This skill should be used when a caller agent needs to search a loc
 
 grga v2 is a **local, structure-aware search toolbox** built on top of `ripgrep-all`. The skill wraps four independent, idempotent verbs so a caller agent can compose them into a reflection loop without hidden state and without paying LLM cost until absolutely necessary.
 
+## 30-second quickstart
+
+Four commands cover the full basic workflow. Copy-paste them against any local directory:
+
+```bash
+grga index build --scope ./docs --db ~/.config/grga/deep_keywords.db --json  # 1) one-time (or on mtime change) offline index
+grga search "your query" --directory ./docs --json                            # 2) always start here; get hits + metadata
+grga expand "path/to/file.md:42" --directory ./docs --level chapter --json    # 3) widen one hit into a chapter/paragraph/lines
+grga related "keyword" --mode graph --db ~/.config/grga/deep_keywords.db --json  # 4) find neighbouring documents (needs step 1)
+```
+
+`suggest` is the LLM fallback and only runs on demand — see the `search → suggest → promote` example.
+
 ## When to use this skill
 
 Use grga when the task involves any of the following on a local directory:
@@ -160,7 +173,7 @@ Additional composition notes:
 - Every verb accepts `--json` and prints a single JSON document to stdout on success; use `jq` or `json.loads` to parse.
 - On failure, the process exits non-zero and either prints an object with `"ok": false` (search / deep-search / suggest) or a plain error string on stderr (expand / related / index).
 - Paths returned by `search` are **relative to the search directory** unless the caller passed absolute inputs. `expand` accepts either form and resolves against `--directory`.
-- The shared SQLite DB defaults to `grga.deep_search.DEFAULT_DB_PATH` (under `~/.local/share/grga/`). Pass `--db <path>` to isolate per-project graphs.
+- The shared SQLite DB defaults to `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`). Pass `--db <path>` to isolate per-project graphs.
 - The Markdown structure sidecar is cached under `.grga/structure/` in the search directory root (or `$GRGA_SIDECAR_ROOT` if set). It is rebuilt automatically on `mtime` change.
 
 ## What this skill is not
@@ -168,5 +181,35 @@ Additional composition notes:
 - Not a QA agent. It gives evidence; the caller composes the answer.
 - Not a web / codebase-modification tool. `grga` never edits files.
 - Not a replacement for `rg` / `rga`. For raw byte-level search prefer `rg` directly; grga adds structure and graph on top.
+
+## Troubleshooting / FAQ
+
+**`grga related` returns `[]`.**
+The graph index is either missing or does not cover the seed keywords / directory.
+- Run `grga index build --scope <dir> --db <db>` first. `related --mode graph` needs `keyword_docs` + `keyword_pairs`; `--mode heading` needs `heading_docs` (Markdown only).
+- Pass `--directory <dir>` to `related` to restrict to a scope, and make sure it matches the resolved path used at `index build` time (both are `Path.resolve()`-ed).
+- Confirm the DB path: `related`, `index build`, and `suggest` must share the **same** `--db` value; the default is `~/.config/grga/deep_keywords.db`.
+- If the seed word is a stopword or shorter than 2 characters it never enters `keyword_docs`. Use a longer/more concrete term or try `--mode dir` (filesystem proximity, no index required for hits — it still uses `keyword_docs` internally, but a `dir` fallback is easier when the graph is sparse).
+
+**`grga expand` returned `level="lines"` even though I asked for `chapter`.**
+This is the documented degrade chain, not a bug: `chapter → paragraph → lines(±size) → lines(±0)`.
+- `chapter` only works on Markdown files with a parseable structure sidecar. Non-md paths silently degrade to `paragraph`.
+- A paragraph with fewer than 2 non-empty lines degrades to `lines(±size)`.
+- Always read `Context.level` on the return value rather than assuming the request was honoured.
+- If `chapter` should work but does not, delete the cached sidecar under `.grga/structure/` (or `$GRGA_SIDECAR_ROOT`) and re-run; it will be rebuilt from mtime.
+
+**`grga suggest` hangs, times out, or returns empty fields.**
+Only `suggest` calls an LLM; every other verb is offline.
+- Check `--llm-base-url`, `--llm-api-key`, `--llm-model` (or the `GRGA_OPENAI_*` / `OPENAI_*` env vars). Missing credentials typically raise, not hang.
+- Very large `--hits` payloads slow the request; cap with `--max-hits 10` for interactive use.
+- The response is parsed as strict JSON. If the model returns markdown or prose, the parser drops it and you get empty `keywords[]` / `queries[]`. Switch to a JSON-mode-capable model, or try a different `--intent`.
+- In tests / dry runs use `--no-votes` to avoid writing to `llm_extension_votes` while iterating on prompts.
+
+**I ran `suggest` several times but `related --mode graph` still ignores the new keywords.**
+`suggest` only writes to `llm_extension_votes` (a staging table). Pairs graduate into `keyword_pairs` (which `related` reads) only after `grga index promote`.
+- Inspect first: `grga index promote --dry-run --json` shows candidates and their `vote_count`.
+- Default threshold is `3`. If your pair has fewer votes, either run `suggest` more times or lower with `--threshold 2`.
+- Promotion is per-scope: if `suggest` was invoked with `--directory /a` and `promote` with `--directory /b`, the pair stays put. Use the same `--directory` (or omit it in both) to match.
+- Already-promoted pairs are skipped by default. Pass `--repromote` to add another additive count into `keyword_pairs`.
 
 For deeper internals (three-layer expansion model, graph schema, refeed loop), read `docs/design/v2-design.md` in the grga repo. For every JSON field, read `docs/api.md`.
