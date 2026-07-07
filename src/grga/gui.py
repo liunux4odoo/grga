@@ -577,6 +577,11 @@ class GrgaSearchApp(tk.Tk):
             command.append("--path-only")
         for glob_pattern in self._split_glob_patterns(self.file_globs_var.get()):
             command.extend(["--iglob", glob_pattern])
+        if not bool(self.deep_search_config.get("enable_tiered_search", True)):
+            command.append("--no-tiered-search")
+        else:
+            command.extend(["--min-results", str(self._deep_config_int("min_results", 5))])
+            command.extend(["--max-tiers", str(self._deep_config_int("max_tiers", 6))])
         return " ".join(self._quote_command_part(part) for part in command)
 
     def _split_glob_patterns(self, value):
@@ -621,6 +626,9 @@ class GrgaSearchApp(tk.Tk):
         lines.append(f"- 搜索目录：{self.directory_var.get()}")
         lines.append(f"- 关键字：{self.keyword_var.get().strip()}")
         lines.append(f"- 检索命令：`{self.last_search_command or self._get_command_preview_text()}`")
+        answer = result.get("answer")
+        if isinstance(answer, dict) and answer.get("text"):
+            lines.extend(["", "# 高级搜索答案", str(answer.get("text", ""))])
         if result.get("ok"):
             match_count = sum(1 for item in result.get("matches", []) if not item.get("is_context"))
             file_count = len(self.matches_by_file)
@@ -805,6 +813,9 @@ class GrgaSearchApp(tk.Tk):
                     decay_factor=self._deep_config_float("decay_factor", 0.9),
                     min_keyword_count=self._deep_config_float("min_keyword_count", 0.1),
                     global_library=bool(self.deep_search_config.get("global_library", False)),
+                    enable_tiered_search=bool(self.deep_search_config.get("enable_tiered_search", True)),
+                    min_results=self._deep_config_int("min_results", 5),
+                    max_tiers=self._deep_config_int("max_tiers", 6),
                     debug=debug,
                 )
             else:
@@ -870,9 +881,34 @@ class GrgaSearchApp(tk.Tk):
         warning_suffix = "，部分文件已跳过（点击查看）" if has_warning else ""
         self.status_var.set(f"Done: {count} matches in {file_count} files{warning_suffix}")
         self.status_label.configure(cursor="hand2" if has_warning else "")
-        if self.file_list.size() > 0:
+        answer_text = self._format_advanced_answer(result)
+        if answer_text:
+            self._set_content(answer_text)
+        elif self.file_list.size() > 0:
             self.file_list.selection_set(0)
             self._show_file_by_index(0)
+
+    def _format_advanced_answer(self, result):
+        answer = result.get("answer")
+        if not isinstance(answer, dict) or not answer.get("text"):
+            return ""
+        lines = ["高级搜索答案", "", str(answer.get("text", ""))]
+        iterations = result.get("iterations") or []
+        if iterations:
+            lines.extend(["", "搜索步骤"])
+            for item in iterations:
+                query_expression = item.get("query_expression") or ""
+                step_answer = item.get("answer") or item.get("error") or ""
+                lines.append(f"- {query_expression} -> {step_answer}")
+        citations = answer.get("citations") or []
+        if citations:
+            lines.extend(["", "证据"])
+            for item in citations:
+                path = item.get("path", "")
+                line_number = item.get("line_number")
+                location = f"{path}:{line_number}" if isinstance(line_number, int) else path
+                lines.append(f"- {location} {item.get('quote', '')}")
+        return "\n".join(lines)
 
     def _show_warning_details(self, event=None):
         result = self.last_search_result or {}

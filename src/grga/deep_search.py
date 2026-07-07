@@ -48,6 +48,9 @@ DEEP_SEARCH_DEFAULTS = {
     "decay_factor": DEFAULT_DECAY_FACTOR,
     "min_keyword_count": DEFAULT_MIN_COUNT,
     "global_library": False,
+    "enable_tiered_search": True,
+    "min_results": 5,
+    "max_tiers": 6,
 }
 SHARED_SEARCH_KEYS = {
     "pattern_mode": "mode",
@@ -327,6 +330,9 @@ def deep_search_directory(
     decay_factor=DEFAULT_DECAY_FACTOR,
     min_keyword_count=DEFAULT_MIN_COUNT,
     global_library=False,
+    enable_tiered_search=True,
+    min_results=5,
+    max_tiers=6,
     grga_command=None,
     debug=False,
 ):
@@ -353,6 +359,9 @@ def deep_search_directory(
             decay_factor=decay_factor,
             min_keyword_count=min_keyword_count,
             global_library=global_library,
+            enable_tiered_search=enable_tiered_search,
+            min_results=min_results,
+            max_tiers=max_tiers,
             grga_command=grga_command,
             debug=debug,
         )
@@ -383,6 +392,9 @@ def _deep_search_directory(
     decay_factor=DEFAULT_DECAY_FACTOR,
     min_keyword_count=DEFAULT_MIN_COUNT,
     global_library=False,
+    enable_tiered_search=True,
+    min_results=5,
+    max_tiers=6,
     grga_command=None,
     debug=False,
 ):
@@ -400,8 +412,68 @@ def _deep_search_directory(
     directory_key = str(target)
     database_file = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     _log_debug(debug, f"数据库路径: {database_file}")
+
     client, model_name = _make_openai_client(llm_base_url, llm_api_key, llm_model_name)
     _log_debug(debug, f"使用模型: {model_name}")
+
+    advanced_plan = _build_advanced_search_plan(client, model_name, query, max_related_keywords, debug=debug)
+    strategy = advanced_plan.get("strategy") or "fallback"
+    _log_debug(debug, f"高级规划: strategy={strategy}, reason={advanced_plan.get('reason', '')}")
+    if strategy == "horizontal":
+        return _execute_horizontal_plan(
+            target=target,
+            directory_key=directory_key,
+            query=query,
+            plan=advanced_plan,
+            client=client,
+            model_name=model_name,
+            pattern_mode=pattern_mode,
+            case_sensitive=case_sensitive,
+            max_count=max_count,
+            timeout=timeout,
+            before_context=before_context,
+            after_context=after_context,
+            multiline=multiline,
+            glob_patterns=glob_patterns,
+            path_only=path_only,
+            grga_command=grga_command,
+            max_extract_segments=max_extract_segments,
+            debug=debug,
+        )
+    if strategy == "multi_hop":
+        return _execute_multihop_plan(
+            target=target,
+            directory_key=directory_key,
+            query=query,
+            plan=advanced_plan,
+            client=client,
+            model_name=model_name,
+            pattern_mode=pattern_mode,
+            case_sensitive=case_sensitive,
+            max_count=max_count,
+            timeout=timeout,
+            before_context=before_context,
+            after_context=after_context,
+            multiline=multiline,
+            glob_patterns=glob_patterns,
+            path_only=path_only,
+            grga_command=grga_command,
+            max_extract_segments=max_extract_segments,
+            max_hops=max(1, max_related_keywords),
+            debug=debug,
+        )
+
+    # direct / keyword_expand / fallback 均落到本地分层搜索，但侧重点不同：
+    # - direct: 不需要扩展，只跑最严格的 1 层
+    # - keyword_expand: 走完整分层（主词 → 同义词扩展 → 兜底 OR）
+    # - fallback: 走完整分层
+    effective_enable_tiered = enable_tiered_search
+    effective_max_tiers = max_tiers
+    if strategy == "direct":
+        effective_max_tiers = 1
+        _log_debug(debug, "strategy=direct: 只运行最严格的 1 层查询")
+    elif strategy == "keyword_expand":
+        _log_debug(debug, "strategy=keyword_expand: 使用分层同义词扩展搜索")
 
     library = KeywordLibrary(database_file, decay_factor=decay_factor, min_count=min_keyword_count)
     try:
@@ -420,13 +492,46 @@ def _deep_search_directory(
             debug=debug,
         )
         _log_debug(debug, f"初始查询计划: groups={initial_plan.get('keyword_groups', [])}")
-        
+
         keyword_groups = initial_plan.get("keyword_groups")
-        current_expressions = _keyword_groups_to_queries(keyword_groups, query=query)
+        llm_tiers = initial_plan.get("query_tiers") or []
+        local_tiers = _keyword_groups_to_tiers(keyword_groups, query=query, max_tiers=effective_max_tiers)
+
+        current_expressions = []
+        seen_expr_keys = set()
+
+        def _append_expr(expression):
+            expression = _clean_expression(expression)
+            if not expression:
+                return
+            key = _normalize_expression_key(expression)
+            if key in seen_expr_keys:
+                return
+            seen_expr_keys.add(key)
+            current_expressions.append(expression)
+
+        if effective_enable_tiered:
+            for tier in llm_tiers:
+                _append_expr(tier)
+            for tier in local_tiers:
+                _append_expr(tier)
+        else:
+            for expr in _keyword_groups_to_queries(keyword_groups, query=query):
+                _append_expr(expr)
+
         if not current_expressions:
-            fallback_expr = _clean_expression(initial_plan.get("query_expression")) or _terms_to_or_expression(initial_plan.get("keywords", [])) or query
-            current_expressions = [fallback_expr]
-        
+            fallback_expr = (
+                _clean_expression(initial_plan.get("query_expression"))
+                or _terms_to_or_expression(initial_plan.get("keywords", []))
+                or query
+            )
+            _append_expr(fallback_expr)
+
+        if effective_max_tiers and effective_max_tiers > 0:
+            current_expressions = current_expressions[:effective_max_tiers]
+
+        _log_debug(debug, f"分层查询计划: {current_expressions}")
+
         # 展开所有关键词用于去重和历史记录
         all_keywords = []
         for group in keyword_groups or []:
@@ -438,17 +543,14 @@ def _deep_search_directory(
         used_keywords = {item.casefold() for item in current_keywords}
         all_matches = []
         iterations = []
-        seen_expressions = set()
         iteration = 0
+        stop_reason = "batch_complete"
+        min_results_threshold = max(1, int(min_results or 0)) if effective_enable_tiered else 0
 
         for current_expression in current_expressions:
             normalized_expression = _normalize_expression_key(current_expression)
-            _log_debug(debug, f"--- 搜索 {iteration} ---")
+            _log_debug(debug, f"--- Tier {iteration} ---")
             _log_debug(debug, f"查询表达式: {normalized_expression}")
-            if normalized_expression in seen_expressions:
-                _log_debug(debug, f"跳过: 表达式重复")
-                continue
-            seen_expressions.add(normalized_expression)
 
             search_result = _run_grga_search(
                 target,
@@ -466,32 +568,60 @@ def _deep_search_directory(
             )
             if not search_result.get("ok"):
                 _log_debug(debug, f"搜索失败: {search_result.get('error')}")
-                iterations.append({"index": iteration, "query_expression": normalized_expression, "error": search_result.get("error")})
+                iterations.append(
+                    {
+                        "index": iteration,
+                        "tier": iteration,
+                        "query_expression": normalized_expression,
+                        "error": search_result.get("error"),
+                    }
+                )
                 iteration += 1
                 continue
 
             matches = search_result.get("matches", [])
             match_count = sum(1 for item in matches if not item.get("is_context"))
-            _log_debug(debug, f"搜索完成: {match_count} 个匹配（不含上下文）, 总数 {len(matches)}")
-            
-            # 为每个匹配标记来自哪个查询表达式（用于后续排序）
+            _log_debug(
+                debug,
+                f"Tier {iteration} 完成: {match_count} 个匹配（不含上下文），总数 {len(matches)}",
+            )
+
+            # 为每个匹配标记来自哪个 tier 和查询表达式（用于后续排序）
             for match in matches:
                 match["from_query"] = normalized_expression
+                match["from_tier"] = iteration
             all_matches.extend(matches)
-            
-            iterations.append({
-                "index": iteration,
-                "query_expression": normalized_expression,
-                "match_count": match_count,
-            })
+
+            iterations.append(
+                {
+                    "index": iteration,
+                    "tier": iteration,
+                    "query_expression": normalized_expression,
+                    "match_count": match_count,
+                }
+            )
             iteration += 1
 
-        stop_reason = "batch_complete"
+            if enable_tiered_search:
+                unique_hits = {
+                    (item.get("path", ""), item.get("line_number"), item.get("text", ""))
+                    for item in all_matches
+                    if not item.get("is_context")
+                }
+                if len(unique_hits) >= min_results_threshold:
+                    stop_reason = "enough_results"
+                    _log_debug(
+                        debug,
+                        f"命中数 {len(unique_hits)} >= 阈值 {min_results_threshold}，停止后续分层",
+                    )
+                    break
+
         merged_matches = _merge_and_sort_matches(all_matches, keyword_groups)
         _log_debug(debug, f"深度搜索完成: 共 {len(merged_matches)} 个去重结果, 停止原因: {stop_reason}")
         return {
             "ok": True,
             "query": query,
+            "strategy": strategy,
             "initial_query_expression": "; ".join(current_expressions),
             "patterns": [item["query_expression"] for item in iterations if item.get("query_expression")],
             "directory": directory_key,
@@ -502,6 +632,418 @@ def _deep_search_directory(
         }
     finally:
         library.close()
+
+
+def _build_advanced_search_plan(client, model_name, query, max_steps, debug=False):
+    payload = _chat_json(
+        client,
+        model_name,
+        [
+            {"role": "system", "content": _advanced_planner_system_prompt()},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": "判断是否需要高级扩展搜索，并输出可执行搜索计划",
+                        "query": query,
+                        "max_steps": max_steps,
+                        "syntax": "term、\"phrase with spaces\"、A || B、A && B、(A || B) && C。多跳步骤可使用 {{answer_key}} 引用前序答案。",
+                        "strategies": ["direct", "keyword_expand", "horizontal", "multi_hop", "hybrid", "fallback"],
+                        "output_schema": {
+                            "strategy": "direct|keyword_expand|horizontal|multi_hop|hybrid|fallback",
+                            "reason": "为什么选择该策略",
+                            "steps": [
+                                {
+                                    "id": "唯一ID",
+                                    "type": "search_extract",
+                                    "query_template": "grga 查询表达式",
+                                    "depends_on": ["前序 answer_key，可选"],
+                                    "goal": "本步骤目标",
+                                    "answer_key": "抽取结果变量名，可选",
+                                    "metric": "数值指标名，可选",
+                                }
+                            ],
+                            "synthesis": {"format": "最终答案组织方式"},
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        debug=debug,
+    )
+    return _normalize_advanced_plan(payload, max_steps=max_steps)
+
+
+def _normalize_advanced_plan(payload, max_steps=8):
+    if not isinstance(payload, dict):
+        return {"strategy": "fallback", "steps": []}
+    strategy = str(payload.get("strategy") or "fallback").strip().lower().replace("-", "_")
+    if strategy not in {"direct", "keyword_expand", "horizontal", "multi_hop", "hybrid", "fallback"}:
+        strategy = "fallback"
+    steps = []
+    raw_steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    for index, raw in enumerate(raw_steps[: max(1, max_steps)]):
+        if not isinstance(raw, dict):
+            continue
+        expression = _clean_expression(raw.get("query_template") or raw.get("query_expression") or raw.get("query"))
+        if not expression:
+            continue
+        answer_key = _clean_answer_key(raw.get("answer_key") or raw.get("id") or f"step_{index + 1}")
+        depends_on = raw.get("depends_on") if isinstance(raw.get("depends_on"), list) else []
+        steps.append(
+            {
+                "id": _clean_answer_key(raw.get("id") or answer_key or f"step_{index + 1}"),
+                "type": str(raw.get("type") or "search_extract"),
+                "query_template": expression,
+                "depends_on": [_clean_answer_key(item) for item in depends_on if _clean_answer_key(item)],
+                "goal": str(raw.get("goal") or "").strip(),
+                "answer_key": answer_key,
+                "metric": str(raw.get("metric") or "").strip() or None,
+            }
+        )
+    if strategy in {"horizontal", "multi_hop", "hybrid"} and not steps:
+        strategy = "fallback"
+    if strategy == "hybrid":
+        strategy = "multi_hop" if any(step.get("depends_on") or "{{" in step.get("query_template", "") for step in steps) else "horizontal"
+    if strategy not in {"horizontal", "multi_hop"}:
+        steps = []
+    return {
+        "strategy": strategy,
+        "reason": str(payload.get("reason") or "").strip(),
+        "steps": steps,
+        "synthesis": payload.get("synthesis") if isinstance(payload.get("synthesis"), dict) else {},
+    }
+
+
+def _advanced_planner_system_prompt():
+    return """你是 grga 高级搜索规划器。只输出 JSON 对象。
+
+你要判断用户问题是否需要在本地文档中进行高级扩展搜索。
+
+策略说明：
+- direct：单次关键词搜索即可，不需要扩展
+- keyword_expand：只需要同义词、别名或关键词扩展，交给普通深度搜索处理
+- horizontal：需要把同一问题按年份、实体、地区、项目、部门、产品等维度拆成多个并列子查询
+- multi_hop：后续查询依赖前一步从文档中抽取出的答案
+- hybrid：同时包含横向拆分和多跳依赖
+- fallback：不确定或不适合高级扩展
+
+只有确实需要并列子查询或依赖式多跳查询时，才选择 horizontal、multi_hop 或 hybrid。不要因为示例中的具体词而套模板。
+
+步骤规则：
+1. query_template 必须是适合 grga 的短关键词表达式，不要写完整长句
+2. 可使用 A || B 表示同义词，可使用 A && B 表示必须共现
+3. 多跳依赖使用 {{answer_key}} 引用前序抽取结果
+4. answer_key 使用英文、数字或下划线；横向维度可以使用年份、实体名或字段名
+5. 不要编造事实，只规划要搜索什么
+6. 如果不需要高级扩展，输出 strategy 为 direct、keyword_expand 或 fallback，steps 可为空
+"""
+
+
+def _clean_answer_key(value):
+    text = re.sub(r"\s+", "_", str(value or "").strip())
+    text = re.sub(r"[^0-9A-Za-z_\u4e00-\u9fff-]+", "", text)
+    return text[:40]
+
+
+def _execute_horizontal_plan(
+    target,
+    directory_key,
+    query,
+    plan,
+    client,
+    model_name,
+    pattern_mode,
+    case_sensitive,
+    max_count,
+    timeout,
+    before_context,
+    after_context,
+    multiline,
+    glob_patterns,
+    path_only,
+    grga_command,
+    max_extract_segments,
+    debug=False,
+):
+    all_matches = []
+    iterations = []
+    fields = {}
+    citations = []
+    patterns = []
+    for index, step in enumerate(plan.get("steps", [])):
+        expression = _clean_expression(step.get("query_template"))
+        if not expression:
+            continue
+        patterns.append(expression)
+        search_result = _run_grga_search(
+            target,
+            expression,
+            pattern_mode=pattern_mode,
+            case_sensitive=case_sensitive,
+            max_count=max_count,
+            timeout=timeout,
+            before_context=before_context,
+            after_context=after_context,
+            multiline=multiline,
+            glob_patterns=glob_patterns,
+            path_only=path_only,
+            grga_command=grga_command,
+        )
+        matches = search_result.get("matches", []) if search_result.get("ok") else []
+        for match in matches:
+            match["from_query"] = expression
+            match["advanced_step"] = step.get("id")
+        all_matches.extend(matches)
+        extracted = _extract_step_answer(client, model_name, query, step, matches, max_extract_segments=max_extract_segments, debug=debug)
+        answer_key = step.get("answer_key") or step.get("id") or str(index)
+        fields[answer_key] = extracted.get("answer") or "未找到"
+        citations.extend(extracted.get("citations", []))
+        iterations.append(
+            {
+                "index": index,
+                "step_id": step.get("id"),
+                "strategy": "horizontal",
+                "query_expression": expression,
+                "goal": step.get("goal"),
+                "answer_key": answer_key,
+                "answer": fields[answer_key],
+                "confidence": extracted.get("confidence", 0),
+                "match_count": sum(1 for item in matches if not item.get("is_context")),
+                "error": None if search_result.get("ok") else search_result.get("error"),
+            }
+        )
+    merged_matches = _merge_and_sort_matches(all_matches)
+    return {
+        "ok": True,
+        "query": query,
+        "strategy": "horizontal",
+        "initial_query_expression": "; ".join(patterns),
+        "patterns": patterns,
+        "directory": directory_key,
+        "plan": plan,
+        "answer": {"text": _format_horizontal_answer(query, fields), "fields": fields, "citations": citations},
+        "iterations": iterations,
+        "stop_reason": "horizontal_complete",
+        "matches": merged_matches,
+    }
+
+
+def _execute_multihop_plan(
+    target,
+    directory_key,
+    query,
+    plan,
+    client,
+    model_name,
+    pattern_mode,
+    case_sensitive,
+    max_count,
+    timeout,
+    before_context,
+    after_context,
+    multiline,
+    glob_patterns,
+    path_only,
+    grga_command,
+    max_extract_segments,
+    max_hops=4,
+    debug=False,
+):
+    context = {}
+    all_matches = []
+    iterations = []
+    citations = []
+    reasoning_chain = []
+    patterns = []
+    stop_reason = "multi_hop_complete"
+    for index, step in enumerate(plan.get("steps", [])[:max_hops]):
+        missing = [dep for dep in step.get("depends_on", []) if not context.get(dep)]
+        if missing:
+            stop_reason = "missing_dependency"
+            iterations.append({"index": index, "step_id": step.get("id"), "strategy": "multi_hop", "missing": missing})
+            break
+        expression = _clean_expression(_render_query_template(step.get("query_template", ""), context))
+        if not expression:
+            continue
+        patterns.append(expression)
+        search_result = _run_grga_search(
+            target,
+            expression,
+            pattern_mode=pattern_mode,
+            case_sensitive=case_sensitive,
+            max_count=max_count,
+            timeout=timeout,
+            before_context=before_context,
+            after_context=after_context,
+            multiline=multiline,
+            glob_patterns=glob_patterns,
+            path_only=path_only,
+            grga_command=grga_command,
+        )
+        matches = search_result.get("matches", []) if search_result.get("ok") else []
+        for match in matches:
+            match["from_query"] = expression
+            match["advanced_step"] = step.get("id")
+        all_matches.extend(matches)
+        extracted = _extract_step_answer(client, model_name, query, step, matches, max_extract_segments=max_extract_segments, debug=debug)
+        answer_key = step.get("answer_key") or step.get("id")
+        answer = extracted.get("answer")
+        if answer_key and answer:
+            context[answer_key] = answer
+        citations.extend(extracted.get("citations", []))
+        chain_item = {
+            "step": step.get("id"),
+            "goal": step.get("goal"),
+            "query_expression": expression,
+            "answer_key": answer_key,
+            "answer": answer,
+            "confidence": extracted.get("confidence", 0),
+        }
+        reasoning_chain.append(chain_item)
+        iterations.append(
+            {
+                "index": index,
+                "step_id": step.get("id"),
+                "strategy": "multi_hop",
+                "query_expression": expression,
+                "goal": step.get("goal"),
+                "answer_key": answer_key,
+                "answer": answer or "未找到",
+                "confidence": extracted.get("confidence", 0),
+                "match_count": sum(1 for item in matches if not item.get("is_context")),
+                "error": None if search_result.get("ok") else search_result.get("error"),
+            }
+        )
+        if not answer:
+            stop_reason = "answer_not_found"
+            break
+    merged_matches = _merge_and_sort_matches(all_matches)
+    return {
+        "ok": True,
+        "query": query,
+        "strategy": "multi_hop",
+        "initial_query_expression": "; ".join(patterns),
+        "patterns": patterns,
+        "directory": directory_key,
+        "plan": plan,
+        "answer": {"text": _format_multihop_answer(query, context, reasoning_chain), "fields": context, "reasoning_chain": reasoning_chain, "citations": citations},
+        "iterations": iterations,
+        "stop_reason": stop_reason,
+        "matches": merged_matches,
+    }
+
+
+def _render_query_template(template, context):
+    def replace(match):
+        return str(context.get(match.group(1), ""))
+
+    return re.sub(r"\{\{([a-zA-Z0-9_]+)\}\}", replace, str(template or ""))
+
+
+def _extract_step_answer(client, model_name, original_query, step, matches, max_extract_segments=20, debug=False):
+    if client is None or not model_name:
+        return {"answer": None, "confidence": 0, "citations": [], "missing": True}
+    try:
+        return _extract_step_answer_with_llm(client, model_name, original_query, step, matches, max_extract_segments=max_extract_segments, debug=debug)
+    except Exception as exc:
+        _log_debug(debug, f"LLM 步骤抽取失败: {exc}")
+        return {"answer": None, "confidence": 0, "citations": [], "missing": True}
+
+
+def _extract_step_answer_with_llm(client, model_name, original_query, step, matches, max_extract_segments=20, debug=False):
+    segments = _segments_from_matches(matches, max_extract_segments)
+    if not segments:
+        return {"answer": None, "confidence": 0, "citations": [], "missing": True}
+    payload = _chat_json(
+        client,
+        model_name,
+        [
+            {"role": "system", "content": _step_answer_extractor_prompt()},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": "从搜索结果中抽取当前步骤答案",
+                        "original_query": original_query,
+                        "step_goal": step.get("goal"),
+                        "answer_key": step.get("answer_key"),
+                        "segments": segments,
+                        "output_schema": {"answer": "答案或 null", "confidence": 0.0, "evidence_ids": ["片段ID"], "quote": "关键原文引用", "missing": False},
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        debug=debug,
+    )
+    answer = payload.get("answer")
+    answer = str(answer).strip() if answer is not None else None
+    if not answer or answer.lower() == "null":
+        answer = None
+    evidence_ids = {str(item) for item in payload.get("evidence_ids", []) if item is not None}
+    if not evidence_ids and answer:
+        evidence_ids = {segments[0]["id"]}
+    citations = []
+    for segment in segments:
+        if str(segment.get("id")) in evidence_ids:
+            citations.append({"path": segment.get("path", ""), "line_number": segment.get("line_number"), "quote": payload.get("quote") or segment.get("text", "")})
+    return {"answer": answer, "confidence": _safe_float(payload.get("confidence"), 0), "citations": citations, "missing": bool(payload.get("missing", answer is None))}
+
+
+def _format_horizontal_answer(query, fields):
+    if not fields:
+        return "未找到足够信息回答该问题。"
+    lines = [f"{query}："]
+    for key in sorted(fields.keys(), reverse=True):
+        lines.append(f"- {key}：{fields[key]}")
+    return "\n".join(lines)
+
+
+def _format_multihop_answer(query, context, reasoning_chain):
+    if context:
+        lines = [f"{query}："]
+        for key, value in context.items():
+            lines.append(f"- {key}：{value}")
+        return "\n".join(lines)
+    if reasoning_chain:
+        lines = [f"{query}："]
+        for item in reasoning_chain:
+            lines.append(f"- {item.get('goal')}：{item.get('answer') or '未找到'}")
+        return "\n".join(lines)
+    return "未找到足够信息回答该问题。"
+
+
+def _step_answer_extractor_prompt():
+    return """你是本地文档搜索结果答案抽取器。只输出 JSON 对象。
+
+根据原始问题、当前步骤目标和搜索片段，抽取当前步骤答案。
+
+要求：
+1. 只能使用给定搜索片段，不要使用外部知识
+2. 证据不足时 answer 返回 null，missing 返回 true
+3. answer 应尽量简短，适合作为下一步搜索变量
+4. 如果是数值指标，保留单位
+5. 如果是地点，保留完整地名
+6. 如果是人物，保留完整姓名
+
+输出 JSON：
+{
+  "answer": "答案或 null",
+  "confidence": 0.0,
+  "evidence_ids": ["片段ID"],
+  "quote": "关键原文引用",
+  "missing": false
+}
+"""
+
+
+def _safe_float(value, default=0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _make_openai_client(base_url, api_key, model_name):
@@ -540,12 +1082,21 @@ def _build_query_plan(client, model_name, query, history, max_keywords, debug=Fa
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "task": "将用户查询转换为 grga 查询表达式",
+                        "task": "将用户查询转换为 grga 分层查询计划",
                         "query": query,
                         "max_keywords": max_keywords,
                         "history": history,
                         "syntax": "term、\"phrase with spaces\"、A || B、A && B、(A || B) && C。未显式连接的相邻项按 OR 处理。",
-                        "output_schema": {"keyword_groups": [["核心实体", "别名1", "别名2"]], "query_expression": "grga 查询表达式（可选，代码会优先用 keyword_groups）"},
+                        "output_schema": {
+                            "keyword_groups": [["核心实体", "别名1", "别名2"]],
+                            "query_tiers": [
+                                "最严格：核心组主词全部 AND",
+                                "次严：组内展开同义词后 AND",
+                                "较宽：丢弃次要概念组",
+                                "兜底：全部 OR",
+                            ],
+                            "query_expression": "可选，代码优先使用 query_tiers 或 keyword_groups",
+                        },
                     },
                     ensure_ascii=False,
                 ),
@@ -633,16 +1184,28 @@ def _planner_system_prompt():
 
 【输出规则】
 1. 单个人名、地名、外号、术语或短语查询，只输出 1 个概念组
-2. 每个概念组包含 1-5 个可替换关键词
+2. 每个概念组包含 1-5 个可替换关键词，第 1 个词必须是最标准、检索价值最高的**主词**
 3. 多个概念组之间表示必须同时出现的不同核心概念
 4. 关键词必须是有检索价值的实体、名词或短语。避免泛词、虚词、形容词和过长句子
+
+【分层查询 query_tiers（可选但推荐）】
+输出一个从严到松的查询表达式列表，代码会按顺序执行，命中数达标即停止：
+- 第 1 层最严格：每个概念组只取主词，用 && 连接（如 "神经网络 && 图像分类"）
+- 第 2 层：每组主词 + 少量高价值同义词做 OR，再组间 && （如 "(神经网络 || 深度学习) && 图像分类"）
+- 第 3 层：组内展开更多同义词
+- 后续层可逐步丢弃最不重要的概念组，或改用 || 兜底
+- 单概念查询只需要 2-3 层（主词 → 主词+关键别名 → 全部别名 OR）
+- 不要重复相同表达式；表达式必须符合 grga 语法
 
 【示例】
 查询："二愣子"
 输出：
 {
-  "keyword_groups": [
-    ["二愣子", "二楞子", "愣头青", "憨子"]
+  "keyword_groups": [["二愣子", "二楞子", "愣头青", "憨子"]],
+  "query_tiers": [
+    "二愣子",
+    "二愣子 || 二楞子",
+    "二愣子 || 二楞子 || 愣头青 || 憨子"
   ]
 }
 
@@ -652,6 +1215,12 @@ def _planner_system_prompt():
   "keyword_groups": [
     ["神经网络", "深度学习", "深度神经网络"],
     ["图像分类", "图片识别", "视觉分类"]
+  ],
+  "query_tiers": [
+    "神经网络 && 图像分类",
+    "(神经网络 || 深度学习) && (图像分类 || 图片识别)",
+    "(神经网络 || 深度学习 || 深度神经网络) && (图像分类 || 图片识别 || 视觉分类)",
+    "神经网络 || 深度学习 || 图像分类 || 图片识别"
   ]
 }"""
 
@@ -696,7 +1265,7 @@ def _loads_json_object(content):
 
 def _normalize_plan(payload):
     if not isinstance(payload, dict):
-        return {"keyword_groups": [], "keywords": [], "query_expression": ""}
+        return {"keyword_groups": [], "keywords": [], "query_expression": "", "query_tiers": []}
     keyword_groups = payload.get("keyword_groups")
     if not isinstance(keyword_groups, list):
         keyword_groups = []
@@ -710,10 +1279,24 @@ def _normalize_plan(payload):
             continue
         if terms:
             cleaned_groups.append(terms)
+    query_tiers = []
+    seen_tiers = set()
+    raw_tiers = payload.get("query_tiers")
+    if isinstance(raw_tiers, list):
+        for item in raw_tiers:
+            expression = _clean_expression(item if isinstance(item, str) else item.get("query") if isinstance(item, dict) else "")
+            if not expression:
+                continue
+            key = _normalize_expression_key(expression)
+            if key in seen_tiers:
+                continue
+            seen_tiers.add(key)
+            query_tiers.append(expression)
     return {
         "keyword_groups": cleaned_groups,
         "keywords": _normalize_keywords(payload.get("keywords", [])),
         "query_expression": _clean_expression(payload.get("query_expression")),
+        "query_tiers": query_tiers,
     }
 
 
@@ -767,6 +1350,62 @@ def _keyword_groups_to_queries(keyword_groups, query=None):
     if len(group_exprs) < 2:
         return group_exprs
     return [" && ".join(group_exprs)]
+
+
+def _keyword_groups_to_tiers(keyword_groups, query=None, max_tiers=6):
+    """由概念组本地生成从严到松的分层查询表达式（去重、按顺序）。"""
+    groups = [group for group in (keyword_groups or []) if group]
+    if not groups:
+        return []
+
+    tiers = []
+    seen = set()
+
+    def _push(expression):
+        expression = _clean_expression(expression)
+        if not expression:
+            return
+        key = _normalize_expression_key(expression)
+        if key in seen:
+            return
+        seen.add(key)
+        tiers.append(expression)
+
+    single_concept = len(groups) == 1
+
+    if single_concept:
+        terms = []
+        for group in groups:
+            terms.extend(group)
+        terms = _normalize_keywords(terms)
+        if terms:
+            _push(_quote_query_term(terms[0]))
+        if len(terms) >= 2:
+            _push(_terms_to_or_expression(terms[:2]))
+        if len(terms) > 2:
+            _push(_terms_to_or_expression(terms))
+    else:
+        primary_exprs = [_quote_query_term(group[0]) for group in groups if group]
+        if len(primary_exprs) >= 2:
+            _push(" && ".join(primary_exprs))
+        expanded_exprs = [_terms_to_or_expression(group) for group in groups]
+        expanded_exprs = [item for item in expanded_exprs if item]
+        if len(expanded_exprs) >= 2:
+            _push(" && ".join(expanded_exprs))
+        for drop in range(1, len(expanded_exprs) - 1):
+            kept = expanded_exprs[: len(expanded_exprs) - drop]
+            if len(kept) >= 2:
+                _push(" && ".join(kept))
+            elif kept:
+                _push(kept[0])
+        all_terms = []
+        for group in groups:
+            all_terms.extend(group)
+        _push(_terms_to_or_expression(all_terms))
+
+    if max_tiers and max_tiers > 0:
+        tiers = tiers[:max_tiers]
+    return tiers
 
 
 def _is_single_concept_query(query):
@@ -885,10 +1524,10 @@ def _top_keywords(keywords, limit):
 
 
 def _merge_and_sort_matches(matches, keyword_groups=None):
-    """合并去重并按匹配的关键字组数量排序。
-    
+    """合并去重并按 tier 层级（更严格的 tier 优先）与匹配的关键字组数量排序。
+
     如果一条结果被多个两两组合查询命中，说明它匹配了更多的概念组，
-    排序时优先展示（按 from_query 数量降序）。
+    排序时优先展示（按 from_query 数量降序）；同时更早（更严格）的 tier 排在前面。
     """
     deduped = {}
     for item in matches:
@@ -897,21 +1536,14 @@ def _merge_and_sort_matches(matches, keyword_groups=None):
         if existing is None:
             deduped[key] = item
         elif existing.get("is_context") and not item.get("is_context"):
-            deduped[key] = item
+            # 保留非上下文匹配，但仍合并 tier / from_query 信息
+            merged = item
+            _merge_query_info(merged, existing)
+            deduped[key] = merged
         else:
-            # 合并 from_query 信息
-            existing_queries = set()
-            if isinstance(existing.get("from_query"), str):
-                existing_queries.add(existing["from_query"])
-            elif isinstance(existing.get("from_query"), set):
-                existing_queries = existing["from_query"]
-            if isinstance(item.get("from_query"), str):
-                existing_queries.add(item["from_query"])
-            elif isinstance(item.get("from_query"), set):
-                existing_queries.update(item["from_query"])
-            deduped[key]["from_query"] = existing_queries
+            _merge_query_info(existing, item)
 
-    # 清理 from_query 并计算匹配深度
+    # 清理临时字段并计算匹配深度
     results = []
     for item in deduped.values():
         from_queries = item.get("from_query")
@@ -919,20 +1551,55 @@ def _merge_and_sort_matches(matches, keyword_groups=None):
             item["_match_depth"] = len(from_queries)
         else:
             item["_match_depth"] = 1
+        tiers = item.get("from_tier")
+        if isinstance(tiers, (set, list)) and tiers:
+            item["_best_tier"] = min(int(t) for t in tiers if isinstance(t, int))
+        elif isinstance(tiers, int):
+            item["_best_tier"] = tiers
+        else:
+            item["_best_tier"] = 0
         item.pop("from_query", None)
+        item.pop("from_tier", None)
         results.append(item)
 
     return sorted(results, key=_match_sort_key)
 
 
+def _merge_query_info(target, other):
+    existing_queries = set()
+    if isinstance(target.get("from_query"), str):
+        existing_queries.add(target["from_query"])
+    elif isinstance(target.get("from_query"), (set, list)):
+        existing_queries.update(target["from_query"])
+    if isinstance(other.get("from_query"), str):
+        existing_queries.add(other["from_query"])
+    elif isinstance(other.get("from_query"), (set, list)):
+        existing_queries.update(other["from_query"])
+    if existing_queries:
+        target["from_query"] = existing_queries
+
+    existing_tiers = set()
+    for source in (target.get("from_tier"), other.get("from_tier")):
+        if isinstance(source, int):
+            existing_tiers.add(source)
+        elif isinstance(source, (set, list)):
+            for value in source:
+                if isinstance(value, int):
+                    existing_tiers.add(value)
+    if existing_tiers:
+        target["from_tier"] = existing_tiers
+
+
 def _match_sort_key(item):
-    """排序键：先按匹配深度降序，再按文件路径、行号升序。"""
+    """排序键：先按更严格 tier 升序，再按匹配深度降序，再按文件路径、行号升序。"""
     line_number = item.get("line_number")
     if not isinstance(line_number, int):
         line_number = 0
-    # 优先按 _match_depth 降序（取负值放在元组第一个位置）
+    tier = item.get("_best_tier", 0)
+    if not isinstance(tier, int):
+        tier = 0
     depth = -(item.get("_match_depth", 1))
-    return (depth, str(item.get("path", "")), line_number, 1 if item.get("is_context") else 0, str(item.get("text", "")))
+    return (tier, depth, str(item.get("path", "")), line_number, 1 if item.get("is_context") else 0, str(item.get("text", "")))
 
 
 def _normalize_expression_key(expression):

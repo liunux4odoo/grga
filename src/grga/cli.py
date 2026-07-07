@@ -47,6 +47,11 @@ def _print_result(result):
     if skipped:
         typer.echo(f"skipped: {len(skipped)} records", err=True)
 
+    answer = result.get("answer")
+    if isinstance(answer, dict) and answer.get("text"):
+        typer.echo(answer["text"])
+        typer.echo("")
+
     matches = result.get("matches", [])
     for item in matches:
         path = item.get("path", "")
@@ -140,6 +145,9 @@ def deep_search_command(
     decay_factor: Optional[float] = typer.Option(None, "--decay-factor", help="Decay multiplier applied to keyword counts before each run (0-1)."),
     min_keyword_count: Optional[float] = typer.Option(None, "--min-keyword-count", help="Drop keyword records whose count falls below this threshold."),
     global_library: Optional[bool] = typer.Option(None, "--global-library/--directory-library", help="Use the whole keyword library or only the current directory scope."),
+    enable_tiered_search: Optional[bool] = typer.Option(None, "--tiered-search/--no-tiered-search", help="Run queries from strict to loose and stop once enough results are found."),
+    min_results: Optional[int] = typer.Option(None, "--min-results", help="Minimum unique matches before tiered search stops relaxing."),
+    max_tiers: Optional[int] = typer.Option(None, "--max-tiers", help="Maximum number of tiered query expressions to run."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
@@ -171,6 +179,9 @@ def deep_search_command(
             "decay_factor": decay_factor,
             "min_keyword_count": min_keyword_count,
             "global_library": global_library,
+            "enable_tiered_search": enable_tiered_search,
+            "min_results": min_results,
+            "max_tiers": max_tiers,
         }
     )
 
@@ -196,6 +207,9 @@ def deep_search_command(
         decay_factor=options["decay_factor"],
         min_keyword_count=options["min_keyword_count"],
         global_library=options["global_library"],
+        enable_tiered_search=options["enable_tiered_search"],
+        min_results=options["min_results"],
+        max_tiers=options["max_tiers"],
         debug=effective_debug,
     )
     result = json.loads(raw)
