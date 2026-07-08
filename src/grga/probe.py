@@ -169,6 +169,13 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
     if per_file:
         base["per_file"] = sorted(files, key=lambda item: item["matches"], reverse=True)
 
+    if total_lines > 0:
+        top_matches = max((item["matches"] for item in files), default=0)
+        if top_matches / total_lines > 0.9:
+            existing = base.get("warning")
+            note = "single-file dominance"
+            base["warning"] = f"{existing}; {note}" if existing else note
+
     if sample and total_lines > 0:
         sample_timeout = _remaining(deadline)
         if sample_timeout == 0:
