@@ -1,21 +1,22 @@
 ---
 name: grga
-description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the four grga v2 verbs (search / expand / related / suggest) plus the offline index build/promote helpers. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
+description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga v2 verbs (probe / search / expand / related / suggest) plus the offline index build/promote helpers, and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
 ---
 
 # grga skill
 
-grga v2 is a **local, structure-aware search toolbox** built on top of `ripgrep-all`. The skill wraps four independent, idempotent verbs so a caller agent can compose them into a reflection loop without hidden state and without paying LLM cost until absolutely necessary.
+grga v2 is a **local, structure-aware search toolbox** built on top of `ripgrep-all`. The skill wraps five independent, idempotent verbs so a caller agent can compose them into a reflection loop without hidden state and without paying LLM cost until absolutely necessary.
 
 ## 30-second quickstart
 
-Four commands cover the full basic workflow. Copy-paste them against any local directory:
+Five commands cover the full basic workflow. Copy-paste them against any local directory:
 
 ```bash
 grga index build --scope ./docs --db ~/.config/grga/deep_keywords.db --json  # 1) one-time (or on mtime change) offline index
-grga search "your query" --directory ./docs --json                            # 2) always start here; get hits + metadata
-grga expand "path/to/file.md:42" --directory ./docs --level chapter --json    # 3) widen one hit into a chapter/paragraph/lines
-grga related "keyword" --mode graph --db ~/.config/grga/deep_keywords.db --json  # 4) find neighbouring documents (needs step 1)
+grga probe "your query" --directory ./docs --json                            # 2) cheap size check before committing to a full search
+grga search "your query" --directory ./docs --json                           # 3) baseline hits + metadata
+grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 4) widen one hit into a chapter/paragraph/lines
+grga related "keyword" --mode graph --db ~/.config/grga/deep_keywords.db --json  # 5) find neighbouring documents (needs step 1)
 ```
 
 `suggest` is the LLM fallback and only runs on demand — see the `search → suggest → promote` example.
@@ -38,9 +39,35 @@ Do **not** use this skill for:
 - Autonomous "agent" loops — grga verbs are stateless; the caller owns the reflection loop.
 - Deep-search style QA with LLM planning — that is the separate `grga deep-search` command, not part of the four-verb Skill contract.
 
-## The four verbs (contract summary)
+## The five verbs (contract summary)
 
 Every verb has a stable CLI form with `--json` output. The JSON schemas are declared in `docs/api.md` (in the grga repo). All verbs are **idempotent** and **read-only** by default, except `suggest` (which may vote into `llm_extension_votes`) and `index build` / `index promote` (which write to the SQLite graph DB).
+
+### 0. `grga probe <query> -d <dir> --json`
+
+The cheapest verb: run `rga --count-matches` (or `rg --files` for `--path-only`) once and return **how big the result would be**, without fetching any match bodies or context. Use it to size a query and decide whether to tighten / loosen it *before* paying for a full `search`.
+
+Signature (conceptual):
+
+```
+probe(query: str, scope: dir, *, mode=auto|regex|glob, case_sensitive=False,
+      multiline=False, iglob=[], path_only=False, implicit_operator=and|or,
+      sample=0, per_file=False, timeout=60) ->
+  {ok, directory, patterns, terms, pcre2, implicit_operator, implicit_notice,
+   total_lines, file_count, truncated, warning, skipped_files, elapsed_ms,
+   per_file?[{path, matches}], sample?{sampled_lines, avg_line_bytes, est_total_bytes}}
+```
+
+- `total_lines` — total matching lines across the corpus (the real hit count `search` would return, **before** context expansion and **ignoring** `--max-count` / `--max-total`).
+- `file_count` — number of files with at least one hit.
+- `--sample N` — additionally sample up to N matched lines to estimate `avg_line_bytes` and `est_total_bytes`; the estimate is order-of-magnitude only, not an exact byte count.
+- `--per-file` — attach per-file match counts (descending), useful for spotting a single dominating file.
+- Query-semantic flags (`--mode` / `--case-sensitive` / `--iglob` / `--multiline` / `--path-only` / `--implicit-and` / `--implicit-or`) are **identical** to `search`, so the probed query and the executed query are the same. `--timeout` is a global budget covering both the count and the sampling pass.
+- On failure the JSON is **homogeneous** with the success shape (same fields, zeroed) plus `ok:false` and `error`.
+
+`probe` makes **no** decision itself — it returns numbers, never rewrites the query, never judges "too many / too few". The caller owns the threshold logic.
+
+Use when: the caller is about to run `search` on an unfamiliar corpus, a broad keyword, or a huge single file, and wants a cheap size signal first. Skip it only for tiny, well-scoped corpora where a full `search` is already cheap.
 
 ### 1. `grga search <query> -d <dir> --json`
 
@@ -153,43 +180,130 @@ Use when: search returns too few / low-quality results, or the user query is int
 
 Full JSON schemas for every command are enumerated in `docs/api.md`.
 
-## Decision guide — when to call which verb
+## Tiered reflection workflow
 
-The caller agent should walk this checklist for any grga task:
+The five verbs form a **four-tier reflection loop**, ordered from cheapest to most expensive. Each tier ends with a caller-owned **evaluation checkpoint**: read a few numbers/fields off the JSON, decide *proceed / adjust / escalate*, and only pay for the next tier when the current one is genuinely insufficient. grga verbs never loop on their own — the caller owns every decision.
 
-1. **Has the caller been given a concrete query?** → start with `search`. Never skip this step; the metadata (`heading_path`, `occurrence_index`, `nearby_hits`) is often enough to answer without any other verb.
-2. **Does the caller need *more text* around one hit?** → `expand`. Choose `chapter` for Markdown (most informative), `paragraph` for prose / code comments, `lines` for source code (with `--size 10`+ for a wider window), `document` only for small files.
-3. **Does the caller need *other documents* that discuss the same topic?** → `related`.
-   - Use `mode=graph` when the goal is conceptual similarity (requires a built index).
-   - Use `mode=dir` when the user is browsing a specific area of the repo.
-   - Use `mode=heading` when the user is comparing the same **section** across files (uniquely powerful for structured Markdown corpora).
-4. **Did `search` return < N useful hits, or is the user query vague?** → `suggest`.
-   - Vague query, no hits yet → `intent=reformulate`; feed the returned `queries[]` back into `search`.
-   - Hits exist but low quality → `intent=rerank`; use the returned `ranking` to reorder.
-   - Hits are okay but the caller wants more angles → `intent=expand`; feed `keywords[]` into a new `search` or into `related`.
-5. **Periodically (or at task boundaries)** → `grga index promote --dry-run` to see what the graph would learn from recent LLM output; run without `--dry-run` when the caller is confident.
+```
+T0 probe  → (evaluate size)   → tighten/loosen  or  proceed
+T1 search → (evaluate hits)   → T2 or T3        or  answer
+T2 expand + related → (evaluate coverage) → answer  or  T3
+T3 suggest → (evaluate LLM output) → loop back to T0/T1
+```
 
-Rule of thumb: **cost order is search ≪ expand ≪ related ≪ suggest**. Always exhaust the cheaper verbs before the more expensive one. `suggest` is the fallback, not the default.
+Cost order: **probe ≪ search ≪ expand ≪ related ≪ suggest**. Exhaust the cheaper tiers before spending on the next one.
+
+### T0 — probe: size the query
+
+Run `grga probe` with the exact same query-semantic flags you would pass to `search`. Read:
+
+- `total_lines`, `file_count`
+- `per_file[0].matches` (if `--per-file`) — spot single-file domination
+- `sample.est_total_bytes` (if `--sample N`) — rough context-budget check
+
+Decide:
+
+| Observation | Action |
+|---|---|
+| `total_lines == 0` | Loosen: `and → or`, drop a term, drop an `--iglob`, or jump to **T3** `intent=reformulate` |
+| `total_lines` huge or `est_total_bytes` blows the budget | Tighten: `or → and`, add a term, add `--iglob`, or plan to use `--max-total` / `--max-count` at T1 |
+| One file holds >80% of `total_lines` | Add an `--iglob` excluding it, or plan a per-file cap |
+| `total_lines` in a sane band (task-specific, e.g. 5-500) | Proceed to **T1** with the same params |
+
+Guardrail: cap re-probes at ~2-3 rounds. If the query will not fall into band, pick the closest tier and proceed — do not spin.
+
+Skip T0 only when the corpus is tiny and well-scoped (a single small directory of hand-written notes, for example) so that a full `search` is already cheap.
+
+### T1 — search: get real evidence
+
+Run `grga search` with the params validated in T0. Read from `matches[]` / envelope:
+
+- length of `matches` (non-context), `truncated`
+- distribution of `path` values (how many distinct files)
+- `heading_path`, `occurrence_index`, `nearby_hits`, `line_ratio`
+- `implicit_notice` (was your query interpreted as AND when you expected OR?)
+
+Decide:
+
+| Observation | Action |
+|---|---|
+| `matches` empty | Back to **T0** to loosen; if already loose, jump to **T3** `intent=reformulate` |
+| `truncated: true` | Tighten (back to T0) or raise `--max-total`; do not act on a biased slice |
+| Hits concentrated in 1-2 files, but topic likely covered elsewhere | **T2** `related --mode dir` or `--mode heading` for breadth |
+| < ~5 hits and unsatisfactory | **T3** `intent=expand` for more angles, then loop to T1 |
+| Hits sufficient and well-labelled | Answer directly, or **T2** `expand` if you need quotable prose |
+| Individual hit text already answers the question | Quote `matches[i].text` and stop — skip T2 |
+
+Key metadata idioms:
+
+- Missing `heading_path` on Markdown hits means the sidecar was not built; the answer still holds, just no chapter context.
+- `line_ratio` near 0 or 1 hints at boilerplate (imports, footer) — down-weight when reranking manually.
+- High `nearby_hits` (e.g. ≥3) means the hit sits in a hotspot: `expand --level paragraph` usually beats `--level lines`.
+
+### T2 — expand and related: widen the evidence
+
+Two independent capabilities, choose based on what is missing:
+
+- **Need more text around a hit** → `grga expand`. Chapter for Markdown (falls back to paragraph on non-md), lines with `--size 10+` for source code, document only for small files. Always read the returned `level` field — it reflects what was actually achieved.
+- **Need other documents on the same topic** → `grga related`. `mode=graph` (needs `index build`) for conceptual neighbours, `mode=dir` for repository proximity, `mode=heading` for the same section across Markdown files.
+
+Compose both: after `expand --level chapter`, feed the chapter's headings back into `related --mode heading` to find sibling chapters.
+
+Decide:
+
+- Coverage now sufficient → answer.
+- Corpus genuinely lacks the material → **T3** `intent=reformulate` (maybe the concept is named differently).
+- Coverage okay but need prioritisation → **T3** `intent=rerank` on the current hits.
+
+### T3 — suggest: LLM reflection
+
+Only tier that costs tokens. Never the first move; every intent expects the caller to already have hits or a stalled query.
+
+| Situation | Intent | Feed back into |
+|---|---|---|
+| Vague query, T0/T1 empty | `reformulate` | `queries[]` → back to **T0** (re-probe each) then **T1** |
+| Many hits, need ordering | `rerank` | reorder with `ranking[]`, then **T2** on the top few |
+| Some hits, need breadth | `expand` | `keywords[]` → new `search` or `related` |
+
+Guardrails:
+
+- **Always re-probe an LLM-reformulated query before searching it** — it is unvalidated and can be either empty or explosive.
+- Cap the overall T3 loop at a small number of escalations (typically 1-2). If it still stalls, report evidence gaps rather than looping further.
+- `--no-votes` during dry runs / evaluation so `llm_extension_votes` is not polluted.
+
+### Refeed (task boundary)
+
+Periodically — at task completion or on a schedule — promote well-voted pairs into the permanent graph so future queries hit them without LLM cost:
+
+```bash
+grga index promote --dry-run --db <path> --json   # inspect first
+grga index promote            --db <path> --json   # commit
+```
+
+After a promote, `related --mode graph` picks up the new edges automatically on the next call.
 
 ## Typical composition patterns
 
-Three worked examples ship with this skill. Read them when the pattern matches the task at hand:
+Four worked examples ship with this skill. Read them when the pattern matches the task at hand:
 
+- `examples/probe-search-reflect.md` — **default composition for open-ended search**: probe → tighten/loosen → search → expand, with a T3 fallback loop.
 - `examples/search-expand-chapter.md` — "give me the full chapter that mentions X" (search → expand chapter, degrades to paragraph on non-md).
 - `examples/search-related-graph.md` — "find other files discussing the same concept" (search → collect keywords → related graph).
 - `examples/search-suggest-promote.md` — cold-start / vague-query loop with LLM reflection and refeeding into the graph (search → suggest → search-again → index promote).
 
 Additional composition notes:
 
+- **Probe first when in doubt**: an unfamiliar corpus, a broad single keyword, or a directory with likely-huge files. `probe` is cheaper than a full `search`, and re-probing 2-3 times to tune the query costs almost nothing.
 - **Skip expand for tiny hits**: if the hit line already fully answers the question (e.g. a config value), quoting `matches[i].text` is enough.
 - **Chain expand + related**: after `expand --level chapter`, feed the chapter's own headings back into `related --mode heading` to find sibling chapters in other files.
 - **Rerank before expand**: on a broad `search` that returns 50+ hits, run `suggest --intent rerank` first, then `expand` only the top 3–5.
+- **Re-probe LLM output**: always run `probe` on any query returned by `suggest --intent reformulate` before searching it — the model may emit an empty or explosive query.
 - **Vote hygiene**: pass `--no-votes` to `suggest` in dry-run / evaluation contexts so the graph is not polluted during experiments.
 
 ## Practical CLI invariants
 
 - Every verb accepts `--json` and prints a single JSON document to stdout on success; use `jq` or `json.loads` to parse.
-- On failure, the process exits non-zero and either prints an object with `"ok": false` (search / deep-search / suggest) or a plain error string on stderr (expand / related / index).
+- On failure, the process exits non-zero and either prints an object with `"ok": false` (probe / search / deep-search / suggest) or a plain error string on stderr (expand / related / index). `probe` failures stay schema-homogeneous with success (all fields present, zeroed) plus `ok:false` + `error`.
 - Paths returned by `search` are **relative to the search directory** unless the caller passed absolute inputs. `expand` accepts either form and resolves against `--directory`.
 - The shared SQLite DB defaults to `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`). Pass `--db <path>` to isolate per-project graphs.
 - The Markdown structure sidecar is cached under `.grga/structure/` in the search directory root (or `$GRGA_SIDECAR_ROOT` if set). It is rebuilt automatically on `mtime` change.
