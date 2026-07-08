@@ -753,24 +753,36 @@ def _path_submatches(path, compiled_patterns):
 
 def _build_command(rga_path, query, case_sensitive=False, max_count=None, before_context=3, after_context=3, multiline=False, glob_patterns=None, glob_exclude=False):
     command = [rga_path, "--json", "--line-number", "--column", "--no-require-git"]
-    if query["pcre2"]:
-        command.append("-P")
-    if multiline:
-        command.extend(["--multiline", "--multiline-dotall"])
-    if not case_sensitive:
-        command.append("--ignore-case")
+    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns))
     if max_count is not None:
         command.extend(["--max-count", str(max_count)])
     if before_context:
         command.extend(["--before-context", str(before_context)])
     if after_context:
         command.extend(["--after-context", str(after_context)])
-    for glob_pattern in _normalize_glob_patterns(glob_patterns):
-        command.extend(["--iglob", glob_pattern])
     for pattern in query["patterns"]:
         command.extend(["-e", pattern])
     command.append(".")
     return command
+
+
+def _shared_rga_options(query, case_sensitive=False, multiline=False, glob_patterns=None):
+    """Return the subset of rga options that every rga-based command shares.
+
+    Callers append their own leading subcommand flags (``--json``,
+    ``--count-matches``, ...) and are responsible for adding ``-e <pattern>``
+    entries and the trailing search path.
+    """
+    options = []
+    if query["pcre2"]:
+        options.append("-P")
+    if multiline:
+        options.extend(["--multiline", "--multiline-dotall"])
+    if not case_sensitive:
+        options.append("--ignore-case")
+    for glob_pattern in _normalize_glob_patterns(glob_patterns):
+        options.extend(["--iglob", glob_pattern])
+    return options
 
 
 def _quote_command_part(part):
@@ -949,14 +961,7 @@ def _kill_process(process):
 def _count_total_matches(rga_path, target, query, case_sensitive=False, multiline=False, glob_patterns=None, timeout=600, debug=False):
     """Estimate the total number of matching lines via ``rga --count-matches``."""
     command = [rga_path, "--count-matches", "--no-require-git", "--no-filename"]
-    if query["pcre2"]:
-        command.append("-P")
-    if multiline:
-        command.extend(["--multiline", "--multiline-dotall"])
-    if not case_sensitive:
-        command.append("--ignore-case")
-    for glob_pattern in _normalize_glob_patterns(glob_patterns):
-        command.extend(["--iglob", glob_pattern])
+    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns))
     for pattern in query["patterns"]:
         command.extend(["-e", pattern])
     command.append(".")

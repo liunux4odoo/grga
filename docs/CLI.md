@@ -27,6 +27,7 @@ grga --help
 
 ```text
 grga search       执行搜索
+grga probe        探测查询规模（只读，不返回正文）
 grga deep-search  使用 LLM 规划关键词并迭代深度检索
 grga preview      预览底层搜索命令
 grga check        检查搜索运行环境
@@ -245,6 +246,88 @@ grga search keyword --json
   "matches": []
 }
 ```
+
+## 探测查询规模
+
+`probe` 是一条**只读、廉价、结构化**的探测命令：它把当前查询编译后交给 `rga --count-matches`（`--path-only` 时用 `rg --files`），返回命中文件数、命中行数、（可选）估算字节量，以及查询"被如何解释"的元信息。它**不返回正文、不返回上下文、不改写关键字、不做任何"多/少"的阈值判断**。
+
+其用途是让调用方（人或 caller agent）在执行完整 `search` **之前**先判断规模，从而决定是收紧还是放宽关键字组合。
+
+> `probe` 返回的是**当前查询在磁盘上的真实规模**，不含上下文行，也不受 `--max-count` / `--max-total` 影响。它本身不做任何策略决策。
+
+基本用法：
+
+```bash
+grga probe 关键词 -d /path/to/project --json
+```
+
+与查询语义相关的参数（`--mode` / `--case-sensitive` / `--iglob` / `--multiline` / `--path-only` / `--implicit-and` / `--implicit-or`）都与 `grga search` 同名同义，因此探测用的查询与最终执行的查询是同一套。
+
+probe 独有参数：
+
+- `--sample N`：抽样至多 N 个命中行，估算平均每行字节数与总字节量（默认 0，即不抽样）。
+- `--per-file`：在 JSON 中附带每个文件的命中行数（按命中数降序）。
+- `--timeout`：探测超时秒数，默认 60（比 `search` 的 600 短，避免调用方长时间等待）。
+
+JSON 返回结构（成功）：
+
+```json
+{
+  "ok": true,
+  "directory": "/abs/path",
+  "patterns": ["(?=.*(?:foo))(?=.*(?:bar))"],
+  "terms": [{"value": "foo", "pattern": "foo"}, {"value": "bar", "pattern": "bar"}],
+  "pcre2": true,
+  "implicit_operator": "and",
+  "implicit_notice": "multi-term query treated as AND: ...",
+  "total_lines": 1284,
+  "file_count": 37,
+  "per_file": [{"path": "docs/a.md", "matches": 812}],
+  "sample": {"sampled_lines": 32, "avg_line_bytes": 118, "est_total_bytes": 151512},
+  "elapsed_ms": 87,
+  "truncated": false,
+  "warning": null,
+  "skipped_files": []
+}
+```
+
+字段要点：
+
+- `total_lines`：命中行数总和；`file_count`：至少命中一行的文件数。
+- `patterns` / `terms` / `pcre2` / `implicit_operator` / `implicit_notice`：与 `search` 输出一致，帮助调用方了解查询被如何解释。
+- `sample.est_total_bytes`：`total_lines * avg_line_bytes` 的**粗估**，只给数量级参考，不宜做严格算术。
+
+失败时 JSON 结构与成功时**同构**（同样包含 `patterns` / `terms` / `pcre2` / `implicit_operator` / `implicit_notice` / `directory` / `total_lines` / `file_count` / `elapsed_ms` 等字段，值为默认零/空），额外携带 `ok: false` 与 `error` 字段，方便调用方用统一的 schema 解析：
+
+```json
+{
+  "ok": false,
+  "error": "rga probe timed out",
+  "directory": "/abs/path",
+  "patterns": ["search"],
+  "terms": [{"value": "search", "pattern": "search"}],
+  "pcre2": false,
+  "implicit_operator": "and",
+  "total_lines": 0,
+  "file_count": 0,
+  "elapsed_ms": 60000
+}
+```
+
+**超时预算**：`--timeout` 是**全局**上限，涵盖 per-file 计数与可选的抽样两阶段。抽样阶段共享剩余预算，不会额外占用一整个 `timeout`。
+
+### 推荐的调用方 workflow
+
+`probe` 只提供基础设施，不内置策略。推荐（非强制）的编排方式：
+
+1. `probe(query)` → 得到 `total_lines` / `file_count` / `est_total_bytes`。
+2. 判断：
+   - `total_lines == 0` → 放宽（`and→or` / 去词 / 去 glob），回到 1。
+   - 数量极大或估算字节超出预算 → 收紧（`or→and` / 加词 / 加 `--iglob` / 执行时上 `--max-count`），回到 1。
+   - 落在舒适区间 → 用**相同参数**执行 `grga search`。
+3. 自行限制迭代次数（通常 2-3 次），不收敛则取最接近的一档执行。
+
+与 `deep-search --tiered-search` 的区别：后者是把"从严到松"的策略**硬编码在后端**；`probe` 则把决策权交给调用方，两者并存、互不冲突。
 
 ## 深度检索
 

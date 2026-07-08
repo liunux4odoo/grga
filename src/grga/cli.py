@@ -5,6 +5,7 @@ from typing import List, Optional
 import typer
 
 from grga.deep_search import deep_search_directory, resolve_deep_search_options
+from grga.probe import probe_directory
 from grga.search import build_rga_command_preview, check_environment, configure_logging, search_directory
 from grga.toolchain import check_tools, current_tools_dir, install_tools, platform_key, supported_tool_names, tool_specs, tools_root, update_tools
 
@@ -306,6 +307,105 @@ def preview_command(
         path_only=path_only,
     )
     typer.echo(command)
+
+
+@app.command("probe")
+def probe_command(
+    keywords: List[str] = typer.Argument(..., help="Search keywords or query expression."),
+    directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Directory to probe."),
+    pattern_mode: str = typer.Option("auto", "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
+    timeout: float = typer.Option(60.0, "--timeout", "-t", help="Probe timeout in seconds."),
+    multiline: bool = typer.Option(False, "--multiline", help="Enable multiline search."),
+    file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
+    path_only: bool = typer.Option(False, "--path-only", help="Probe relative file paths only."),
+    implicit_and: bool = typer.Option(False, "--implicit-and", help="Force implicit adjacency to AND (default)."),
+    implicit_or: bool = typer.Option(False, "--implicit-or", help="Restore v1 behaviour: implicit adjacency means OR."),
+    sample: int = typer.Option(0, "--sample", help="Sample up to N matched lines to estimate average line bytes (0 disables)."),
+    per_file: bool = typer.Option(False, "--per-file/--no-per-file", help="Include per-file match counts in the JSON output."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    debug: bool = typer.Option(False, "--debug", help="Print debug information during probe."),
+):
+    """Cheap, read-only probe of query scale before running a full search.
+
+    Runs ``rga --count-matches`` (or ``rg --files`` for --path-only) and an
+    optional sampling pass to estimate matched-text size. Never fetches
+    bodies or context, never rewrites the query. Intended to be composed by
+    a caller (human or agent) that decides whether to tighten or loosen the
+    query before invoking ``grga search``.
+    """
+    query = _join_keywords(keywords)
+    if not query:
+        typer.echo("keywords cannot be empty", err=True)
+        raise typer.Exit(2)
+
+    if implicit_and and implicit_or:
+        typer.echo("--implicit-and and --implicit-or are mutually exclusive", err=True)
+        raise typer.Exit(2)
+    implicit_operator = "or" if implicit_or else "and"
+
+    effective_debug = debug or _get_config_debug()
+    configure_logging(debug=effective_debug)
+
+    try:
+        raw = probe_directory(
+            str(directory),
+            query,
+            pattern_mode=_validate_pattern_mode(pattern_mode),
+            case_sensitive=case_sensitive,
+            timeout=timeout,
+            multiline=multiline,
+            glob_patterns=file_globs,
+            path_only=path_only,
+            sample=max(0, sample),
+            per_file=per_file,
+            debug=effective_debug,
+            implicit_operator=implicit_operator,
+        )
+        result = json.loads(raw)
+    except Exception as exc:
+        if json_output:
+            typer.echo(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+    if json_output:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        raise typer.Exit(0 if result.get("ok") else 1)
+
+    if not result.get("ok"):
+        typer.echo(result.get("error", "probe failed"), err=True)
+        raise typer.Exit(1)
+
+    if result.get("warning"):
+        typer.echo(f"warning: {result['warning']}", err=True)
+    skipped = result.get("skipped_files") or []
+    if skipped:
+        typer.echo(f"skipped: {len(skipped)} records", err=True)
+
+    total_lines = result.get("total_lines")
+    file_count = result.get("file_count")
+    typer.echo(f"total_lines: {total_lines}")
+    if file_count is not None:
+        typer.echo(f"file_count:  {file_count}")
+
+    sample_info = result.get("sample")
+    if sample_info:
+        typer.echo(
+            f"sample:      {sample_info['sampled_lines']} lines, "
+            f"avg {sample_info['avg_line_bytes']} B/line, "
+            f"est ~{sample_info['est_total_bytes']} B total"
+        )
+
+    per_file_list = result.get("per_file") or []
+    for item in per_file_list:
+        typer.echo(f"  {item['matches']:>6}  {item['path']}")
+
+    notice = result.get("implicit_notice")
+    if notice:
+        typer.echo(f"[grga] {notice}", err=True)
+    typer.echo(f"elapsed: {result.get('elapsed_ms', 0)} ms", err=True)
 
 
 @app.command("check")
