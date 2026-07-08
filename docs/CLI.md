@@ -60,6 +60,11 @@ grga search 关键词 -d /path/to/project
 grga search hello world
 ```
 
+> 注意（v2 起的破坏性变更）：空格分隔的多个词默认按**逻辑与（AND）**处理，
+> 上例等价于 `hello && world`（要求同一行同时包含二者）。这与 Google / ripgrep
+> 的直觉一致。需要旧的“空格即逻辑或”行为时加 `--implicit-or`。触发隐式 AND 时，
+> grga 会在 stderr 打印一行提示。
+
 ### 查询表达式
 
 `grga` 支持单词、短语、逻辑或、逻辑与和括号分组。
@@ -68,7 +73,7 @@ grga search hello world
 # 包含 hello 或 world
 grga search 'hello || world'
 
-# 同一行同时匹配 hello 和 world
+# 同一行同时匹配 hello 和 world（等价于 grga search hello world）
 grga search 'hello && world'
 
 # 分组表达式
@@ -78,7 +83,8 @@ grga search '(hello || hi) && world'
 grga search '"hello world"'
 ```
 
-未显式写 `||` 或 `&&` 的相邻查询项会按逻辑或处理。
+未显式写 `||` 或 `&&` 的相邻查询项默认按**逻辑与（AND）**处理；
+加 `--implicit-or` 可切回按逻辑或处理。
 
 ### 匹配模式
 
@@ -114,6 +120,8 @@ grga search keyword --ignore-case
 
 ### 限制结果数量
 
+`--max-count / -n` 是 **每文件** 命中上限（透传给 rga）：
+
 ```bash
 grga search keyword --max-count 20
 ```
@@ -122,6 +130,26 @@ grga search keyword --max-count 20
 
 ```bash
 grga search keyword -n 20
+```
+
+### 全局命中上限（--max-total / -N）
+
+`--max-total / -N` 是 **单次调用的全局** 命中上限，默认 `1000`。在超大单文件
+（如整本小说、GB 级日志）场景下，`--max-count` 几乎不起保护作用，`--max-total`
+则保证可预测的响应时间：grga 流式读取 rga 输出，达到上限后立即结束并杀掉 rga
+子进程，返回结果里 `truncated: true`。位置元数据（occurrence / ratio / nearby）
+在截断之后才计算，因此不会为丢弃的命中白算。
+
+```bash
+# 最多返回 50 条真实命中，超出即截断
+grga search keyword -N 50
+
+# 关闭全局上限
+grga search keyword --max-total 0
+
+# 宁可失败也不返回部分结果：先用 rga --count-matches 预估总数，
+# 超过上限时返回 {"ok": false, "error": "too_many_matches", "total_hits": …}
+grga search keyword -N 50 --strict-cap
 ```
 
 ### 设置超时
@@ -221,6 +249,11 @@ grga search keyword --json
 ## 深度检索
 
 `deep-search` 使用 OpenAI 兼容客户端调用 LLM，把自然语言查询转换为 `grga` 查询表达式，检索后再从结果中抽取关键词并迭代扩展查询。
+
+> `deep-search` 的内部检索使用 v1 的“空格即逻辑或”语义（`--implicit-or`），
+> 并使用一个较高的每轮全局上限（`DEEP_SEARCH_MAX_TOTAL = 20000`）而非普通
+> `search` 的默认 1000，因为它需要较多原始命中来做关键词排序；该上限仍会兜底，
+> 防止超大语料把调用方拖挂。
 
 ```bash
 grga deep-search "查找支付超时相关错误" \

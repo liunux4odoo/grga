@@ -33,12 +33,41 @@ fields). Shape:
   "error": "…",                       // string — present only when ok=false
   "patterns": ["安装"],               // string[] — compiled rga patterns
   "directory": "/abs/path",           // string — resolved search root
+  "truncated": false,                 // bool — true when --max-total capped the result set
+  "implicit_notice": "…",             // string? — set when adjacency was treated as implicit AND
   "warning": "…",                     // string? — non-fatal notice
   "skipped_files": [ … ],             // any[]? — records rga could not read
   "answer": { … },                    // object? — deep-search only (see below)
   "matches": [ Match, … ]             // Match[] — see below
 }
 ```
+
+### Query semantics (breaking change vs v1)
+
+- Space-separated terms are parsed as **implicit AND** by default. `"韩立 师傅"`
+  compiles to a PCRE2 lookahead that requires both terms on the same line.
+- Explicit `||` / `OR` still means OR; explicit `&&` / `AND` still means AND.
+- `search_directory(...)` accepts `implicit_operator="and"` (default) or
+  `"or"` to restore the v1 behaviour. On the CLI the same knobs are
+  `--implicit-and` (default) and `--implicit-or`.
+- When implicit AND is actually applied, the result carries an
+  `implicit_notice` string and the CLI prints `[grga] multi-term query
+  treated as AND: …` to stderr (unless the user set `--implicit-*`
+  explicitly).
+
+### Global result cap
+
+- `search_directory(..., max_total=N, strict_cap=False)` streams rga output
+  and stops after `N` real matches, kills the rga subprocess, and sets
+  `truncated: true` in the returned envelope. Metadata (occurrence /
+  ratio / nearby) is computed *after* truncation, so the counts reflect
+  the returned slice.
+- `strict_cap=True` runs a lightweight `rga --count-matches` precheck and
+  returns `{"ok": false, "error": "too_many_matches", "total_hits": …}`
+  instead of returning a partial result.
+- On the CLI: `--max-total N` (default `1000`; `0` disables), plus
+  `--strict-cap` for the fail-fast variant. The per-file `--max-count / -n`
+  still applies unchanged.
 
 ### `Match` object
 

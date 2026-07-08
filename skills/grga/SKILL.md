@@ -51,17 +51,35 @@ Signature (conceptual):
 ```
 search(query: str, scope: dir, *, mode=auto|regex|glob, case_sensitive=False,
        before_context=3, after_context=3, iglob=[], path_only=False,
-       metadata=True) -> {ok, patterns, directory, matches[]}
+       max_total=1000, strict_cap=False, implicit_operator=and|or,
+       metadata=True) -> {ok, patterns, directory, truncated, matches[]}
 ```
+
+**Multi-term semantics (v2, breaking change):** space-separated terms are an
+**implicit AND** — `search("韩立 师傅")` returns only lines containing *both*
+terms (Google / ripgrep intuition). Use explicit `||` / `OR` for OR, `&&` /
+`AND` for AND. Pass `--implicit-or` to restore the old OR-on-space behaviour.
+When implicit AND fires, grga prints a one-line notice to stderr.
+
+**Global cap:** `--max-total N` (default `1000`) bounds the *total* number of
+real hits returned, streaming and killing rga once the cap is hit; the result
+sets `truncated: true`. This keeps response time predictable on huge single
+files (novels, GB-scale logs) where the per-file `--max-count / -n` does not
+help. Use `--strict-cap` to fail fast with `error: too_many_matches` instead of
+returning a partial slice. `0` disables the cap.
 
 Each `matches[i]` (non-context) carries:
 
 - `path`, `line_number`, `text`, `submatches`, `is_context`
 - `occurrence_index` / `total_occurrences` — 1-based rank within the file
+  (computed **after** any `--max-total` truncation)
 - `line_ratio` — `line_number / total_lines`, clamped to `[0, 1]`
 - `nearby_hits` — count of other real hits within ±5 lines
 - `matched_terms` — the raw query terms this hit satisfied
 - `heading_path` / `chapter_id` / `chapter_range` — best-effort, Markdown only
+
+The envelope also carries `truncated` (bool) and, when adjacency was treated
+as implicit AND, `implicit_notice` (string).
 
 Use when: the caller has a concrete query string (keywords, boolean expression, or a phrase). This is the always-first verb in any grga workflow.
 

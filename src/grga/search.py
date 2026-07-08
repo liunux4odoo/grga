@@ -1,9 +1,12 @@
 import fnmatch
 import json
 import logging
+import queue
 import re
 import shlex
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from grga.toolchain import add_tools_to_path, find_tool
@@ -107,6 +110,9 @@ def search_directory(
     glob_exclude=False,
     path_only=False,
     debug=False,
+    max_total=None,
+    strict_cap=False,
+    implicit_operator="and",
 ):
     target = Path(directory).expanduser().resolve()
     _log_debug(debug, f"搜索目录: {target}")
@@ -123,7 +129,7 @@ def search_directory(
             ensure_ascii=False,
         )
 
-    query = _compile_search_query(keywords, pattern_mode, debug=debug)
+    query = _compile_search_query(keywords, pattern_mode, debug=debug, implicit_operator=implicit_operator)
     patterns = query["patterns"]
     if not patterns:
         _log_debug(debug, "错误: 关键词为空")
@@ -153,20 +159,22 @@ def search_directory(
             glob_patterns=glob_patterns,
             timeout=timeout,
             debug=debug,
+            max_total=max_total,
         )
         if not path_result.get("ok"):
             _log_debug(debug, f"路径搜索失败: {path_result.get('error')}")
             return json.dumps(path_result, ensure_ascii=False)
         _log_debug(debug, f"路径搜索完成，找到 {len(path_result.get('matches', []))} 个匹配")
-        return json.dumps(
-            {
-                "ok": True,
-                "patterns": patterns,
-                "directory": str(target),
-                "matches": path_result.get("matches", []),
-            },
-            ensure_ascii=False,
-        )
+        response = {
+            "ok": True,
+            "patterns": patterns,
+            "directory": str(target),
+            "matches": path_result.get("matches", []),
+            "truncated": bool(path_result.get("truncated")),
+        }
+        if query.get("implicit_notice"):
+            response["implicit_notice"] = query["implicit_notice"]
+        return json.dumps(response, ensure_ascii=False)
 
     _log_debug(debug, "模式: 内容搜索")
     rga_path = _find_rga_command()
@@ -177,6 +185,33 @@ def search_directory(
             {"ok": False, "error": "rga command not found", "matches": []},
             ensure_ascii=False,
         )
+
+    if strict_cap and max_total is not None:
+        precount = _count_total_matches(
+            rga_path,
+            target,
+            query,
+            case_sensitive=case_sensitive,
+            multiline=multiline,
+            glob_patterns=glob_patterns,
+            timeout=timeout,
+            debug=debug,
+        )
+        if precount.get("ok") and precount["total"] > max_total:
+            _log_debug(debug, f"strict-cap 触发: {precount['total']} > {max_total}")
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "too_many_matches",
+                    "total_hits": precount["total"],
+                    "message": (
+                        f"Query matched {precount['total']} lines, exceeding cap of {max_total}. "
+                        "Narrow the query or raise --max-total."
+                    ),
+                    "matches": [],
+                },
+                ensure_ascii=False,
+            )
 
     command = _build_command(
         rga_path,
@@ -191,49 +226,43 @@ def search_directory(
     )
     _log_debug(debug, f"执行命令: {' '.join(command)}")
 
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=str(target),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+    stream = _stream_rga_search(command, cwd=str(target), timeout=timeout, max_total=max_total, debug=debug)
+    if stream.get("timed_out"):
         _log_debug(debug, "错误: 搜索超时")
         return json.dumps(
             {"ok": False, "error": "rga search timed out", "matches": []},
             ensure_ascii=False,
         )
 
-    _log_debug(debug, f"命令返回码: {completed.returncode}")
-    _log_debug(debug, f"stdout 长度: {len(completed.stdout)}")
-    if completed.stderr.strip():
-        _log_debug(debug, f"stderr: {completed.stderr.strip()[:500]}")
+    matches = _apply_query_submatches(stream["matches"], query, case_sensitive)
+    truncated = bool(stream.get("truncated"))
+    _log_debug(debug, f"解析后的匹配数量: {len(matches)}，truncated={truncated}")
 
-    matches = _apply_query_submatches(_parse_rga_json(completed.stdout), query, case_sensitive)
-    _log_debug(debug, f"解析后的匹配数量: {len(matches)}")
+    returncode = stream.get("returncode", 0)
+    stderr_text = stream.get("stderr", "")
+    if truncated:
+        acceptable_return = returncode in (0, 1) or returncode is None or returncode < 0
+    else:
+        acceptable_return = returncode in (0, 1)
 
-    if completed.returncode not in (0, 1):
-        error = completed.stderr.strip() or "rga search failed"
+    if not acceptable_return:
+        error = stderr_text.strip() or "rga search failed"
         if _is_ignorable_search_error(error):
             _log_debug(debug, f"可忽略的错误: {error[:200]}")
             skipped = _parse_skipped_files(error)
             _log_debug(debug, f"跳过文件数: {len(skipped)}")
-            return json.dumps(
-                {
-                    "ok": True,
-                    "patterns": patterns,
-                    "directory": str(target),
-                    "warning": error,
-                    "skipped_files": skipped,
-                    "matches": matches,
-                },
-                ensure_ascii=False,
-            )
+            response = {
+                "ok": True,
+                "patterns": patterns,
+                "directory": str(target),
+                "warning": error,
+                "skipped_files": skipped,
+                "matches": matches,
+                "truncated": truncated,
+            }
+            if query.get("implicit_notice"):
+                response["implicit_notice"] = query["implicit_notice"]
+            return json.dumps(response, ensure_ascii=False)
         _log_debug(debug, f"搜索失败: {error}")
         return json.dumps(
             {
@@ -244,16 +273,17 @@ def search_directory(
             ensure_ascii=False,
         )
 
-    _log_debug(debug, f"搜索成功，共 {len(matches)} 个结果（含上下文）")
-    return json.dumps(
-        {
-            "ok": True,
-            "patterns": patterns,
-            "directory": str(target),
-            "matches": matches,
-        },
-        ensure_ascii=False,
-    )
+    _log_debug(debug, f"搜索成功，共 {len(matches)} 个结果（含上下文），truncated={truncated}")
+    response = {
+        "ok": True,
+        "patterns": patterns,
+        "directory": str(target),
+        "matches": matches,
+        "truncated": truncated,
+    }
+    if query.get("implicit_notice"):
+        response["implicit_notice"] = query["implicit_notice"]
+    return json.dumps(response, ensure_ascii=False)
 
 
 def build_rga_command_preview(
@@ -267,9 +297,10 @@ def build_rga_command_preview(
     glob_patterns=None,
     glob_exclude=False,
     path_only=False,
+    implicit_operator="and",
 ):
     rga_path = _find_rga_command() or "rga"
-    query = _compile_search_query(keywords, pattern_mode)
+    query = _compile_search_query(keywords, pattern_mode, implicit_operator=implicit_operator)
     if not query["patterns"]:
         return ""
     if path_only:
@@ -307,25 +338,50 @@ def _normalize_query_text(keywords):
     return " || ".join(item.strip() for item in keywords if isinstance(item, str) and item.strip())
 
 
-def _compile_search_query(keywords, pattern_mode, debug=False):
+def _empty_query():
+    return {
+        "ast": None,
+        "patterns": [],
+        "pcre2": False,
+        "terms": [],
+        "implicit_and": False,
+        "implicit_notice": None,
+    }
+
+
+def _compile_search_query(keywords, pattern_mode, debug=False, implicit_operator="and"):
     text = _normalize_query_text(keywords)
     _log_debug(debug, f"原始查询文本: {repr(text)}")
     _log_debug(debug, f"匹配模式: {pattern_mode}")
+    _log_debug(debug, f"隐式操作符: {implicit_operator}")
     if not text:
-        return {"ast": None, "patterns": [], "pcre2": False, "terms": []}
+        return _empty_query()
     tokens = _tokenize_query(text)
     _log_debug(debug, f"分词结果: {tokens}")
-    ast = _parse_query(tokens)
+    ast, implicit_used = _parse_query(tokens, implicit_operator=implicit_operator)
     _log_debug(debug, f"AST 结构: {ast}")
+    _log_debug(debug, f"隐式邻接是否触发: {implicit_used}")
     ast = _compile_query_terms(ast, pattern_mode)
     if ast is None:
-        return {"ast": None, "patterns": [], "pcre2": False, "terms": []}
+        return _empty_query()
     has_and = _ast_has_kind(ast, "and")
     _log_debug(debug, f"包含 AND 逻辑: {has_and}")
     pattern = _compile_query_pattern(ast, has_and)
     terms = _query_terms(ast)
     _log_debug(debug, f"查询词项: {terms}")
-    return {"ast": ast, "patterns": [pattern], "pcre2": has_and, "terms": terms}
+    implicit_and = bool(implicit_used and implicit_operator == "and")
+    notice = None
+    if implicit_and:
+        joined = " AND ".join(f'"{term["value"]}"' for term in terms)
+        notice = f'multi-term query treated as AND: "{text}" → {joined}'
+    return {
+        "ast": ast,
+        "patterns": [pattern],
+        "pcre2": has_and,
+        "terms": terms,
+        "implicit_and": implicit_and,
+        "implicit_notice": notice,
+    }
 
 
 def _normalize_glob_patterns(glob_patterns):
@@ -396,7 +452,7 @@ def _classify_skip_reason(line):
     return None
 
 
-def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_count=None, glob_patterns=None, timeout=600, debug=False):
+def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_count=None, glob_patterns=None, timeout=600, debug=False, max_total=None):
     flags = 0 if case_sensitive else re.IGNORECASE
     compiled_terms = [re.compile(term["pattern"], flags) for term in query["terms"]]
     _log_debug(debug, f"编译的正则词项: {[term['pattern'] for term in query['terms']]}")
@@ -432,6 +488,7 @@ def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_cou
 
     matches = []
     skipped_count = 0
+    truncated = False
     for line in completed.stdout.splitlines():
         relative_path = line.replace("\\", "/")
         if relative_path.startswith("./"):
@@ -454,9 +511,12 @@ def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_cou
         )
         if max_count is not None and len(matches) >= max_count:
             break
+        if max_total is not None and len(matches) >= max_total:
+            truncated = True
+            break
 
-    _log_debug(debug, f"路径过滤后匹配: {len(matches)} 个，跳过: {skipped_count} 个")
-    return {"ok": True, "matches": matches}
+    _log_debug(debug, f"路径过滤后匹配: {len(matches)} 个，跳过: {skipped_count} 个，truncated={truncated}")
+    return {"ok": True, "matches": matches, "truncated": truncated}
 
 
 def _tokenize_query(text):
@@ -505,10 +565,12 @@ def _tokenize_query(text):
     return tokens
 
 
-def _parse_query(tokens):
-    parser = {"tokens": tokens, "pos": 0}
+def _parse_query(tokens, implicit_operator="and"):
+    if implicit_operator not in ("and", "or"):
+        raise ValueError("implicit_operator must be one of: and, or")
+    parser = {"tokens": tokens, "pos": 0, "implicit_operator": implicit_operator, "implicit_used": False}
     ast = _parse_or(parser)
-    return ast
+    return ast, parser["implicit_used"]
 
 
 def _peek_token(parser):
@@ -530,7 +592,8 @@ def _parse_or(parser):
         if kind == "or":
             _next_token(parser)
             nodes.append(_parse_and(parser))
-        elif kind in ("term", "lparen"):
+        elif kind in ("term", "lparen") and parser["implicit_operator"] == "or":
+            parser["implicit_used"] = True
             nodes.append(_parse_and(parser))
         else:
             break
@@ -544,9 +607,16 @@ def _parse_or(parser):
 
 def _parse_and(parser):
     nodes = [_parse_atom(parser)]
-    while _peek_token(parser)[0] == "and":
-        _next_token(parser)
-        nodes.append(_parse_atom(parser))
+    while True:
+        kind, _ = _peek_token(parser)
+        if kind == "and":
+            _next_token(parser)
+            nodes.append(_parse_atom(parser))
+        elif kind in ("term", "lparen") and parser["implicit_operator"] == "and":
+            parser["implicit_used"] = True
+            nodes.append(_parse_atom(parser))
+        else:
+            break
     nodes = [node for node in nodes if node is not None]
     if not nodes:
         return None
@@ -716,30 +786,207 @@ def _detect_pattern_mode(keyword):
 def _parse_rga_json(output):
     matches = []
     for line in output.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        event_type = event.get("type")
-        if event_type not in ("match", "context"):
-            continue
-
-        data = event.get("data", {})
-        path = data.get("path", {}).get("text", "")
-        lines = data.get("lines", {}).get("text", "")
-        text = lines.rstrip("\n")
-        submatches = data.get("submatches", [])
-        matches.append(
-            {
-                "path": path,
-                "line_number": data.get("line_number"),
-                "absolute_offset": data.get("absolute_offset"),
-                "text": text,
-                "is_context": event_type == "context",
-                "submatches": [_normalize_submatch(item, text) for item in submatches],
-            }
-        )
+        match = _parse_rga_event_line(line)
+        if match is not None:
+            matches.append(match)
     return matches
+
+
+def _parse_rga_event_line(line):
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    event_type = event.get("type")
+    if event_type not in ("match", "context"):
+        return None
+    data = event.get("data", {})
+    path = data.get("path", {}).get("text", "")
+    lines = data.get("lines", {}).get("text", "")
+    text = lines.rstrip("\n")
+    submatches = data.get("submatches", [])
+    return {
+        "path": path,
+        "line_number": data.get("line_number"),
+        "absolute_offset": data.get("absolute_offset"),
+        "text": text,
+        "is_context": event_type == "context",
+        "submatches": [_normalize_submatch(item, text) for item in submatches],
+    }
+
+
+def _stream_rga_search(command, cwd, timeout, max_total=None, debug=False):
+    """Run rga and stream its JSON output line by line.
+
+    Stops reading and kills the process once ``max_total`` real (non-context)
+    matches are collected, so metadata is only ever computed on the truncated
+    slice. Returns a dict with ``matches``, ``truncated``, ``returncode``,
+    ``stderr`` and ``timed_out``.
+    """
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except OSError as exc:
+        return {"matches": [], "truncated": False, "returncode": 1, "stderr": str(exc), "timed_out": False}
+
+    stderr_chunks = []
+
+    def _drain_stderr():
+        try:
+            for chunk in process.stderr:
+                stderr_chunks.append(chunk)
+        except (ValueError, OSError):
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    line_queue: "queue.Queue[str]" = queue.Queue()
+    reader_done = threading.Event()
+
+    def _read_stdout():
+        try:
+            for line in process.stdout:
+                line_queue.put(line)
+        except (ValueError, OSError):
+            pass
+        finally:
+            reader_done.set()
+
+    reader_thread = threading.Thread(target=_read_stdout, daemon=True)
+    reader_thread.start()
+
+    matches = []
+    real_hits = 0
+    truncated = False
+    timed_out = False
+    deadline = time.monotonic() + timeout if timeout else None
+
+    def _consume(line):
+        nonlocal real_hits, truncated
+        match = _parse_rga_event_line(line)
+        if match is None:
+            return False
+        matches.append(match)
+        if not match["is_context"]:
+            real_hits += 1
+            if max_total is not None and real_hits >= max_total:
+                truncated = True
+                return True
+        return False
+
+    while not truncated and not timed_out:
+        remaining = None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+        try:
+            line = line_queue.get(timeout=min(remaining, 0.2) if remaining is not None else 0.2)
+        except queue.Empty:
+            if reader_done.is_set() and line_queue.empty():
+                break
+            continue
+        if _consume(line):
+            break
+
+    # Final drain: once the reader has finished, process any lines that were
+    # enqueued between our last poll and reader_done being observed, so the
+    # last rga event is never dropped.
+    if not truncated and not timed_out and reader_done.is_set():
+        while True:
+            try:
+                line = line_queue.get_nowait()
+            except queue.Empty:
+                break
+            if _consume(line):
+                break
+
+    if timed_out or truncated:
+        _kill_process(process)
+
+    returncode = process.poll()
+    if returncode is None:
+        try:
+            returncode = process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            _kill_process(process)
+            returncode = process.poll()
+    stderr_thread.join(timeout=1)
+    stderr_text = "".join(stderr_chunks)
+    if debug and stderr_text.strip():
+        _log_debug(debug, f"stderr: {stderr_text.strip()[:500]}")
+    return {
+        "matches": matches,
+        "truncated": truncated,
+        "returncode": returncode,
+        "stderr": stderr_text,
+        "timed_out": timed_out,
+    }
+
+
+def _kill_process(process):
+    try:
+        process.kill()
+    except (OSError, ValueError):
+        pass
+    try:
+        if process.stdout:
+            process.stdout.close()
+    except (OSError, ValueError):
+        pass
+
+
+def _count_total_matches(rga_path, target, query, case_sensitive=False, multiline=False, glob_patterns=None, timeout=600, debug=False):
+    """Estimate the total number of matching lines via ``rga --count-matches``."""
+    command = [rga_path, "--count-matches", "--no-require-git", "--no-filename"]
+    if query["pcre2"]:
+        command.append("-P")
+    if multiline:
+        command.extend(["--multiline", "--multiline-dotall"])
+    if not case_sensitive:
+        command.append("--ignore-case")
+    for glob_pattern in _normalize_glob_patterns(glob_patterns):
+        command.extend(["--iglob", glob_pattern])
+    for pattern in query["patterns"]:
+        command.extend(["-e", pattern])
+    command.append(".")
+    _log_debug(debug, f"预计数命令: {' '.join(command)}")
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "total": 0}
+    if completed.returncode not in (0, 1):
+        return {"ok": False, "total": 0}
+    total = 0
+    for line in completed.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            total += int(line)
+        except ValueError:
+            continue
+    return {"ok": True, "total": total}
+
 
 
 def _normalize_submatch(item, text):

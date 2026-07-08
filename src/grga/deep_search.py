@@ -29,6 +29,10 @@ DEFAULT_API_KEY_ENV_NAMES = ("GRGA_OPENAI_API_KEY", "OPENAI_API_KEY")
 DEFAULT_BASE_URL_ENV_NAMES = ("GRGA_OPENAI_BASE_URL", "OPENAI_BASE_URL")
 DEFAULT_DECAY_FACTOR = 0.9
 DEFAULT_MIN_COUNT = 0.1
+# Deep-search iterations need many raw hits per query for ranking, so the
+# per-call cap is generous, but still bounded so a runaway query on a huge
+# corpus cannot wedge the caller. Pass max_total explicitly to override.
+DEEP_SEARCH_MAX_TOTAL = 20000
 DEEP_SEARCH_DEFAULTS = {
     "llm_base_url": None,
     "llm_api_key": None,
@@ -1934,6 +1938,7 @@ def _run_grga_search(
     glob_patterns=None,
     path_only=False,
     grga_command=None,
+    max_total=DEEP_SEARCH_MAX_TOTAL,
 ):
     command = _normalize_grga_command(grga_command) + [
         "search",
@@ -1953,6 +1958,14 @@ def _run_grga_search(
     command.append("--case-sensitive" if case_sensitive else "--ignore-case")
     if max_count is not None:
         command.extend(["--max-count", str(max_count)])
+    # Deep-search planner uses explicit ||/&& expressions, so preserve the v1
+    # implicit-OR semantics for its subprocess invocations regardless of the
+    # user-facing default.
+    command.append("--implicit-or")
+    # Bound total hits per iteration so a broad LLM-planned query cannot
+    # blow up the caller. Pass max_total=0 to disable.
+    cap = 0 if max_total is None else int(max_total)
+    command.extend(["--max-total", str(max(cap, 0))])
     if multiline:
         command.append("--multiline")
     if path_only:

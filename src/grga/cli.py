@@ -99,13 +99,17 @@ def search_command(
     directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Directory to search."),
     pattern_mode: str = typer.Option("auto", "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
     case_sensitive: bool = typer.Option(False, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
-    max_count: Optional[int] = typer.Option(None, "--max-count", "-n", help="Maximum number of matches."),
+    max_count: Optional[int] = typer.Option(None, "--max-count", "-n", help="Maximum matches per file (rga --max-count)."),
+    max_total: Optional[int] = typer.Option(1000, "--max-total", "-N", help="Global cap on total real matches; results are truncated when exceeded (default 1000, set 0 to disable)."),
+    strict_cap: bool = typer.Option(False, "--strict-cap", help="Fail with too_many_matches when --max-total is exceeded instead of truncating."),
     timeout: float = typer.Option(600.0, "--timeout", "-t", help="Search timeout in seconds."),
     before_context: int = typer.Option(3, "--before-context", "-B", help="Lines of leading context."),
     after_context: int = typer.Option(3, "--after-context", "-A", help="Lines of trailing context."),
     multiline: bool = typer.Option(False, "--multiline", help="Enable multiline search."),
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Search relative file paths only."),
+    implicit_and: bool = typer.Option(False, "--implicit-and", help="Force implicit adjacency to AND (default). Suppresses the notice."),
+    implicit_or: bool = typer.Option(False, "--implicit-or", help="Restore v1 behaviour: implicit adjacency means OR."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
     metadata: bool = typer.Option(True, "--metadata/--no-metadata", help="Attach Layer 2 hit metadata (occurrence, ratio, nearby)."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
@@ -114,6 +118,13 @@ def search_command(
     if not query:
         typer.echo("keywords cannot be empty", err=True)
         raise typer.Exit(2)
+
+    if implicit_and and implicit_or:
+        typer.echo("--implicit-and and --implicit-or are mutually exclusive", err=True)
+        raise typer.Exit(2)
+    implicit_operator = "or" if implicit_or else "and"
+    implicit_explicit = implicit_and or implicit_or
+    effective_max_total = max_total if (max_total is None or max_total > 0) else None
 
     effective_debug = debug or _get_config_debug()
     configure_logging(debug=effective_debug)
@@ -132,6 +143,9 @@ def search_command(
             glob_patterns=file_globs,
             path_only=path_only,
             debug=effective_debug,
+            max_total=effective_max_total,
+            strict_cap=strict_cap,
+            implicit_operator=implicit_operator,
         )
         result = json.loads(raw)
     except Exception as exc:
@@ -140,6 +154,10 @@ def search_command(
         else:
             typer.echo(str(exc), err=True)
         raise typer.Exit(1)
+
+    notice = result.get("implicit_notice")
+    if notice and not implicit_explicit:
+        typer.echo(f"[grga] {notice}", err=True)
 
     if metadata:
         from grga.meta import annotate_result_inplace, annotate_structure_inplace
@@ -152,6 +170,8 @@ def search_command(
         raise typer.Exit(0 if result.get("ok") else 1)
 
     _print_result(result)
+    if result.get("truncated"):
+        typer.echo(f"truncated: hit cap of --max-total={effective_max_total}", err=True)
 
 
 @app.command("deep-search")
