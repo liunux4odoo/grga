@@ -282,6 +282,46 @@ grga index promote            --db <path> --json   # commit
 
 After a promote, `related --mode graph` picks up the new edges automatically on the next call.
 
+## Caller anti-patterns
+
+Two mental-model traps that defeat the reflection loop even when every verb
+behaves correctly.
+
+### Do not pre-disambiguate identity questions
+
+When the question is *"are A and B the same entity?"* / *"is X actually
+Y?"*, **do not design the search around that binary**. Feeding a hypothesis
+into the query re-injects the ambiguity you were trying to resolve — every
+match now has to be interpreted through the hypothesis, and you will start
+filtering evidence to fit it.
+
+Instead, run **two independent evidence chains** — one for A, one for B —
+through `probe → search → expand` on their own terms (first appearance,
+characteristic contexts, endings). Let the evidence meet on its own. In
+domains where identity is intrinsically fuzzy (fiction with alter-egos,
+reincarnation, dubbed aliases; near-homonym symbols across a large
+codebase; user IDs vs. session IDs in log data), the "same or not same"
+answer is often **emergent**, not decidable up front.
+
+Signal you are in this trap: you catch yourself writing a search plan
+that reads *"if we find X then A=B, otherwise A≠B"*. Stop, and split it
+into two independent explorations.
+
+### Do not fall back to `grep` mid-workflow
+
+If you are inside a grga session, stay in grga. Reaching for `grep -n |
+head` "just to look at raw text" silently collapses the reflection loop:
+
+- `grga search -B 0 -A 0 --max-total N --json` is the direct equivalent
+  of `grep -n | head -N`, works on PDF / EPUB / Office where `grep` fails,
+  and preserves `occurrence_index` / `line_ratio` / `nearby_hits` /
+  `heading_path` — precisely the signals a **multi-round** loop needs.
+- If the goal is "read text around a hit", that is exactly `grga expand`
+  with `--level lines --size N` (or `paragraph` / `chapter`).
+
+Rule of thumb: **`grep` for a one-shot recon when you know you will not
+iterate. `grga` for anything you plan to refine, expand, or navigate.**
+
 ## Typical composition patterns
 
 Four worked examples ship with this skill. Read them when the pattern matches the task at hand:
