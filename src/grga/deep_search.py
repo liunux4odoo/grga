@@ -419,6 +419,17 @@ def _deep_search_directory(
     advanced_plan = _build_advanced_search_plan(client, model_name, query, max_related_keywords, debug=debug)
     strategy = advanced_plan.get("strategy") or "fallback"
     _log_debug(debug, f"高级规划: strategy={strategy}, reason={advanced_plan.get('reason', '')}")
+    # 供 horizontal / multi_hop 结果不足时回退到本地分层搜索使用
+    tiered_fallback_kwargs = {
+        "max_related_keywords": max_related_keywords,
+        "database_file": database_file,
+        "decay_factor": decay_factor,
+        "min_keyword_count": min_keyword_count,
+        "global_library": global_library,
+        "enable_tiered_search": enable_tiered_search,
+        "min_results": min_results,
+        "max_tiers": max_tiers,
+    }
     if strategy == "horizontal":
         return _execute_horizontal_plan(
             target=target,
@@ -438,6 +449,7 @@ def _deep_search_directory(
             path_only=path_only,
             grga_command=grga_command,
             max_extract_segments=max_extract_segments,
+            tiered_fallback_kwargs=tiered_fallback_kwargs,
             debug=debug,
         )
     if strategy == "multi_hop":
@@ -460,13 +472,76 @@ def _deep_search_directory(
             grga_command=grga_command,
             max_extract_segments=max_extract_segments,
             max_hops=max(1, max_related_keywords),
+            tiered_fallback_kwargs=tiered_fallback_kwargs,
             debug=debug,
         )
 
-    # direct / keyword_expand / fallback 均落到本地分层搜索，但侧重点不同：
-    # - direct: 不需要扩展，只跑最严格的 1 层
-    # - keyword_expand: 走完整分层（主词 → 同义词扩展 → 兜底 OR）
-    # - fallback: 走完整分层
+    # direct / keyword_expand / fallback 均落到本地分层搜索。
+    return _run_tiered_search(
+        target=target,
+        directory_key=directory_key,
+        query=query,
+        client=client,
+        model_name=model_name,
+        strategy=strategy,
+        pattern_mode=pattern_mode,
+        case_sensitive=case_sensitive,
+        max_count=max_count,
+        timeout=timeout,
+        before_context=before_context,
+        after_context=after_context,
+        multiline=multiline,
+        glob_patterns=glob_patterns,
+        path_only=path_only,
+        grga_command=grga_command,
+        max_related_keywords=max_related_keywords,
+        database_file=database_file,
+        decay_factor=decay_factor,
+        min_keyword_count=min_keyword_count,
+        global_library=global_library,
+        enable_tiered_search=enable_tiered_search,
+        min_results=min_results,
+        max_tiers=max_tiers,
+        debug=debug,
+    )
+
+
+def _run_tiered_search(
+    target,
+    directory_key,
+    query,
+    client,
+    model_name,
+    strategy="keyword_expand",
+    pattern_mode="auto",
+    case_sensitive=False,
+    max_count=None,
+    timeout=600,
+    before_context=3,
+    after_context=3,
+    multiline=False,
+    glob_patterns=None,
+    path_only=False,
+    grga_command=None,
+    max_related_keywords=8,
+    database_file=None,
+    decay_factor=DEFAULT_DECAY_FACTOR,
+    min_keyword_count=DEFAULT_MIN_COUNT,
+    global_library=False,
+    enable_tiered_search=True,
+    min_results=5,
+    max_tiers=6,
+    debug=False,
+):
+    """本地分层关键词搜索，可独立作为深度搜索兜底路径复用。
+
+    根据 strategy 调整侧重点：
+    - direct: 不需要扩展，只跑最严格的 1 层
+    - keyword_expand: 走完整分层（主词 → 同义词扩展 → 兜底 OR）
+    - fallback / 其他: 走完整分层
+    """
+    database_file = Path(database_file).expanduser() if database_file else DEFAULT_DB_PATH
+
     effective_enable_tiered = enable_tiered_search
     effective_max_tiers = max_tiers
     if strategy == "direct":
@@ -540,7 +615,6 @@ def _deep_search_directory(
         library.add_keywords("user", directory_key, current_keywords)
         library.commit()
 
-        used_keywords = {item.casefold() for item in current_keywords}
         all_matches = []
         iterations = []
         iteration = 0
@@ -628,10 +702,223 @@ def _deep_search_directory(
             "iterations": iterations,
             "stop_reason": stop_reason,
             "db_path": str(database_file),
+            "keyword_groups": keyword_groups or [],
             "matches": merged_matches,
         }
     finally:
         library.close()
+
+
+# 意图兜底：让 LLM 根据问题动态生成"原文答案场景可能出现的动作/情境词"，
+# 相比硬编码词表，可覆盖任意语言、任意领域、任意意图类别。
+def _generate_intent_verbs_with_llm(client, model_name, query, entity_terms=None, debug=False):
+    """调用 LLM 生成意图动词/情境关键词。失败或不适用时返回空列表。"""
+    if client is None or not model_name:
+        return []
+    try:
+        payload = _chat_json(
+            client,
+            model_name,
+            [
+                {"role": "system", "content": _intent_verb_system_prompt()},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "task": "为本地文档检索生成意图动词/情境关键词",
+                            "query": query,
+                            "entity_terms": list(entity_terms or []),
+                            "output_schema": {
+                                "intent": "问题意图类别（英文短标签，如 acquisition/death/reason/relation/time/none）",
+                                "verbs": ["动作或情境词，可为单字或短词"],
+                                "reason": "为什么选这些词",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            debug=debug,
+        )
+    except Exception as exc:
+        _log_debug(debug, f"意图动词生成失败: {exc}")
+        return []
+    if not isinstance(payload, dict):
+        return []
+    raw_verbs = payload.get("verbs")
+    if not isinstance(raw_verbs, list):
+        return []
+    verbs = []
+    seen = set()
+    for item in raw_verbs:
+        text = str(item or "").strip().strip("'\"")
+        if not text or len(text) > 20:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        verbs.append(text)
+    return verbs
+
+
+def _intent_verb_system_prompt():
+    return """你是本地文档检索的意图分析器。只输出 JSON 对象。
+
+任务：根据用户问题，列出**原文答案场景中可能出现**的 5-15 个动作、情境或状态关键词。
+这些关键词会与已识别的对象名一起做 (对象) && (关键词) 检索，用来命中那些
+只用泛称+动作描写、不含问题里功能性词汇的原文段落。
+
+规则：
+1. verbs 里放的是**原文可能出现的具体动作/情境/状态词**，不是问题里的抽象疑问词
+   - 反例：不要放"如何、怎么、为什么、是否"
+   - 正例：问"如何获得X" → 放 [捡, 拾, 买, 得到, 意外, 发现, 继承, 夺取, 交换...]
+2. 尽量穷举原文可能采用的多种表达方式（同义、近义、场景相关）
+3. 支持任意语言，按原文可能的语言选择关键词
+4. 词长控制在 1-6 字/字符；对中日韩语言，单字动词/名词是有价值的（如 死/亡/买/年）
+5. 如果问题**不是**在询问某种动作、事件、时间、原因、关系（例如纯粹的清单/统计/属性描述），
+   返回 "verbs": [] 并将 intent 设为 "none"，让上层跳过意图兜底
+6. 如果已提供 entity_terms，动词应围绕"主体如何对这些实体做某事"来选
+
+输出 JSON：
+{
+  "intent": "acquisition | death | time | reason | relation | location | method | none | ...",
+  "verbs": ["词1", "词2", ...],
+  "reason": "简短说明"
+}
+"""
+
+
+def _build_intent_fallback_query(client, model_name, query, entity_terms, keyword_groups, debug=False):
+    """为需要"动作/情境"证据的问题构造 (对象 || 别名) && (意图关键词) 兜底查询。
+
+    意图关键词由 LLM 根据问题动态生成，不再依赖硬编码词表，天然覆盖任意语言/领域。
+    如果 LLM 判定问题不适用意图兜底（返回空 verbs），本函数返回空串，上层会跳过。
+
+    对象项来自 entity_terms + keyword_groups 里最像"具体对象别名集合"的组
+    （判定标准：组内所有词共享至少 1 个中文/字母字符，避免把功能/动作类同义词
+    组当成对象组）。
+    """
+    verbs = _generate_intent_verbs_with_llm(client, model_name, query, entity_terms=entity_terms, debug=debug)
+    if not verbs:
+        return ""
+    object_terms = []
+    seen = set()
+
+    def _add(term):
+        term = _clean_expression(str(term or ""))
+        if not term:
+            return
+        key = term.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        object_terms.append(term)
+
+    for term in entity_terms or []:
+        _add(term)
+    # 仅接受“具体对象”概念组：组内多数词（默认 ≥60%）共享同一个 CJK/字母字符，
+    # 视为“同一对象的别名集合”。如 ['神秘小瓶','小瓶','青色小瓶','此宝'] 中 3/4
+    # 含 '瓶'，仍判定为对象组，并只保留含主导字符的词（丢弃 '此宝' 这类离群别名）。
+    # 排除功能动词/属性近义词组（如 ['催熟灵药','催熟','加速生长','灵药催熟'] 无主导字符）。
+    for group in keyword_groups or []:
+        if not isinstance(group, (list, tuple)) or len(group) < 2:
+            continue
+        for term in _object_terms_by_dominant_char(group):
+            _add(term)
+    if not object_terms:
+        return ""
+    object_expr = _terms_to_or_expression(object_terms)
+    verb_expr = _or_expression_from_terms(verbs)
+    if not object_expr or not verb_expr:
+        return ""
+    return f"{object_expr} && {verb_expr}"
+
+
+def _or_expression_from_terms(terms):
+    """把任意（含单字符）关键词拼成 grga OR 表达式，绕过 _normalize_keywords 的长度下限。
+
+    意图动词里存在 '捡'、'拾'、'死'、'年' 等单字符高价值词，
+    不能被 _normalize_keywords 的 len<2 规则静默丢弃。
+    """
+    quoted = []
+    seen = set()
+    for term in terms:
+        text = str(term or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        quoted.append(_quote_query_term(text))
+    if not quoted:
+        return ""
+    if len(quoted) == 1:
+        return quoted[0]
+    return "(" + " || ".join(quoted) + ")"
+
+
+def _object_terms_by_dominant_char(terms, min_ratio=0.6):
+    """从一个概念组里挑出属于“同一对象别名”的词。
+
+    做法：把每个词拆成“语义单元”——CJK 表意文字按单字（每字即一个词素），
+    字母/数字按整词（连续字母数字串，小写化）。统计每个单元出现在多少个词里，
+    取覆盖率最高者（主导单元）；若覆盖率 ≥ min_ratio（默认 60%），则该组视为
+    对象组，只保留含主导单元的词（丢弃离群别名）；否则返回空列表。
+
+    - 容忍 ['掌天瓶','青色小瓶','神秘瓶子','此宝'] 里 '此宝' 不含 '瓶'：
+      主导单元 '瓶' 覆盖 3/4=0.75 ≥ 0.6，保留 3 个含 '瓶' 的词。
+    - 字母语言用整词而非单字母，避免 ['bottle','treasure'] 因共享字母 'e' 误判：
+      主导单元 'bottle' 覆盖 3/4，保留 3 个含 bottle 的词，丢弃 'treasure'。
+    """
+    unique_terms = []
+    seen = set()
+    for term in terms:
+        text = str(term or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_terms.append(text)
+    if len(unique_terms) < 2:
+        return []
+    unit_counts = {}
+    term_units = []
+    for text in unique_terms:
+        units = _semantic_units(text)
+        term_units.append(units)
+        for unit in units:
+            unit_counts[unit] = unit_counts.get(unit, 0) + 1
+    if not unit_counts:
+        return []
+    dominant_unit, dominant_count = max(unit_counts.items(), key=lambda item: item[1])
+    if dominant_count / len(unique_terms) < min_ratio:
+        return []
+    return [text for text, units in zip(unique_terms, term_units) if dominant_unit in units]
+
+
+def _semantic_units(text):
+    """把词拆成语义单元集合：CJK 单字（逐字）+ 字母数字整词（小写）。"""
+    units = set()
+    for ch in str(text):
+        code = ord(ch)
+        if 0x4E00 <= code <= 0x9FFF:  # CJK 表意文字，逐字作为词素
+            units.add(ch)
+    for word in re.findall(r"[0-9A-Za-z]+", str(text)):
+        if len(word) >= 2:  # 单字母不作为词素，避免 e/t/a 之类误配
+            units.add(word.casefold())
+    return units
+
+
+def _is_significant_char(ch):
+    if ch.isalpha():
+        return True
+    code = ord(ch)
+    # CJK Unified Ideographs 基础区
+    return 0x4E00 <= code <= 0x9FFF
 
 
 def _build_advanced_search_plan(client, model_name, query, max_steps, debug=False):
@@ -747,6 +1034,143 @@ def _clean_answer_key(value):
     return text[:40]
 
 
+def _run_advanced_fallbacks(
+    *,
+    target,
+    directory_key,
+    query,
+    client,
+    model_name,
+    pattern_mode,
+    case_sensitive,
+    max_count,
+    timeout,
+    before_context,
+    after_context,
+    multiline,
+    glob_patterns,
+    path_only,
+    grga_command,
+    tiered_fallback_kwargs,
+    entity_terms,
+    known_patterns,
+    iteration_offset,
+    debug=False,
+):
+    """当 horizontal / multi_hop 未能满足需求时，跑分层兜底 + 意图兜底。
+
+    返回 (extra_matches, extra_patterns, extra_iterations, stop_suffix)。
+    - extra_matches: 已按 advanced_step / from_query / from_tier 标记完毕，可直接 extend
+    - extra_patterns: 未出现在 known_patterns 中的新表达式
+    - extra_iterations: 供 iterations 列表 append，index 自 iteration_offset 起编号
+    - stop_suffix: 形如 "" / "+tiered_fallback" / "+tiered_fallback+intent_fallback"
+    """
+    extra_matches = []
+    extra_patterns = []
+    extra_iterations = []
+    stop_suffix = ""
+    if not tiered_fallback_kwargs:
+        return extra_matches, extra_patterns, extra_iterations, stop_suffix
+
+    _log_debug(debug, f"触发分层兜底搜索: {query}")
+    fallback = _run_tiered_search(
+        target=target,
+        directory_key=directory_key,
+        query=query,
+        client=client,
+        model_name=model_name,
+        strategy="fallback",
+        pattern_mode=pattern_mode,
+        case_sensitive=case_sensitive,
+        max_count=max_count,
+        timeout=timeout,
+        before_context=before_context,
+        after_context=after_context,
+        multiline=multiline,
+        glob_patterns=glob_patterns,
+        path_only=path_only,
+        grga_command=grga_command,
+        debug=debug,
+        **tiered_fallback_kwargs,
+    )
+    if not fallback.get("ok"):
+        return extra_matches, extra_patterns, extra_iterations, stop_suffix
+
+    known_pattern_set = set(known_patterns or ())
+
+    fallback_matches = fallback.get("matches", [])
+    for match in fallback_matches:
+        match.setdefault("from_query", "fallback_tiered")
+        match["advanced_step"] = "fallback_tiered"
+    extra_matches.extend(fallback_matches)
+    for pattern in fallback.get("patterns", []):
+        if pattern and pattern not in known_pattern_set:
+            known_pattern_set.add(pattern)
+            extra_patterns.append(pattern)
+    extra_iterations.append(
+        {
+            "index": iteration_offset + len(extra_iterations),
+            "step_id": "fallback_tiered",
+            "strategy": "tiered_fallback",
+            "query_expression": "; ".join(fallback.get("patterns", [])),
+            "match_count": sum(1 for item in fallback_matches if not item.get("is_context")),
+            "stop_reason": fallback.get("stop_reason"),
+        }
+    )
+    stop_suffix = "+tiered_fallback"
+
+    # 意图感知兜底：把已抽取到的实体 + 分层规划里的对象概念组，
+    # 与 LLM 动态生成的意图动词组合，命中泛称+动作描写的原文场景。
+    intent_expr = _build_intent_fallback_query(
+        client,
+        model_name,
+        query,
+        entity_terms=entity_terms,
+        keyword_groups=fallback.get("keyword_groups") or [],
+        debug=debug,
+    )
+    if not intent_expr:
+        return extra_matches, extra_patterns, extra_iterations, stop_suffix
+
+    _log_debug(debug, f"触发意图兜底搜索: {intent_expr}")
+    intent_result = _run_grga_search(
+        target,
+        intent_expr,
+        pattern_mode=pattern_mode,
+        case_sensitive=case_sensitive,
+        max_count=max_count,
+        timeout=timeout,
+        before_context=before_context,
+        after_context=after_context,
+        multiline=multiline,
+        glob_patterns=glob_patterns,
+        path_only=path_only,
+        grga_command=grga_command,
+    )
+    intent_matches = intent_result.get("matches", []) if intent_result.get("ok") else []
+    for match in intent_matches:
+        match.setdefault("from_query", "fallback_intent")
+        match["advanced_step"] = "fallback_intent"
+        # 意图兜底直接对齐问题意图，最相关，给最高优先级
+        match["from_tier"] = -1
+    extra_matches.extend(intent_matches)
+    if intent_expr and intent_expr not in known_pattern_set:
+        extra_patterns.append(intent_expr)
+    extra_iterations.append(
+        {
+            "index": iteration_offset + len(extra_iterations),
+            "step_id": "fallback_intent",
+            "strategy": "intent_fallback",
+            "query_expression": intent_expr,
+            "match_count": sum(1 for item in intent_matches if not item.get("is_context")),
+            "error": None if intent_result.get("ok") else intent_result.get("error"),
+        }
+    )
+    if intent_matches:
+        stop_suffix = f"{stop_suffix}+intent_fallback"
+    return extra_matches, extra_patterns, extra_iterations, stop_suffix
+
+
 def _execute_horizontal_plan(
     target,
     directory_key,
@@ -765,6 +1189,7 @@ def _execute_horizontal_plan(
     path_only,
     grga_command,
     max_extract_segments,
+    tiered_fallback_kwargs=None,
     debug=False,
 ):
     all_matches = []
@@ -814,6 +1239,40 @@ def _execute_horizontal_plan(
                 "error": None if search_result.get("ok") else search_result.get("error"),
             }
         )
+
+    stop_reason = "horizontal_complete"
+    # 若所有横向子查询都未抽取到答案，则回退到原始 query 的分层搜索 + 意图兜底
+    if tiered_fallback_kwargs and fields and all(value == "未找到" for value in fields.values()):
+        _log_debug(debug, f"横向所有子查询均未找到答案，触发分层兜底搜索: {query}")
+        entity_terms = [value for value in fields.values() if value and value != "未找到"]
+        extra_matches, extra_patterns, extra_iterations, stop_suffix = _run_advanced_fallbacks(
+            target=target,
+            directory_key=directory_key,
+            query=query,
+            client=client,
+            model_name=model_name,
+            pattern_mode=pattern_mode,
+            case_sensitive=case_sensitive,
+            max_count=max_count,
+            timeout=timeout,
+            before_context=before_context,
+            after_context=after_context,
+            multiline=multiline,
+            glob_patterns=glob_patterns,
+            path_only=path_only,
+            grga_command=grga_command,
+            tiered_fallback_kwargs=tiered_fallback_kwargs,
+            entity_terms=entity_terms,
+            known_patterns=patterns,
+            iteration_offset=len(iterations),
+            debug=debug,
+        )
+        all_matches.extend(extra_matches)
+        patterns.extend(extra_patterns)
+        iterations.extend(extra_iterations)
+        if stop_suffix:
+            stop_reason = f"{stop_reason}{stop_suffix}"
+
     merged_matches = _merge_and_sort_matches(all_matches)
     return {
         "ok": True,
@@ -825,7 +1284,7 @@ def _execute_horizontal_plan(
         "plan": plan,
         "answer": {"text": _format_horizontal_answer(query, fields), "fields": fields, "citations": citations},
         "iterations": iterations,
-        "stop_reason": "horizontal_complete",
+        "stop_reason": stop_reason,
         "matches": merged_matches,
     }
 
@@ -849,6 +1308,7 @@ def _execute_multihop_plan(
     grga_command,
     max_extract_segments,
     max_hops=4,
+    tiered_fallback_kwargs=None,
     debug=False,
 ):
     context = {}
@@ -919,6 +1379,39 @@ def _execute_multihop_plan(
         if not answer:
             stop_reason = "answer_not_found"
             break
+
+    # 多跳未能完整解答（未找到答案或依赖缺失）时，回退到原始 query 的分层搜索
+    # + 意图感知兜底，避免遗漏文档里用泛称表述的关键场景。
+    if tiered_fallback_kwargs and stop_reason in {"answer_not_found", "missing_dependency"}:
+        _log_debug(debug, f"多跳停止于 {stop_reason}，触发兜底搜索: {query}")
+        extra_matches, extra_patterns, extra_iterations, stop_suffix = _run_advanced_fallbacks(
+            target=target,
+            directory_key=directory_key,
+            query=query,
+            client=client,
+            model_name=model_name,
+            pattern_mode=pattern_mode,
+            case_sensitive=case_sensitive,
+            max_count=max_count,
+            timeout=timeout,
+            before_context=before_context,
+            after_context=after_context,
+            multiline=multiline,
+            glob_patterns=glob_patterns,
+            path_only=path_only,
+            grga_command=grga_command,
+            tiered_fallback_kwargs=tiered_fallback_kwargs,
+            entity_terms=list(context.values()),
+            known_patterns=patterns,
+            iteration_offset=len(iterations),
+            debug=debug,
+        )
+        all_matches.extend(extra_matches)
+        patterns.extend(extra_patterns)
+        iterations.extend(extra_iterations)
+        if stop_suffix:
+            stop_reason = f"{stop_reason}{stop_suffix}"
+
     merged_matches = _merge_and_sort_matches(all_matches)
     return {
         "ok": True,
