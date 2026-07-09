@@ -132,29 +132,9 @@ def _inspect(
         total_docs += 1
 
     # Co-occurring keywords: other keywords living in the same (scope, doc).
-    cooccur_weight: Dict[str, float] = {}
-    cooccur_scopes: Dict[str, set] = {}
-    per_scope_cooccur: Dict[str, Dict[str, float]] = {}
-    for directory, docs in seed_docs_by_scope.items():
-        doc_list = list(docs)
-        placeholders = ",".join("?" for _ in doc_list)
-        rows = conn.execute(
-            f"""
-            SELECT LOWER(keyword) AS kw, occurrence_count
-            FROM keyword_docs
-            WHERE directory = ? AND doc_path IN ({placeholders})
-            """,
-            [directory, *doc_list],
-        ).fetchall()
-        for row in rows:
-            kw = _fold(row["kw"])
-            if not kw or kw == folded:
-                continue
-            weight = float(row["occurrence_count"])
-            cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
-            cooccur_scopes.setdefault(kw, set()).add(directory)
-            scope_map = per_scope_cooccur.setdefault(directory, {})
-            scope_map[kw] = scope_map.get(kw, 0.0) + weight
+    cooccur_weight, cooccur_scopes, per_scope_cooccur = _cooccurrences(
+        conn, folded, seed_docs_by_scope
+    )
 
     top_cooccurring = sorted(
         cooccur_weight.items(), key=lambda item: (-item[1], item[0])
@@ -182,6 +162,82 @@ def _inspect(
         "suspected_polysemy": suspected,
         "polysemy_hint": hint,
     }
+
+
+def _cooccurrences(
+    conn: sqlite3.Connection,
+    folded: str,
+    seed_docs_by_scope: Dict[str, set],
+) -> tuple[Dict[str, float], Dict[str, set], Dict[str, Dict[str, float]]]:
+    """Aggregate keywords co-occurring with ``folded`` in its seed docs.
+
+    Returns ``(cooccur_weight, cooccur_scopes, per_scope_cooccur)`` where
+    ``per_scope_cooccur[scope][kw]`` is the per-scope weight used by the
+    polysemy heuristic. Shared by :func:`_inspect` and
+    :func:`compute_suspected_polysemy`.
+    """
+    cooccur_weight: Dict[str, float] = {}
+    cooccur_scopes: Dict[str, set] = {}
+    per_scope_cooccur: Dict[str, Dict[str, float]] = {}
+    for directory, docs in seed_docs_by_scope.items():
+        doc_list = list(docs)
+        placeholders = ",".join("?" for _ in doc_list)
+        rows = conn.execute(
+            f"""
+            SELECT LOWER(keyword) AS kw, occurrence_count
+            FROM keyword_docs
+            WHERE directory = ? AND doc_path IN ({placeholders})
+            """,
+            [directory, *doc_list],
+        ).fetchall()
+        for row in rows:
+            kw = _fold(row["kw"])
+            if not kw or kw == folded:
+                continue
+            weight = float(row["occurrence_count"])
+            cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
+            cooccur_scopes.setdefault(kw, set()).add(directory)
+            scope_map = per_scope_cooccur.setdefault(directory, {})
+            scope_map[kw] = scope_map.get(kw, 0.0) + weight
+    return cooccur_weight, cooccur_scopes, per_scope_cooccur
+
+
+def compute_suspected_polysemy(
+    conn: sqlite3.Connection,
+    keyword: str,
+    cooccur_limit: int = DEFAULT_COOCCUR_LIMIT,
+) -> tuple[bool, str]:
+    """Standalone polysemy check for a single ``keyword``.
+
+    Extracted from :func:`_inspect` so callers outside ``graph inspect``
+    (e.g. ``compute_crossed_scopes_preview``) can annotate bridge keywords
+    without reproducing the co-occurrence + Jaccard heuristic. Returns the
+    same ``(suspected, hint)`` pair the full report exposes. A keyword found
+    in fewer than two scopes is never flagged (``(False, "")``).
+    """
+    folded = _fold(keyword)
+    if not folded:
+        return False, ""
+    seed_rows = conn.execute(
+        """
+        SELECT directory, doc_path
+        FROM keyword_docs
+        WHERE LOWER(keyword) = ?
+        """,
+        (folded,),
+    ).fetchall()
+    if not seed_rows:
+        return False, ""
+
+    docs_by_scope: Dict[str, int] = {}
+    seed_docs_by_scope: Dict[str, set] = {}
+    for row in seed_rows:
+        directory = row["directory"]
+        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
+        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
+
+    _, _, per_scope_cooccur = _cooccurrences(conn, folded, seed_docs_by_scope)
+    return _detect_polysemy(docs_by_scope, per_scope_cooccur, cooccur_limit)
 
 
 def _detect_polysemy(

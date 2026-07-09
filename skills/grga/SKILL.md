@@ -55,14 +55,18 @@ Observability before you escalate:
 
 - `related --mode graph --preview --json` computes a `crossed_scopes_preview`
   field (`would_add`, `top_other_scopes`, `top_bridge_keywords`) that
-  answers "if I *did* open `--cross-scope`, what would come in?". **Opt-in**
-  because the preview runs a full-graph PPR whose cost scales with every
-  other scope in the shared DB — you would not want that as a silent tax
-  on every ordinary scoped query. Pass it when the isolated result is thin
-  enough that escalating might be worth it.
+  answers "if I *did* open `--cross-scope`, what would come in?". Each
+  `top_bridge_keywords` entry carries a `suspected_polysemy` flag (the same
+  heuristic `grga graph inspect` applies), so the preview already tells you
+  whether a bridge word is ambient jargon. **Opt-in** because the preview
+  runs a full-graph PPR whose cost scales with every other scope in the
+  shared DB — you would not want that as a silent tax on every ordinary
+  scoped query. Pass it when the isolated result is thin enough that
+  escalating might be worth it.
 - `grga graph inspect <keyword>` reports `docs_by_scope`,
-  `top_cooccurring_keywords`, and a `suspected_polysemy` heuristic. Use
-  it on suspicious bridge keywords surfaced by the preview.
+  `top_cooccurring_keywords`, and a `suspected_polysemy` heuristic. Use it
+  for a deeper drill-down (per-scope neighbours, the `polysemy_hint` text)
+  when the preview's `suspected_polysemy` flag alone is not enough.
 
 Cross-scope results include a per-item `directory` field and a
 `qualified_path` (``<directory>/<doc_path>``) so identically-named files
@@ -78,12 +82,16 @@ Recommended sequence:
    (preview is opt-in — this is where you pay for it). Read
    `crossed_scopes_preview`: `would_add` tiny → nothing new. `would_add`
    big **and** `top_bridge_keywords` full of generic words (`model`,
-   `agent`, `attention`) → likely polysemy noise.
-3. On promising bridge keywords, run `grga graph inspect <keyword>` and
-   read `suspected_polysemy` / `polysemy_hint`.
-4. Only enable `--cross-scope` when (a) the preview shows real incremental
+   `agent`, `attention`) with `suspected_polysemy: true` → likely polysemy
+   noise. The preview already carries the polysemy verdict per bridge
+   keyword, so no separate `grga graph inspect` pass is needed here.
+3. Only enable `--cross-scope` when (a) the preview shows real incremental
    docs **and** (b) the bridge keywords are *domain* concepts, not
    ambient jargon.
+
+(For a deeper drill-down on a specific keyword — per-scope neighbours and
+the `polysemy_hint` text — `grga graph inspect <keyword>` is still there,
+but it is no longer a required step in the escalation sequence.)
 
 Cross-corpus association's value is *serendipity*, but serendipity is not
 the same thing as noise. The sequence above lets you see the trade before

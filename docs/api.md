@@ -198,8 +198,8 @@ even when results span multiple scopes.
   //     {"scope": "/abs/path/to/notes",  "count": 15}
   //   ],
   //   "top_bridge_keywords": [       // keywords bridging into other scopes
-  //     {"keyword": "attention", "cross_weight": 0.42},
-  //     {"keyword": "model",     "cross_weight": 0.31}
+  //     {"keyword": "attention", "cross_weight": 0.42, "suspected_polysemy": true},
+  //     {"keyword": "model",     "cross_weight": 0.31, "suspected_polysemy": false}
   //   ]
   // }
   // It stays null when --directory is omitted (query already spans every

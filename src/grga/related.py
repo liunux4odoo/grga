@@ -555,12 +555,28 @@ def compute_crossed_scopes_preview(
     top_bridges = sorted(
         bridge_weight.items(), key=lambda item: (-item[1], item[0])
     )[:5]
+    # Annotate each bridge keyword with the same polysemy heuristic
+    # ``graph inspect`` uses. This collapses the SKILL.md upgrade sequence
+    # (inside → preview → inspect → enable) into three steps: the caller
+    # no longer has to loop ``grga graph inspect`` over the top bridges to
+    # detect same-name-different-meaning collisions before flipping
+    # ``--cross-scope``.
+    from grga.graph.inspect import compute_suspected_polysemy
+
+    top_bridge_out: List[dict] = []
+    for kw, weight in top_bridges:
+        suspected, _ = compute_suspected_polysemy(conn, kw)
+        top_bridge_out.append(
+            {
+                "keyword": kw,
+                "cross_weight": round(weight, 6),
+                "suspected_polysemy": suspected,
+            }
+        )
     return {
         "would_add": len(seen_docs),
         "top_other_scopes": [{"scope": s, "count": c} for s, c in top_scopes],
-        "top_bridge_keywords": [
-            {"keyword": k, "cross_weight": round(w, 6)} for k, w in top_bridges
-        ],
+        "top_bridge_keywords": top_bridge_out,
     }
 
 

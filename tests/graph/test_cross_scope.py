@@ -239,6 +239,65 @@ def test_crossed_scopes_preview_reports_other_scope(two_scopes):
     assert preview["would_add"] >= 1
     scopes = {entry["scope"] for entry in preview["top_other_scopes"]}
     assert str(two_scopes["b"]) in scopes
+    # Every bridge keyword carries the polysemy verdict inline.
+    for entry in preview["top_bridge_keywords"]:
+        assert "suspected_polysemy" in entry
+        assert isinstance(entry["suspected_polysemy"], bool)
+
+
+@pytest.fixture
+def polysemy_bridge_scopes(monkeypatch, tmp_path):
+    """Two scopes wired to bridge on a polysemous keyword.
+
+    ``ambientkw`` lives in scope ``ml`` co-occurring with ML vocabulary and
+    in scope ``psych`` co-occurring with an entirely disjoint psychology
+    vocabulary. Seeding on ``mlseed`` under -d ml should surface
+    ``ambientkw`` as a bridge into psych, and the preview should flag it
+    as suspected polysemy.
+    """
+    monkeypatch.setenv("GRGA_SIDECAR_ROOT", str(tmp_path / "sidecars"))
+    ml = tmp_path / "ml"
+    psych = tmp_path / "psych"
+    ml.mkdir()
+    psych.mkdir()
+
+    (ml / "a.md").write_text(
+        "# ML\n\nmlseed mlseed ambientkw ambientkw transformer encoder decoder.\n"
+        "transformer encoder decoder embedding softmax.\n",
+        encoding="utf-8",
+    )
+    (psych / "b.md").write_text(
+        "# Psychology\n\nambientkw ambientkw cognition perception memory arousal.\n"
+        "cognition perception memory salience.\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "shared.db"
+    build_graph_index(ml, db_path=db, min_term_count=1)
+    build_graph_index(psych, db_path=db, min_term_count=1)
+    return {"ml": ml, "psych": psych, "db": db}
+
+
+def test_preview_includes_polysemy_warning_on_ambient_keyword(polysemy_bridge_scopes):
+    """Preview should self-annotate polysemy — no separate `graph inspect` pass.
+
+    ``ambientkw`` co-occurs with disjoint vocabularies in the two scopes;
+    the SKILL.md upgrade sequence used to require a manual
+    ``grga graph inspect`` per bridge keyword to detect this.
+    """
+    from grga.related import related_graph_with_preview
+
+    payload = related_graph_with_preview(
+        ["mlseed"],
+        db_path=polysemy_bridge_scopes["db"],
+        directory=polysemy_bridge_scopes["ml"],
+        limit=20,
+        preview=True,
+    )
+    preview = payload["crossed_scopes_preview"]
+    assert preview is not None
+    bridges = {entry["keyword"]: entry for entry in preview["top_bridge_keywords"]}
+    assert "ambientkw" in bridges, f"expected ambientkw as bridge, got {bridges}"
+    assert bridges["ambientkw"]["suspected_polysemy"] is True
 
 
 def test_preview_off_by_default(two_scopes):
