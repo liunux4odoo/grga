@@ -36,6 +36,14 @@ papers, code, notes) in one session. Keeping the graph unified turns
 cross-corpus co-occurrence into a *feature* (recall the concept
 regardless of which corpus you were browsing yesterday) while
 `--directory` still lets a query stay inside one project when needed.
+Index each corpus once, then all query verbs share the graph:
+
+```bash
+grga index build -s ~/novels  --db ~/.config/grga/deep_keywords.db --json
+grga index build -s ~/papers  --db ~/.config/grga/deep_keywords.db --json
+grga index build -s ~/code    --db ~/.config/grga/deep_keywords.db --json
+# `related "x" -d ~/papers` sees only papers; omit -d to search all three.
+```
 
 Three levers control cross-corpus behaviour on `related`:
 
@@ -439,51 +447,12 @@ Additional composition notes:
 - **Re-probe LLM output**: always run `probe` on any query returned by `suggest --intent reformulate` before searching it — the model may emit an empty or explosive query.
 - **Vote hygiene**: pass `--no-votes` to `suggest` in dry-run / evaluation contexts so the graph is not polluted during experiments.
 
-## Working with multiple corpora
-
-Because every `index build` writes into one shared per-user DB, working
-across corpora needs no special setup — just index each directory once.
-
-**Default model (one DB, many scopes).** Index three unrelated corpora into
-the same graph:
-
-```bash
-grga index build -s ~/novels  --db ~/.config/grga/deep_keywords.db --json
-grga index build -s ~/papers  --db ~/.config/grga/deep_keywords.db --json
-grga index build -s ~/code    --db ~/.config/grga/deep_keywords.db --json
-```
-
-Each query then defaults to isolation: `related "x" -d ~/papers` sees only
-papers, while omitting `-d` searches all three.
-
-**Typical cross-corpus flow (escalation).** You are in the novels corpus and
-a term ("轮回") is thinly covered. Do *not* jump straight to `--cross-scope`:
-
-```bash
-grga related "轮回" -d ~/novels --mode graph --json      # 1) isolated, read crossed_scopes_preview
-grga graph inspect "轮回" --json                          # 2) check bridge keyword for polysemy
-grga related "轮回" -d ~/novels --mode graph --cross-scope --json  # 3) only if preview + inspect look clean
-```
-
-Step 3 keeps the seed in `~/novels` but lets PPR reach a `~/papers`
-document discussing the same idea under "reincarnation loop".
-
-**When to isolate with `--db <custom>`.** The shared per-user DB is the
-default, but pass an explicit `--db` when:
-
-- On a multi-user machine and per-user separation is not enough
-  (`--db /secure/team.db`).
-- Running CI or tests that must not touch the personal DB
-  (`--db "$TMPDIR/ci.db"`).
-- A sensitive project must not co-occur with anything else
-  (`--db ~/work/secret/graph.db`).
-
 ## Practical CLI invariants
 
 - Every verb accepts `--json` and prints a single JSON document to stdout on success; use `jq` or `json.loads` to parse.
 - On failure, the process exits non-zero and either prints an object with `"ok": false` (probe / search / deep-search / suggest) or a plain error string on stderr (expand / related / index). `probe` failures stay schema-homogeneous with success (all fields present, zeroed) plus `ok:false` + `error`.
 - Paths returned by `search` are **relative to the search directory** unless the caller passed absolute inputs. `expand` accepts either form and resolves against `--directory`.
-- The shared SQLite DB defaults to `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`) and is a **single per-user knowledge graph**: every `index build` scope writes into it, `--directory` is the query-time partition filter. Pass `--db <path>` only to escape that (multi-user machines, CI, sensitive projects — see "Storage model (user-scoped)" above).
+- The shared SQLite DB defaults to `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`); pass `--db <path>` to override — see "Storage model (user-scoped)" for when and why.
 - The Markdown structure sidecar is cached under `.grga/structure/` in the search directory root (or `$GRGA_SIDECAR_ROOT` if set). It is rebuilt automatically on `mtime` change.
 
 ## What this skill is not
@@ -510,9 +479,9 @@ you never need them for basic search, but they help when a specific job comes up
 The graph index is either missing or does not cover the seed keywords.
 - Run `grga index build --scope <dir> --db <db>` first. `related --mode graph` needs `keyword_docs` + `keyword_pairs`; `--mode heading` needs `heading_docs` (Markdown only).
 - Most likely cause: the seed keyword never entered `keyword_docs`, or the scope name passed to `-d` is misspelled. Confirm with `grga graph inspect <keyword> --json` — if `total_docs` is 0 the term was never indexed.
-- `-d <dir>` narrows results to a scope (a query-time filter, not a separate DB). To broaden, drop `-d` (search the whole user graph), add `--cross-scope` on `mode=graph` (seeds stay in `-d`, PPR expands out), or rely on `mode=heading`'s cross-scope default.
 - Confirm the DB path: `related`, `index build`, and `suggest` share the **same** `--db` value; the default is `~/.config/grga/deep_keywords.db`.
 - If the seed word is a stopword or shorter than 2 characters it never enters `keyword_docs`. Use a longer/more concrete term or try `--mode dir` (filesystem proximity).
+- To broaden scope, see "Storage model" for the `-d` / `--cross-scope` / `--mode heading` decision.
 
 **`grga expand` returned `level="lines"` even though I asked for `chapter`.**
 This is the documented degrade chain, not a bug: `chapter → paragraph → lines(±size) → lines(±0)`.
