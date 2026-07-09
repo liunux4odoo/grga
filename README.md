@@ -111,3 +111,10 @@ python scripts/build-onefile.py --gui --name grga-gui --clean
 ```
 
 输出文件位于 `dist/`。外部工具（rg / rga / pandoc / fzf）**不再打入** onefile 可执行程序，由 `grga.toolchain` 在运行时按需从 `$PATH` 或 XDG 缓存加载，必要时首次运行会提示下载。
+
+## 致谢
+
+`grga` 的诞生离不开这两个工具在日常开发中的持续加成：
+
+- **[QwenPaw](https://github.com/liunux4odoo/qwenpaw)** —— 本地多智能体框架。`grga` 从"检索能力"演进到"Agent-Native 检索契约"，很多设计决策（skill 分发、退出码契约、`--json` schema、caller 反思循环）都是先在 QwenPaw 的 agent 场景里被反复打磨，才沉淀成规格的。
+- **[Kilo Code](https://kilocode.ai)** —— IDE 里的 AI 编程助手。`grga` 的大部分实装、测试、重构都由它落地；作者只写"目标 / 约束 / 边界"，实现细节交给它——这套"规格给约束，实现给自由"的分工正是这个项目能小而快演进的关键。
