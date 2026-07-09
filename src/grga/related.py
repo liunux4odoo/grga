@@ -142,10 +142,16 @@ def related(
             )
         if mode == "dir":
             return _related_dir(conn, seeds, limit, scope_key)
-        # heading: default is cross-scope; same_scope=True restores the
-        # legacy per-scope behaviour.
-        heading_scope = scope_key if same_scope else None
-        return _related_heading(conn, seeds, limit, heading_scope)
+        # heading: seeds are always sourced from --directory (when given) so
+        # the walk starts in the caller's project, but the second-stage
+        # heading match is cross-scope by default so callers can discover
+        # sibling sections in other corpora. ``same_scope=True`` restricts
+        # the second stage to --directory too (legacy behaviour).
+        return _related_heading(
+            conn, seeds, limit,
+            seed_scope_key=scope_key,
+            match_scope_key=scope_key if same_scope else None,
+        )
     finally:
         conn.close()
 
@@ -357,12 +363,21 @@ def _related_heading(
     conn: sqlite3.Connection,
     seeds: Sequence[str],
     limit: int,
-    scope_key: Optional[str],
+    *,
+    seed_scope_key: Optional[str],
+    match_scope_key: Optional[str],
 ) -> List[Related]:
-    # Track seed docs as (directory, doc_path) so identically-named files
-    # in different scopes are not conflated when the query spans multiple
+    # Seed selection and match diffusion are two independent scope concepts.
+    # Seeds are limited to ``seed_scope_key`` (``--directory`` if given) so
+    # the walk starts in the caller's project. The second stage decides
+    # whether matching heading docs must also live in ``--directory``
+    # (``match_scope_key`` set) or may come from any scope in the shared DB
+    # (``match_scope_key=None``, the cross-scope default).
+    #
+    # Track seed docs as (directory, doc_path) so identically-named files in
+    # different scopes are not conflated when the query spans multiple
     # scopes (the default for mode=heading in the user-scoped model).
-    seed_docs = _scoped_docs_for_keywords(conn, seeds, scope_key)
+    seed_docs = _scoped_docs_for_keywords(conn, seeds, seed_scope_key)
     if not seed_docs:
         return []
     seed_doc_set: set = set(seed_docs.keys())  # {(directory, doc_path), ...}
@@ -421,9 +436,9 @@ def _related_heading(
         params.extend(seed_leaves)
         params.extend([f"% > {leaf}" for leaf in seed_leaves])
     combined = " OR ".join(f"({part})" for part in where_parts)
-    if scope_key is not None:
+    if match_scope_key is not None:
         combined = f"({combined}) AND directory = ?"
-        params.append(scope_key)
+        params.append(match_scope_key)
     rows = conn.execute(
         f"SELECT directory, heading_path, doc_path FROM heading_docs WHERE {combined}",
         params,

@@ -145,6 +145,82 @@ def test_heading_same_scope_restricts_to_directory(two_scopes):
     )
 
 
+@pytest.fixture
+def shared_seed_scopes(monkeypatch, tmp_path):
+    """Two scopes whose seed keyword exists in BOTH, sharing a heading leaf.
+
+    This is the real user scenario the fixture with a unique seed word
+    ('seedheadingkw', only in scope A) accidentally sidesteps: a common
+    keyword like 'install' lives in every corpus. Both scope A and scope B
+    have a doc containing ``sharedkw`` under a ``## macOS`` heading.
+    """
+    monkeypatch.setenv("GRGA_SIDECAR_ROOT", str(tmp_path / "sidecars"))
+    scope_a = tmp_path / "shared_a"
+    scope_b = tmp_path / "shared_b"
+    scope_a.mkdir()
+    scope_b.mkdir()
+
+    (scope_a / "a_guide.md").write_text(
+        "# 安装指南\n\n## macOS\n\nsharedkw sharedkw content.\n",
+        encoding="utf-8",
+    )
+    (scope_b / "b_guide.md").write_text(
+        "# 安装教程\n\n## macOS\n\nsharedkw and other stuff.\n",
+        encoding="utf-8",
+    )
+
+    db = tmp_path / "shared_seed.db"
+    build_graph_index(scope_a, db_path=db, min_term_count=1)
+    build_graph_index(scope_b, db_path=db, min_term_count=1)
+    return {"a": scope_a, "b": scope_b, "db": db}
+
+
+def test_heading_mode_crosses_when_seed_is_shared(shared_seed_scopes):
+    """The regression bug: seed keyword exists in BOTH scopes.
+
+    Caller passes -d A. Expectation:
+      - seed doc set = { (A, a_guide.md) } (limited to A)
+      - matching heading docs = docs in ANY scope sharing that heading
+      - result contains b_guide.md
+    """
+    results = related(
+        ["sharedkw"],
+        mode="heading",
+        db_path=shared_seed_scopes["db"],
+        directory=shared_seed_scopes["a"],
+        limit=20,
+    )
+    docs = _docs(results)
+    assert "b_guide.md" in docs, (
+        f"heading mode should reach scope B via shared 'macOS' leaf even "
+        f"when seed keyword exists in both scopes, got {docs}"
+    )
+    # Sanity: scope A 的种子文档本身不出现在结果里
+    assert "a_guide.md" not in docs
+
+
+def test_heading_same_scope_with_shared_seed_stays_in_directory(shared_seed_scopes):
+    """--same-scope tightens BOTH seed_scope and match_scope to --directory.
+
+    Even though ``sharedkw`` and the ``macOS`` heading exist in scope B too,
+    --same-scope must keep the match confined to scope A, yielding nothing
+    (A's only doc is the seed itself).
+    """
+    results = related(
+        ["sharedkw"],
+        mode="heading",
+        db_path=shared_seed_scopes["db"],
+        directory=shared_seed_scopes["a"],
+        same_scope=True,
+        limit=20,
+    )
+    docs = _docs(results)
+    assert "b_guide.md" not in docs, (
+        f"--same-scope must keep heading matches inside scope A even with a "
+        f"shared seed, got {docs}"
+    )
+
+
 def test_crossed_scopes_preview_reports_other_scope(two_scopes):
     from grga.related import related_graph_with_preview
 
