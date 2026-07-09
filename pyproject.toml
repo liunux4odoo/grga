@@ -4,21 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grga"
-version = "0.1.0"
-description = "A CLI and Tkinter GUI for ripgrep-all search"
+version = "0.2.0"
+description = "A CLI and Tkinter GUI for ripgrep-all search with L2 graph index and LLM-assisted deep search"
+readme = "README.md"
 requires-python = ">=3.8"
+license = { file = "LICENSE" }
 authors = [{ name = "grga maintainers" }]
-keywords = ["ripgrep", "rga", "search", "gui"]
+keywords = ["ripgrep", "rga", "search", "gui", "cli", "llm", "graph"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
     "Environment :: X11 Applications",
+    "Intended Audience :: Developers",
     "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Desktop Environment",
     "Topic :: Text Processing :: Indexing",
+    "Topic :: Utilities",
 ]
 dependencies = ["typer>=0.9", "openai>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/grga-tools/grga"
+Repository = "https://github.com/grga-tools/grga"
+Documentation = "https://github.com/grga-tools/grga#readme"
+Changelog = "https://github.com/grga-tools/grga/blob/main/CHANGELOG.md"
+Issues = "https://github.com/grga-tools/grga/issues"
 
 [project.optional-dependencies]
 standalone = ["pyinstaller>=6.0"]
@@ -33,7 +52,12 @@ grga-gui = "grga.gui:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-grga = ["data/tools/**/*", "prompts/*.txt"]
+grga = [
+    "prompts/*.txt",
+    "prompts/**/*.txt",
+    "data/tools/README.txt",
+    "skills/**/*",
+]
 
 [tool.pytest.ini_options]
 minversion = "7.0"

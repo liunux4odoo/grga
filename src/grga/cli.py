@@ -1,23 +1,124 @@
 import json
+import os
 from pathlib import Path
 from typing import List, Optional
 
 import typer
 
+from grga import __version__
 from grga.deep_search import deep_search_directory, resolve_deep_search_options
+from grga.exit_codes import (
+    EXIT_DOWNLOAD_FAIL,
+    EXIT_IO,
+    EXIT_MISSING_TOOL,
+    EXIT_OFFLINE,
+    EXIT_PARTIAL_INSTALL,
+    EXIT_USER_ABORT,
+    EXIT_VERIFY_FAIL,
+    emit_error,
+    emit_warning,
+)
 from grga.probe import probe_directory
+from grga.runtime_env import is_interactive, is_offline
 from grga.search import build_rga_command_preview, check_environment, configure_logging, search_directory
-from grga.toolchain import check_tools, current_tools_dir, install_tools, platform_key, supported_tool_names, tool_specs, tools_root, update_tools
+from grga.toolchain import (
+    MANUAL_INSTALL_URLS,
+    MissingToolsError,
+    OfflineError,
+    PartialInstallError,
+    UserAbortError,
+    VerifyError,
+    check_tools,
+    current_tools_dir,
+    ensure_tools,
+    install_tools,
+    install_tools_from_dir,
+    migrate_legacy_tools,
+    platform_key,
+    supported_tool_names,
+    tool_specs,
+    tools_root,
+    update_tools,
+)
 
 app = typer.Typer(no_args_is_help=True, help="Search files with ripgrep-all helpers.")
 tools_app = typer.Typer(no_args_is_help=True, help="Manage bundled command line tools.")
 app.add_typer(tools_app, name="tools")
+skill_app = typer.Typer(no_args_is_help=True, help="Install and inspect bundled grga skills.")
+app.add_typer(skill_app, name="skill")
 index_app = typer.Typer(no_args_is_help=True, help="Build and manage the L2 graph index.")
 app.add_typer(index_app, name="index")
 graph_app = typer.Typer(no_args_is_help=True, help="Inspect the shared user-scoped graph.")
 app.add_typer(graph_app, name="graph")
 
 CONFIG_PATH = Path.home() / ".config" / "grga" / "settings.json"
+
+
+def _version_callback(value: bool):
+    if value:
+        typer.echo(f"grga {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main_callback(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
+):
+    """Search files with ripgrep-all helpers."""
+
+
+def _apply_prefer_system(flag: bool) -> None:
+    """Inject GRGA_PREFER_SYSTEM so downstream find_tool prefers system tools.
+
+    Env injection keeps the change local to the process and avoids
+    threading the flag through every resolver call site.
+    """
+    if flag:
+        os.environ["GRGA_PREFER_SYSTEM"] = "1"
+
+
+def _guard_tools(required, *, json_mode, offline, interactive=None):
+    """Run ensure_tools and translate failures to stable exit codes."""
+    interactive = is_interactive() if interactive is None else interactive
+    try:
+        ensure_tools(
+            required,
+            interactive=interactive,
+            json_mode=json_mode,
+            offline=offline,
+            progress=(None if json_mode else (lambda message: typer.echo(message, err=True))),
+        )
+    except OfflineError as exc:
+        raise typer.Exit(
+            emit_error(
+                EXIT_OFFLINE,
+                "offline_and_missing",
+                str(exc),
+                json_mode=json_mode,
+                details={"missing": list(exc.missing), "manual_urls": {name: MANUAL_INSTALL_URLS.get(name) for name in exc.missing}},
+            )
+        )
+    except UserAbortError as exc:
+        raise typer.Exit(emit_error(EXIT_USER_ABORT, "user_abort", str(exc), json_mode=json_mode, details={"missing": list(exc.missing)}))
+    except PartialInstallError as exc:
+        raise typer.Exit(emit_error(EXIT_PARTIAL_INSTALL, "partial_install", str(exc), json_mode=json_mode, details={"installed": list(exc.installed), "failed": list(exc.failed)}))
+    except MissingToolsError as exc:
+        raise typer.Exit(
+            emit_error(
+                EXIT_MISSING_TOOL,
+                "missing_tools",
+                str(exc),
+                json_mode=json_mode,
+                details={"missing": list(exc.missing), "install_hint": "grga tools install"},
+            )
+        )
+
 
 
 def _get_config_debug() -> bool:
@@ -115,6 +216,8 @@ def search_command(
     implicit_or: bool = typer.Option(False, "--implicit-or", help="Restore v1 behaviour: implicit adjacency means OR."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
     metadata: bool = typer.Option(True, "--metadata/--no-metadata", help="Attach Layer 2 hit metadata (occurrence, ratio, nearby)."),
+    offline: bool = typer.Option(False, "--offline", help="Fail fast instead of downloading missing tools."),
+    prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
     query = _join_keywords(keywords)
@@ -131,6 +234,10 @@ def search_command(
 
     effective_debug = debug or _get_config_debug()
     configure_logging(debug=effective_debug)
+
+    _apply_prefer_system(prefer_system)
+    _guard_tools(["rga"], json_mode=json_output, offline=is_offline(offline))
+
 
     try:
         raw = search_directory(
@@ -205,6 +312,8 @@ def deep_search_command(
     max_tiers: Optional[int] = typer.Option(None, "--max-tiers", help="Maximum number of tiered query expressions to run."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
     metadata: bool = typer.Option(True, "--metadata/--no-metadata", help="Attach Layer 2 hit metadata (occurrence, ratio, nearby)."),
+    offline: bool = typer.Option(False, "--offline", help="Fail fast instead of downloading missing tools."),
+    prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
     query = _join_keywords(keywords)
@@ -214,6 +323,10 @@ def deep_search_command(
 
     effective_debug = debug or _get_config_debug()
     configure_logging(debug=effective_debug)
+
+    _apply_prefer_system(prefer_system)
+    _guard_tools(["rga"], json_mode=json_output, offline=is_offline(offline))
+
 
     options = resolve_deep_search_options(
         {
@@ -326,6 +439,8 @@ def probe_command(
     sample: int = typer.Option(0, "--sample", help="Sample up to N matched lines to estimate average line bytes (0 disables)."),
     per_file: bool = typer.Option(False, "--per-file/--no-per-file", help="Include per-file match counts in the JSON output."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    offline: bool = typer.Option(False, "--offline", help="Fail fast instead of downloading missing tools."),
+    prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during probe."),
 ):
     """Cheap, read-only probe of query scale before running a full search.
@@ -348,6 +463,10 @@ def probe_command(
 
     effective_debug = debug or _get_config_debug()
     configure_logging(debug=effective_debug)
+
+    _apply_prefer_system(prefer_system)
+    _guard_tools(["rg" if path_only else "rga"], json_mode=json_output, offline=is_offline(offline))
+
 
     try:
         raw = probe_directory(
@@ -427,7 +546,11 @@ def check_command(json_output: bool = typer.Option(False, "--json", help="Print 
 
 
 @tools_app.command("check")
-def tools_check_command(json_output: bool = typer.Option(False, "--json", help="Print raw JSON result.")):
+def tools_check_command(
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
+):
+    _apply_prefer_system(prefer_system)
     result = check_tools()
     if json_output:
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
@@ -463,12 +586,48 @@ def tools_install_command(
     names: Optional[List[str]] = typer.Argument(None, help="Tool names to install. Defaults to all supported tools."),
     force: bool = typer.Option(False, "--force", help="Reinstall tools even if they already exist."),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Optional URL prefix for GitHub download mirrors."),
+    from_dir: Optional[Path] = typer.Option(None, "--from", help="Install from a local mirror directory instead of downloading."),
+    fallback_online: bool = typer.Option(False, "--fallback-online", help="With --from, fall back to online download when an asset is missing locally."),
+    no_verify: bool = typer.Option(False, "--no-verify", help="Skip sha256 verification (insecure)."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
+    verify = not no_verify
+    if no_verify:
+        emit_warning("insecure", "sha256 verification disabled via --no-verify", json_mode=json_output)
+
+    if from_dir is not None:
+        try:
+            report = install_tools_from_dir(
+                from_dir,
+                names=names,
+                verify=verify,
+                progress=(None if json_output else (lambda message: typer.echo(message))),
+                fallback_online=fallback_online,
+                base_url=base_url,
+            )
+        except FileNotFoundError as exc:
+            raise typer.Exit(emit_error(EXIT_IO, "no_assets_found", str(exc), json_mode=json_output))
+        except VerifyError as exc:
+            raise typer.Exit(emit_error(EXIT_VERIFY_FAIL, "verify_failed", str(exc), json_mode=json_output))
+        if json_output:
+            typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            for name in report["installed"]:
+                typer.echo(f"installed: {name}")
+            for item in report["failed"]:
+                typer.echo(f"failed: {item['name']} ({item['error']})", err=True)
+            for item in report["skipped"]:
+                typer.echo(f"skipped: {item['name']} ({item['reason']})", err=True)
+        if report["failed"]:
+            raise typer.Exit(EXIT_PARTIAL_INSTALL if report["installed"] else EXIT_IO)
+        return
+
     try:
-        result = install_tools(names=names, force=force, base_url=base_url, progress=lambda message: typer.echo(message))
+        result = install_tools(names=names, force=force, base_url=base_url, verify=verify, progress=lambda message: typer.echo(message))
+    except VerifyError as exc:
+        raise typer.Exit(emit_error(EXIT_VERIFY_FAIL, "verify_failed", str(exc), json_mode=json_output))
     except Exception as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(emit_error(EXIT_DOWNLOAD_FAIL, "download_failed", str(exc), json_mode=json_output))
     for item in result:
         typer.echo(json.dumps(item, ensure_ascii=False))
 
@@ -477,19 +636,108 @@ def tools_install_command(
 def tools_update_command(
     names: Optional[List[str]] = typer.Argument(None, help="Tool names to update. Defaults to all supported tools."),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Optional URL prefix for GitHub download mirrors."),
+    no_verify: bool = typer.Option(False, "--no-verify", help="Skip sha256 verification (insecure)."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
+    verify = not no_verify
+    if no_verify:
+        emit_warning("insecure", "sha256 verification disabled via --no-verify", json_mode=json_output)
     try:
-        result = update_tools(names=names, base_url=base_url, progress=lambda message: typer.echo(message))
+        result = update_tools(names=names, base_url=base_url, verify=verify, progress=lambda message: typer.echo(message))
+    except VerifyError as exc:
+        raise typer.Exit(emit_error(EXIT_VERIFY_FAIL, "verify_failed", str(exc), json_mode=json_output))
     except Exception as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(1)
+        raise typer.Exit(emit_error(EXIT_DOWNLOAD_FAIL, "download_failed", str(exc), json_mode=json_output))
     for item in result:
         typer.echo(json.dumps(item, ensure_ascii=False))
+
+
+@tools_app.command("migrate")
+def tools_migrate_command(
+    dry_run: bool = typer.Option(False, "--dry-run", help="List the migration plan without copying."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+):
+    """Copy tools from the legacy site-packages cache into the XDG data dir."""
+    try:
+        report = migrate_legacy_tools(dry_run=dry_run, progress=(None if json_output else (lambda message: typer.echo(message))))
+    except OSError as exc:
+        raise typer.Exit(emit_error(EXIT_IO, "readonly", str(exc), json_mode=json_output))
+    except Exception as exc:
+        raise typer.Exit(emit_error(EXIT_IO, "migrate_failed", str(exc), json_mode=json_output))
+    if json_output:
+        typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["errors"]:
+        raise typer.Exit(EXIT_IO)
+
 
 
 @tools_app.command("platform")
 def tools_platform_command():
     typer.echo(platform_key())
+
+
+@skill_app.command("list")
+def skill_list_command(json_output: bool = typer.Option(False, "--json", help="Print raw JSON result.")):
+    from grga.skill_install import list_skills
+
+    entries = list_skills()
+    if json_output:
+        typer.echo(json.dumps(entries, ensure_ascii=False, indent=2))
+        return
+    if not entries:
+        typer.echo("no skills bundled", err=True)
+        return
+    for item in entries:
+        typer.echo(f"{item['name']}: {item['skill_md']}")
+
+
+@skill_app.command("path")
+def skill_path_command():
+    from grga.skill_install import skills_root
+
+    typer.echo(str(skills_root()))
+
+
+@skill_app.command("install")
+def skill_install_command(
+    to: Path = typer.Option(..., "--to", help="Destination directory (each skill goes under <to>/<name>)."),
+    name: Optional[str] = typer.Option(None, "--name", help="Install a single skill. Default: install every bundled skill."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing skill directories."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+):
+    """Install bundled skill(s) into ``--to``.
+
+    Exit code contract:
+
+    * ``0`` — every skill in scope was freshly installed.
+    * ``3`` (``user_abort``) — one or more targets already existed and
+      ``--force`` was not passed. The report array (JSON) still lists
+      per-skill ``status`` so agents can pick apart *which* skills
+      collided; the exit code is the only success/exists discriminator.
+    * ``9`` — unknown skill (``unknown_skill``) or I/O error.
+    """
+    from grga.skill_install import install_all, install_skill
+
+    reports = []
+    try:
+        if name:
+            reports = [install_skill(name, to, force=force)]
+        else:
+            reports = install_all(to, force=force)
+    except FileNotFoundError as exc:
+        raise typer.Exit(emit_error(EXIT_IO, "unknown_skill", str(exc), json_mode=json_output))
+    except FileExistsError as exc:
+        raise typer.Exit(emit_error(EXIT_USER_ABORT, "exists", str(exc), json_mode=json_output))
+    except OSError as exc:
+        raise typer.Exit(emit_error(EXIT_IO, "io", str(exc), json_mode=json_output))
+    if json_output:
+        typer.echo(json.dumps(reports, ensure_ascii=False, indent=2))
+    else:
+        for item in reports:
+            typer.echo(f"{item['name']}: {item['status']} -> {item.get('target', '')}")
+    statuses = {r.get("status") for r in reports}
+    if "exists" in statuses and not force:
+        raise typer.Exit(EXIT_USER_ABORT)
 
 
 @app.command("gui")

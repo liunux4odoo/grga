@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import platform
@@ -14,12 +15,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from grga.paths import resolve_state_dir, resolve_tools_dir, resolve_tools_root
+from grga.runtime_env import insecure_enabled, prefer_system_tools
+
 TOOLS = ("rg", "rga", "rga-preproc", "pandoc", "pdftotext", "fzf")
 PACKAGE_ROOT = Path(__file__).resolve().parent
-TOOLS_ROOT = PACKAGE_ROOT / "data" / "tools"
+LEGACY_TOOLS_ROOT = PACKAGE_ROOT / "data" / "tools"
 MANIFEST_NAME = "tools.json"
+MIGRATION_SENTINEL = ".migrated"
 DOWNLOAD_TIMEOUT = 120
 DOWNLOAD_RETRIES = 3
+
+
+class VerifyError(RuntimeError):
+    """Raised when a downloaded asset fails sha256 verification."""
 
 
 @dataclass(frozen=True)
@@ -59,11 +68,20 @@ def platform_key():
 
 
 def tools_root():
-    return TOOLS_ROOT
+    return resolve_tools_root()
 
 
 def current_tools_dir():
-    return TOOLS_ROOT / platform_key()
+    return resolve_tools_dir(platform_key())
+
+
+def legacy_tools_root():
+    """Legacy site-packages tools directory (used by ``tools migrate``)."""
+    return LEGACY_TOOLS_ROOT
+
+
+def legacy_current_tools_dir():
+    return LEGACY_TOOLS_ROOT / platform_key()
 
 
 def manifest_path():
@@ -137,9 +155,6 @@ def tool_specs():
 
 
 def managed_bin_dirs():
-    root = current_tools_dir()
-    if not root.exists():
-        return []
     dirs = set()
     for command in TOOLS:
         path = find_managed_tool(command)
@@ -149,26 +164,36 @@ def managed_bin_dirs():
 
 
 def add_tools_to_path():
+    global _PATH_STAMPED
+    if _PATH_STAMPED is not None and _PATH_STAMPED == os.environ.get("PATH", ""):
+        return
     dirs = managed_bin_dirs()
     if not dirs:
+        _PATH_STAMPED = os.environ.get("PATH", "")
         return
     current = os.environ.get("PATH", "")
     existing = current.split(os.pathsep) if current else []
     prefix = [item for item in dirs if item not in existing]
     if prefix:
         os.environ["PATH"] = os.pathsep.join(prefix + existing)
-
-
-def find_tool(command):
-    managed = find_managed_tool(command)
-    if managed:
-        return managed
-    return shutil.which(command)
+    _PATH_STAMPED = os.environ.get("PATH", "")
 
 
 def find_managed_tool(command):
+    key = _cache_key(command)
+    if key in _MANAGED_TOOL_CACHE:
+        return _MANAGED_TOOL_CACHE[key]
+    result = _resolve_managed_tool(command)
+    _MANAGED_TOOL_CACHE[key] = result
+    return result
+
+
+def _resolve_managed_tool(command):
     name = _exe_name(command)
     for path in _candidate_tool_paths(command):
+        if path.name == name and _is_executable_file(path):
+            return str(path)
+    for path in _legacy_candidate_tool_paths(command):
         if path.name == name and _is_executable_file(path):
             return str(path)
     return None
@@ -184,11 +209,14 @@ def check_tools(include_system=True):
                 resolved = Path(path).resolve()
             except OSError:
                 resolved = Path(path)
-            try:
-                resolved.relative_to(current_tools_dir())
-                source = "bundled"
-            except ValueError:
-                source = "system"
+            source = "system"
+            for base in (current_tools_dir(), legacy_current_tools_dir()):
+                try:
+                    resolved.relative_to(base.resolve())
+                    source = "bundled"
+                    break
+                except (OSError, ValueError):
+                    continue
         result[command] = {
             "path": path,
             "source": source,
@@ -214,7 +242,7 @@ def tool_version(path):
     return first_line[0] if first_line else None
 
 
-def install_tools(names=None, force=False, base_url=None, progress=None):
+def install_tools(names=None, force=False, base_url=None, progress=None, verify=True):
     selected = normalize_tool_names(names)
     if selected:
         _emit_progress(progress, "tools: " + ", ".join(selected))
@@ -223,7 +251,7 @@ def install_tools(names=None, force=False, base_url=None, progress=None):
     total = len(selected)
     for index, name in enumerate(selected, 1):
         _emit_progress(progress, f"[{index}/{total}] {name}: start")
-        installed.append(install_tool(name, force=force, base_url=base_url, manifest=manifest, progress=progress))
+        installed.append(install_tool(name, force=force, base_url=base_url, manifest=manifest, progress=progress, verify=verify))
         save_manifest(manifest)
     return installed
 
@@ -253,7 +281,7 @@ def supported_tool_names():
     return [name for name, spec in tool_specs().items() if key in spec.asset_patterns]
 
 
-def install_tool(name, force=False, base_url=None, manifest=None, progress=None):
+def install_tool(name, force=False, base_url=None, manifest=None, progress=None, verify=True):
     name = normalize_tool_names([name])[0]
     specs = tool_specs()
     spec = specs[name]
@@ -267,8 +295,11 @@ def install_tool(name, force=False, base_url=None, manifest=None, progress=None)
     release = latest_release(spec.repo, base_url=base_url)
     _emit_progress(progress, f"{name}: selecting asset for {platform_key()}")
     asset = select_asset(spec, release)
+    expected_sha = _manifest_asset_sha256(name, asset.get("name"))
     _emit_progress(progress, f"{name}: downloading {asset['name']}")
     archive = download_asset(asset["browser_download_url"], asset["name"], base_url=base_url, progress=progress)
+    _verify_archive(name, archive, expected_sha, verify=verify, progress=progress)
+    computed_sha = sha256_file(archive)
     with tempfile.TemporaryDirectory(prefix=f"grga-{name}-") as tmp:
         extracted = Path(tmp) / "extracted"
         extracted.mkdir(parents=True, exist_ok=True)
@@ -285,22 +316,535 @@ def install_tool(name, force=False, base_url=None, manifest=None, progress=None)
             shutil.rmtree(target_dir)
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(replacement), str(target_dir))
+    invalidate_tool_cache()
 
     if manifest is None:
         manifest = load_manifest()
-    manifest.setdefault("tools", {})[name] = {
+    tool_entry = manifest.setdefault("tools", {}).setdefault(name, {})
+    tool_entry.update({
         "repo": spec.repo,
         "version": release.get("tag_name"),
         "asset": asset["name"],
         "path": _manifest_path_for_spec(spec),
-    }
+        "sha256": expected_sha or computed_sha,
+    })
+    if not expected_sha:
+        _emit_progress(progress, f"{name}: pinned sha256 {computed_sha} (trust-on-first-use)")
     result = {"name": name, "status": "installed", "path": _installed_path_for_spec(spec), "version": release.get("tag_name")}
     _emit_progress(progress, f"{name}: installed")
     return result
 
 
-def update_tools(names=None, base_url=None, progress=None):
-    return install_tools(names=names, force=True, base_url=base_url, progress=progress)
+def install_tools_from_dir(src, names=None, verify=True, progress=None, fallback_online=False, base_url=None):
+    """Install tools from a local mirror directory (offline).
+
+    Layout accepted:
+      * ``<src>/<platform>/<asset-filename>``
+      * flat ``<src>/<asset-filename>``
+
+    Returns a report dict with ``installed`` / ``failed`` / ``skipped``.
+    """
+    src = Path(src)
+    if not src.exists() or not src.is_dir():
+        raise FileNotFoundError(f"source directory not found: {src}")
+
+    selected = normalize_tool_names(names)
+    manifest = load_manifest()
+    key = platform_key()
+    search_dirs = [src / key, src]
+    mirror_manifest = _load_mirror_manifest(src, key)
+    report = {"installed": [], "failed": [], "skipped": []}
+
+    any_asset_present = any(
+        d.exists() and any(p.is_file() for p in d.iterdir())
+        for d in search_dirs
+    )
+    if not any_asset_present:
+        raise FileNotFoundError(f"no assets found under {src}")
+
+    for name in selected:
+        spec = tool_specs()[name]
+        pattern = spec.asset_patterns.get(key)
+        if not pattern:
+            report["skipped"].append({"name": name, "reason": "unsupported_platform"})
+            continue
+        asset_path = _find_local_asset(search_dirs, pattern)
+        if asset_path is None:
+            if fallback_online:
+                try:
+                    install_tool(name, force=True, base_url=base_url, manifest=manifest, progress=progress, verify=verify)
+                    save_manifest(manifest)
+                    report["installed"].append(name)
+                    continue
+                except Exception as exc:
+                    report["failed"].append({"name": name, "error": f"online fallback failed: {exc}"})
+                    continue
+            report["failed"].append({"name": name, "error": "platform_mismatch"})
+            continue
+        try:
+            _install_local_asset(name, spec, asset_path, manifest, verify=verify, progress=progress, mirror_manifest=mirror_manifest)
+            save_manifest(manifest)
+            report["installed"].append(name)
+        except Exception as exc:
+            report["failed"].append({"name": name, "error": str(exc)})
+    return report
+
+
+def _load_mirror_manifest(src, platform):
+    """Return a dict for the mirror's tools.json, if any.
+
+    Tries ``<src>/<platform>/tools.json`` first, then ``<src>/tools.json``.
+    """
+    for candidate in (src / platform / MANIFEST_NAME, src / MANIFEST_NAME):
+        data = _read_manifest_at(candidate)
+        if data.get("tools"):
+            return data
+    return {}
+
+
+def _find_local_asset(search_dirs, pattern):
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for path in sorted(directory.iterdir()):
+            if path.is_file() and re.search(pattern, path.name, re.IGNORECASE):
+                return path
+    return None
+
+
+def _install_local_asset(name, spec, asset_path, manifest, verify=True, progress=None, mirror_manifest=None):
+    target_dir = current_tools_dir() / spec.name
+    expected_sha = _asset_sha256_from(mirror_manifest, name, asset_path.name) if mirror_manifest else None
+    if not expected_sha:
+        expected_sha = _manifest_asset_sha256(name, asset_path.name)
+    _verify_archive(name, asset_path, expected_sha, verify=verify, progress=progress)
+    computed_sha = sha256_file(asset_path)
+    with tempfile.TemporaryDirectory(prefix=f"grga-{name}-") as tmp:
+        extracted = Path(tmp) / "extracted"
+        extracted.mkdir(parents=True, exist_ok=True)
+        _emit_progress(progress, f"{name}: extracting {asset_path.name}")
+        try:
+            unpack_archive(asset_path, extracted)
+        except Exception as exc:
+            raise RuntimeError(f"unpack_failed: {exc}") from exc
+        replacement = Path(tmp) / spec.name
+        replacement.mkdir(parents=True, exist_ok=True)
+        copied = copy_executables(spec, extracted, replacement)
+        if not copied:
+            raise RuntimeError(f"no executable matched for {name} in {asset_path.name}")
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(replacement), str(target_dir))
+    invalidate_tool_cache()
+    tool_entry = manifest.setdefault("tools", {}).setdefault(name, {})
+    tool_entry.update({
+        "repo": spec.repo,
+        "asset": asset_path.name,
+        "path": _manifest_path_for_spec(spec),
+        "sha256": expected_sha or computed_sha,
+    })
+    mirror_version = _asset_version_from(mirror_manifest, name) if mirror_manifest else None
+    if mirror_version:
+        tool_entry["version"] = mirror_version
+    if not expected_sha:
+        _emit_progress(progress, f"{name}: pinned sha256 {computed_sha} (trust-on-first-use)")
+    _emit_progress(progress, f"{name}: installed from {asset_path}")
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _asset_sha256_from(manifest, name, asset_name):
+    entry = manifest.get("tools", {}).get(name) if isinstance(manifest, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("asset") == asset_name and entry.get("sha256"):
+        return entry.get("sha256")
+    return None
+
+
+def _asset_version_from(manifest, name):
+    entry = manifest.get("tools", {}).get(name) if isinstance(manifest, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("version")
+
+
+def _manifest_asset_sha256(name, asset_name):
+    return _asset_sha256_from(load_manifest(), name, asset_name)
+
+
+def _verify_archive(name, archive, expected_sha, verify=True, progress=None):
+    if not expected_sha:
+        _emit_progress(progress, f"{name}: no sha256 in manifest, skipping verification")
+        return
+    actual = sha256_file(archive)
+    if actual == expected_sha:
+        _emit_progress(progress, f"{name}: sha256 verified")
+        return
+    if not verify or insecure_enabled():
+        _emit_progress(progress, f"{name}: WARNING sha256 mismatch ignored (expected={expected_sha} actual={actual})")
+        return
+    raise VerifyError(f"sha256 mismatch for {name}: expected {expected_sha}, got {actual}")
+
+
+def update_tools(names=None, base_url=None, progress=None, verify=True):
+    return install_tools(names=names, force=True, base_url=base_url, progress=progress, verify=verify)
+
+
+MIN_VERSIONS = {}
+
+_MANAGED_TOOL_CACHE = {}
+_PATH_STAMPED = None
+
+
+def _cache_key(command):
+    return (command, str(current_tools_dir()), str(legacy_current_tools_dir()))
+
+
+def invalidate_tool_cache():
+    """Drop cached managed-tool lookups.
+
+    Call whenever the on-disk layout of the tools cache changes
+    (install / update / migrate).
+    """
+    global _PATH_STAMPED
+    _MANAGED_TOOL_CACHE.clear()
+    _PATH_STAMPED = None
+
+
+def find_tool(command):
+    """Resolve a tool path preferring managed → system by default.
+
+    ``GRGA_PREFER_SYSTEM=1`` flips priority to system → managed.
+
+    Candidates are resolved lazily so the common case (a valid
+    higher-priority hit) avoids the extra filesystem/``PATH`` scan.
+    """
+    prefer_system = prefer_system_tools()
+    if prefer_system:
+        resolvers = (lambda: shutil.which(command), lambda: find_managed_tool(command))
+    else:
+        resolvers = (lambda: find_managed_tool(command), lambda: shutil.which(command))
+
+    candidates = []
+    for resolve in resolvers:
+        candidate = resolve()
+        if candidate:
+            candidates.append(candidate)
+            if _passes_min_version(command, candidate):
+                return candidate
+    return candidates[0] if candidates else None
+
+
+
+def _passes_min_version(command, path):
+    minimum = MIN_VERSIONS.get(command)
+    if not minimum:
+        return True
+    version = tool_version(path)
+    if not version:
+        return True
+    match = re.search(r"(\d+(?:\.\d+)+)", version)
+    if not match:
+        return True
+    return _version_ge(match.group(1), minimum)
+
+
+TOOL_DEPENDENCIES = {
+    "rga": ("rg",),
+    "rga-preproc": ("rg",),
+}
+
+MANUAL_INSTALL_URLS = {
+    "rg": "https://github.com/BurntSushi/ripgrep/releases",
+    "rga": "https://github.com/phiresky/ripgrep-all/releases",
+    "rga-preproc": "https://github.com/phiresky/ripgrep-all/releases",
+    "pandoc": "https://github.com/jgm/pandoc/releases",
+    "pdftotext": "https://poppler.freedesktop.org/",
+    "fzf": "https://github.com/junegunn/fzf/releases",
+}
+
+
+class MissingToolsError(RuntimeError):
+    def __init__(self, missing, message=None):
+        self.missing = tuple(missing)
+        super().__init__(message or f"missing tools: {', '.join(self.missing)}")
+
+
+class OfflineError(RuntimeError):
+    def __init__(self, missing):
+        self.missing = tuple(missing)
+        super().__init__(f"offline mode: cannot install missing tools: {', '.join(self.missing)}")
+
+
+class UserAbortError(RuntimeError):
+    def __init__(self, missing):
+        self.missing = tuple(missing)
+        super().__init__("user declined to install missing tools")
+
+
+class PartialInstallError(RuntimeError):
+    def __init__(self, installed, failed):
+        self.installed = tuple(installed)
+        self.failed = tuple(failed)
+        super().__init__(f"partial install: installed={list(installed)} failed={list(failed)}")
+
+
+def _expand_dependencies(required):
+    """Expand a required tool list to include implicit dependencies.
+
+    Dependencies are placed before the tool that requires them, and the
+    result is de-duplicated while preserving first-seen order.
+    """
+    expanded = []
+    seen = set()
+    for name in required:
+        for candidate in list(TOOL_DEPENDENCIES.get(name, ())) + [name]:
+            if candidate not in seen:
+                seen.add(candidate)
+                expanded.append(candidate)
+    return expanded
+
+
+# Backwards-compatible alias.
+_expand_required = _expand_dependencies
+
+
+def ensure_tools(required, *, interactive=False, json_mode=False, offline=False, base_url=None, progress=None, prompt=None):
+    """Guarantee that every tool in ``required`` (and its deps) is resolvable.
+
+    Returns the list of missing tools *after* an install attempt (empty on
+    success). Raises :class:`MissingToolsError`, :class:`OfflineError`,
+    :class:`UserAbortError`, or :class:`PartialInstallError` on failure so
+    the CLI can map them to stable exit codes.
+
+    Empty ``required`` is a no-op.
+    """
+    if not required:
+        return []
+
+    maybe_migrate_legacy_tools(progress=progress)
+    add_tools_to_path()
+    expanded = _expand_dependencies(required)
+    missing = [name for name in expanded if find_tool(name) is None]
+    if not missing:
+        return []
+
+    if offline:
+        raise OfflineError(missing)
+
+    if not interactive or json_mode:
+        raise MissingToolsError(missing)
+
+    installable = _installable_from_missing(missing)
+    if not installable:
+        raise MissingToolsError(missing, message=f"tools not installable on this platform: {', '.join(missing)}")
+
+    prompt = prompt or (lambda names: input(f"Install missing tools {', '.join(names)}? [y/N] ").strip().lower() == "y")
+    try:
+        approved = bool(prompt(installable))
+    except (EOFError, KeyboardInterrupt):
+        approved = False
+    if not approved:
+        raise UserAbortError(missing)
+
+    installed = []
+    failed = []
+    for name in installable:
+        try:
+            install_tools(names=[name], base_url=base_url, progress=progress)
+            installed.append(name)
+        except Exception as exc:
+            failed.append({"name": name, "error": str(exc)})
+    still_missing = [name for name in expanded if find_tool(name) is None]
+    if still_missing:
+        raise PartialInstallError(installed, failed or still_missing)
+    return []
+
+
+def _installable_from_missing(missing):
+    """Translate the resolved tool names back to installable spec names."""
+    installable = []
+    seen = set()
+    for command in missing:
+        try:
+            spec_name = normalize_tool_names([command])[0]
+        except ValueError:
+            aliases = {
+                "rga-preproc": "rga",
+                "pdftotext": "poppler",
+            }
+            fallback = aliases.get(command)
+            if not fallback:
+                continue
+            spec_name = fallback
+        if spec_name in seen:
+            continue
+        if spec_name not in supported_tool_names():
+            continue
+        seen.add(spec_name)
+        installable.append(spec_name)
+    return installable
+
+
+def _migration_sentinel_path():
+    return resolve_state_dir() / MIGRATION_SENTINEL
+
+
+def migrate_legacy_tools(dry_run=False, progress=None):
+    """Copy tools from legacy site-packages dir into the XDG cache.
+
+    Returns a report dict::
+
+        {"migrated": [...], "skipped": [...], "errors": [...], "source": str,
+         "target": str, "legacy_exists": bool}
+
+    Never deletes the legacy source (pip may still manage it). Copies files
+    (not symlinks) to survive cross-fs moves and uninstalls.
+    """
+    legacy = legacy_current_tools_dir()
+    target = current_tools_dir()
+    report = {
+        "migrated": [],
+        "skipped": [],
+        "errors": [],
+        "source": str(legacy),
+        "target": str(target),
+        "legacy_exists": legacy.exists(),
+    }
+    if not legacy.exists():
+        _emit_progress(progress, "migrate: no legacy tools directory, nothing to do")
+        return report
+
+    legacy_manifest = _read_manifest_at(legacy / MANIFEST_NAME)
+    target_manifest = _read_manifest_at(target / MANIFEST_NAME)
+
+    for entry in sorted(legacy.iterdir()):
+        if entry.name == MANIFEST_NAME:
+            continue
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        dest = target / name
+        legacy_ver = _manifest_version(legacy_manifest, name)
+        target_ver = _manifest_version(target_manifest, name)
+        if dest.exists():
+            if target_ver and legacy_ver and target_ver == legacy_ver:
+                report["skipped"].append({"name": name, "reason": "same_version"})
+                _emit_progress(progress, f"migrate: skip {name} (same version {target_ver})")
+                continue
+            if target_ver and legacy_ver and _version_ge(target_ver, legacy_ver):
+                report["skipped"].append({"name": name, "reason": "target_newer"})
+                _emit_progress(progress, f"migrate: skip {name} (target {target_ver} >= legacy {legacy_ver})")
+                continue
+            if not target_ver and not legacy_ver:
+                report["skipped"].append({"name": name, "reason": "exists"})
+                _emit_progress(progress, f"migrate: skip {name} (already present)")
+                continue
+        if dry_run:
+            report["migrated"].append({"name": name, "dry_run": True})
+            _emit_progress(progress, f"migrate: would copy {name} -> {dest}")
+            continue
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(entry, dest)
+            for path in dest.rglob("*"):
+                if path.is_file():
+                    _ensure_executable(path)
+            report["migrated"].append({"name": name, "path": str(dest)})
+            _emit_progress(progress, f"migrate: copied {name} -> {dest}")
+        except OSError as exc:
+            report["errors"].append({"name": name, "error": str(exc)})
+            _emit_progress(progress, f"migrate: error {name}: {exc}")
+
+    if not dry_run and legacy_manifest.get("tools"):
+        merged = target_manifest if target_manifest.get("tools") else {}
+        merged.setdefault("platform", platform_key())
+        merged.setdefault("tools", {})
+        for name, meta in legacy_manifest.get("tools", {}).items():
+            merged["tools"].setdefault(name, meta)
+        try:
+            save_manifest(merged)
+        except OSError as exc:
+            report["errors"].append({"name": MANIFEST_NAME, "error": str(exc)})
+
+    if not dry_run and not report["errors"]:
+        _write_migration_sentinel()
+    if not dry_run and report["migrated"]:
+        invalidate_tool_cache()
+    return report
+
+
+def maybe_migrate_legacy_tools(progress=None):
+    """Lazy one-shot migration guarded by a sentinel file."""
+    sentinel = _migration_sentinel_path()
+    if sentinel.exists():
+        return None
+    if not legacy_current_tools_dir().exists():
+        _write_migration_sentinel()
+        return None
+    return migrate_legacy_tools(dry_run=False, progress=progress)
+
+
+def _write_migration_sentinel():
+    try:
+        sentinel = _migration_sentinel_path()
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(platform_key(), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _read_manifest_at(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _manifest_version(manifest, name):
+    tools = manifest.get("tools") if isinstance(manifest, dict) else None
+    if not isinstance(tools, dict):
+        return None
+    entry = tools.get(name)
+    if isinstance(entry, dict):
+        return entry.get("version")
+    return None
+
+
+def _version_tuple(version):
+    if not version:
+        return ()
+    cleaned = str(version).lstrip("vV")
+    parts = re.split(r"[.\-+]", cleaned)
+    numbers = []
+    for part in parts:
+        match = re.match(r"^(\d+)", part)
+        if not match:
+            break
+        numbers.append(int(match.group(1)))
+    return tuple(numbers)
+
+
+def _version_ge(left, right):
+    lt = _version_tuple(left)
+    rt = _version_tuple(right)
+    if not lt or not rt:
+        return left == right
+    return lt >= rt
 
 
 def load_manifest():
@@ -505,6 +1049,14 @@ def subprocess_run(command):
 
 def _candidate_tool_paths(command):
     root = current_tools_dir()
+    if not root.exists():
+        return []
+    name = _exe_name(command)
+    return list(root.glob(f"**/{name}"))
+
+
+def _legacy_candidate_tool_paths(command):
+    root = legacy_current_tools_dir()
     if not root.exists():
         return []
     name = _exe_name(command)

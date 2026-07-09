@@ -4,6 +4,10 @@
 
 项目目标是把常用搜索能力、工具链检查和内置工具管理集成到一个 Python 包中，尽量减少用户手动配置系统命令的成本。
 
+> **外部工具运行时下载**：自 0.2.0 起，wheel 不再内嵌 `rg` / `rga` / `pandoc` / `fzf` / `pdftotext` 等二进制文件。首次使用时会按需下载到用户缓存目录（见下文），也可提前运行 `grga tools install`。这样既能把 wheel 体积压到 1 MB 以内，也满足许可证合规：上游 AGPL/GPL 二进制仅在运行时下载，不随包分发。
+>
+> **许可证**：`grga` 本身以 **MIT** 许可证发布（见 [LICENSE](LICENSE)）。它调用的外部工具各自遵循其上游许可证（`rg`：MIT/Unlicense；`rga`：AGPL；`pandoc`：GPL；`fzf`：MIT），请分别遵守。
+
 ## 主要功能展示
 
 - 命令行搜索：`grga search 关键词`
@@ -47,57 +51,50 @@ grga-gui
 python -m grga.cli --help
 ```
 
-### 下载工具包
+### 工具的下载与解析
 
-`grga` 运行时优先使用 wheel 内置工具，找不到时再回退系统 `PATH`。构建或分发前，可将当前平台支持的工具下载到 `src/grga/data/tools/<platform>/`：
+`grga` 运行时的工具解析顺序为：**托管缓存 → 旧 site-packages 缓存 → 系统 `PATH`**（详见 [docs/tool-resolution.md](docs/tool-resolution.md)）。托管缓存目录优先级：
 
-```bash
-python scripts/download-tools.py
-```
+- `$GRGA_TOOLS_DIR`
+- `$XDG_DATA_HOME/grga/tools/<platform>`
+- Linux/macOS：`~/.local/share/grga/tools/<platform>`；Windows：`%LOCALAPPDATA%\grga\tools\<platform>`
 
-只下载指定工具：
-
-```bash
-python scripts/download-tools.py rg rga pandoc fzf
-```
-
-强制重新下载：
+按需安装（缺失时首次运行也会交互提示）：
 
 ```bash
-python scripts/download-tools.py --force
+grga tools install            # 安装当前平台支持的全部工具
+grga tools install rg rga     # 只装指定工具
+grga tools update             # 更新
+grga tools check              # 查看状态
+grga tools migrate            # 从旧 site-packages 缓存迁移到新目录
 ```
 
-安装完成后可检查工具状态：
+离线 / air-gapped 安装（从本地镜像目录安装）：
 
 ```bash
-grga tools check
+grga tools install --from ./mirror rg
 ```
 
-或通过 CLI 管理工具：
+首次运行行为与退出码契约见 [docs/exit-codes.md](docs/exit-codes.md)。Agent 场景建议加 `--json` 获取结构化错误，或 `--offline` 让缺工具时立即失败。
+
+### 从源码构建工具镜像（开发者）
 
 ```bash
-grga tools install
-grga tools update
+python scripts/download-tools.py --platform all --out ./mirror --write-hashes --yes
 ```
+
+该脚本仅供开发者/发布使用，不参与 `python -m build`。详见 [docs/dev-release.md](docs/dev-release.md)。
 
 ### 打包
 
 #### 构建 wheel
-
-先下载需要内置的工具：
-
-```bash
-python scripts/download-tools.py
-```
-
-再构建 wheel：
 
 ```bash
 python -m pip install build
 python -m build
 ```
 
-打包产物位于 `dist/`。由于 `pyproject.toml` 已配置 `grga = ["data/tools/**/*"]`，`src/grga/data/tools/` 下的工具会被包含进 wheel。
+打包产物位于 `dist/`。wheel 为 `py3-none-any`，不内嵌任何平台二进制（工具在运行时下载）。
 
 #### 构建单文件可执行程序
 

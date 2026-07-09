@@ -2,6 +2,62 @@
 
 All notable changes to `grga` are recorded here.
 
+## [0.2.0] - 2026-07-09
+
+### BREAKING
+
+- **Wheel no longer bundles binaries.** `rg`, `rga`, `pandoc`, `fzf`, and
+  `pdftotext` are downloaded at first use (or on demand via
+  `grga tools install`). This trims the wheel from ~187 MB to under 1 MB
+  and makes distribution license-compliant (upstream AGPL/GPL binaries
+  are fetched at runtime, not redistributed).
+- **Managed tools cache moved out of `site-packages`.** New default:
+  `$XDG_DATA_HOME/grga/tools/<platform>` on Linux/macOS,
+  `%LOCALAPPDATA%\grga\tools\<platform>` on Windows. Override with
+  `$GRGA_TOOLS_DIR`. Legacy `site-packages/grga/data/tools/` is still
+  discovered as a fallback; run `grga tools migrate` to copy it into the
+  new location.
+- **Stable exit-code contract frozen.** See `docs/exit-codes.md`. Codes
+  may only be *added* in future releases, never removed or renumbered.
+  `--json` errors now use a fixed schema on stdout so agents can pipe
+  results reliably.
+
+### Added
+
+- `grga tools migrate` — copy legacy site-packages binaries into the
+  XDG cache with `--dry-run` support.
+- `grga tools install --from <dir>` — install from a local mirror
+  directory (offline / air-gapped installs). Optional `--fallback-online`
+  falls back to GitHub when a local asset is missing.
+- `grga tools install --no-verify` and `GRGA_INSECURE=1` — bypass sha256
+  verification (with a loud warning) for mirror scenarios.
+- `tools.json` now supports optional `sha256` per tool; `install_tool`
+  verifies the downloaded archive when present.
+- `grga skill install --to <dir>` (+ `list` / `path`) — copy bundled
+  agent skills into any workspace.
+- `--offline` / `GRGA_OFFLINE=1` — fail fast instead of prompting to
+  download missing tools.
+- `MIN_VERSIONS` map (empty by default) lets future releases pin minimum
+  versions per tool without more code.
+- `GRGA_PREFER_SYSTEM=1` — invert tool resolution to prefer system-PATH
+  binaries over managed ones.
+
+### Changed
+
+- `find_tool` now honors `GRGA_PREFER_SYSTEM` and applies `MIN_VERSIONS`.
+- `check_tools` recognizes bundled binaries in both the XDG cache and
+  the legacy site-packages location.
+- `scripts/download-tools.py` extended with `--platform`, `--out`,
+  `--write-hashes`, `--yes`. It is a *developer* tool only; wheel
+  builds no longer invoke it.
+- Project metadata (license, urls, classifiers, `Development Status`)
+  hardened for PyPI publishing.
+
+### Fixed
+
+- Downloads write to a `.part` file then atomically rename on success,
+  so aborted downloads no longer leave half-installed tools.
+
 ## Unreleased
 
 ### Performance
