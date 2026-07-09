@@ -492,6 +492,18 @@ default, but pass an explicit `--db` when:
 - Not a web / codebase-modification tool. `grga` never edits files.
 - Not a replacement for `rg` / `rga`. For raw byte-level search prefer `rg` directly; grga adds structure and graph on top.
 
+## Optional workflows
+
+Companion tools that live under `workflows/` in this skill. They are opt-in:
+you never need them for basic search, but they help when a specific job comes up.
+
+- **`workflows/trace-viewer/`** — Turn a multi-turn grga session into a
+  self-contained HTML page that visualises how the keyword co-occurrence graph
+  expanded over successive `related` / `suggest` calls. Useful for (a) grga
+  developers inspecting graph-expansion behaviour and (b) end users who want
+  a "what did the agent actually search" recap. Start at
+  `workflows/trace-viewer/README.md`.
+
 ## Troubleshooting / FAQ
 
 **`grga related` returns `[]`.**
