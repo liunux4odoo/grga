@@ -326,6 +326,46 @@ def test_preview_none_for_global_query(two_scopes):
     assert payload["crossed_scopes_preview"] is None
 
 
+def test_preview_reuses_ppr_reduces_cost(two_scopes):
+    """P0-2: preview=True must run PPR exactly once (not twice).
+
+    Before P0-2 the preview path ran a *second* full PPR (scope-restricted
+    main PPR + unrestricted preview PPR — ~3.9x cost per bench).
+    Merging them so both the main scope-limited document list and the
+    cross-scope preview annotation derive from one unrestricted PPR is the
+    optimisation. Verified by counting ``personalized_pagerank`` calls: a
+    single ``related_graph_with_preview(preview=True)`` invocation triggers
+    it exactly once.
+    """
+    from unittest.mock import patch
+
+    from grga.graph.adjacency_cache import clear_adjacency_cache
+    from grga.related import related_graph_with_preview
+    import grga.related as related_mod
+
+    clear_adjacency_cache()
+    with patch.object(
+        related_mod,
+        "personalized_pagerank",
+        wraps=related_mod.personalized_pagerank,
+    ) as spy:
+        payload = related_graph_with_preview(
+            ["alpha"],
+            db_path=two_scopes["db"],
+            directory=two_scopes["a"],
+            limit=20,
+            preview=True,
+        )
+    assert spy.call_count == 1, (
+        f"preview=True must reuse the main PPR, expected 1 call, got "
+        f"{spy.call_count}"
+    )
+    # Payload still shaped correctly.
+    assert payload["crossed_scopes_preview"] is not None
+    assert "top_bridge_keywords" in payload["crossed_scopes_preview"]
+    assert "would_add" in payload["crossed_scopes_preview"]
+
+
 @pytest.fixture
 def collision_scopes(monkeypatch, tmp_path):
     """Two scopes that share identical relative filenames.
