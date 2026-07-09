@@ -101,13 +101,13 @@ python -m build
 构建 CLI 单文件程序：
 
 ```bash
-python scripts/build-onefile.py --download-tools --clean
+python scripts/build-onefile.py --clean
 ```
 
 构建 GUI 单文件程序：
 
 ```bash
-python scripts/build-onefile.py --gui --name grga-gui --download-tools --clean
+python scripts/build-onefile.py --gui --name grga-gui --clean
 ```
 
-输出文件位于 `dist/`。默认会把 `src/grga/data/tools/` 一并打入可执行程序；如需依赖系统 `PATH` 中的工具，可添加 `--no-tools`。
+输出文件位于 `dist/`。外部工具（rg / rga / pandoc / fzf）**不再打入** onefile 可执行程序，由 `grga.toolchain` 在运行时按需从 `$PATH` 或 XDG 缓存加载，必要时首次运行会提示下载。

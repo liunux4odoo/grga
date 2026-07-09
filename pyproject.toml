@@ -55,7 +55,6 @@ where = ["src"]
 grga = [
     "prompts/*.txt",
     "prompts/**/*.txt",
-    "data/tools/README.txt",
     "skills/**/*",
 ]
 

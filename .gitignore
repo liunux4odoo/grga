@@ -1,5 +1,8 @@
-# Tool download caches
-src/grga/data/tools/
+# Tool download caches (obsolete; tools live in XDG cache since 0.2.0)
+src/grga/data/
+
+# Local debug scaffolding (author-only IDE entry)
+debug_entry.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
