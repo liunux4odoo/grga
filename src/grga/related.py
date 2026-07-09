@@ -73,6 +73,8 @@ def related(
     directory: Optional[Union[str, Path]] = None,
     alpha: float = DEFAULT_ALPHA,
     iters: int = DEFAULT_ITERS,
+    cross_scope: bool = False,
+    same_scope: bool = False,
 ) -> List[Related]:
     """Return documents related to ``keywords`` under the chosen ``mode``.
 
@@ -81,9 +83,23 @@ def related(
         mode: one of ``graph`` | ``dir`` | ``heading``.
         limit: maximum number of results.
         db_path: SQLite path (defaults to shared deep-search DB).
-        directory: optional scope filter; when given, only rows built for
-            that indexed scope are considered.
+        directory: optional scope filter. In the user-scoped storage model
+            this is a *query-time filter*, not a partition key: all
+            ``index build`` invocations share the same DB and rows are
+            grouped by their ``directory`` column.
         alpha / iters: PPR knobs (``graph`` mode only).
+        cross_scope: ``mode=graph`` only. When ``True`` and ``directory``
+            is given, seeds are validated against ``directory`` but PPR
+            expansion and final doc collection cross into every other
+            scope in the shared DB. Ignored for ``mode=dir`` (directory
+            proximity is intrinsically scope-local) and for
+            ``mode=heading`` (which is cross-scope by default; use
+            ``same_scope=True`` to override).
+        same_scope: ``mode=heading`` only. When ``True``, restrict heading
+            matches to ``directory`` (the pre-v2.2 default). Otherwise the
+            heading branch searches across every indexed scope so a
+            shared heading path like ``Install > macOS`` surfaces
+            documents from other corpora.
 
     Raises:
         ValueError: if ``mode`` is not recognised.
@@ -103,10 +119,16 @@ def related(
     try:
         ensure_schema(conn)
         if mode == "graph":
-            return _related_graph(conn, seeds, limit, scope_key, alpha, iters)
+            return _related_graph(
+                conn, seeds, limit, scope_key, alpha, iters,
+                cross_scope=cross_scope,
+            )
         if mode == "dir":
             return _related_dir(conn, seeds, limit, scope_key)
-        return _related_heading(conn, seeds, limit, scope_key)
+        # heading: default is cross-scope; same_scope=True restores the
+        # legacy per-scope behaviour.
+        heading_scope = scope_key if same_scope else None
+        return _related_heading(conn, seeds, limit, heading_scope)
     finally:
         conn.close()
 
@@ -142,8 +164,25 @@ def _related_graph(
     scope_key: Optional[str],
     alpha: float,
     iters: int,
+    *,
+    cross_scope: bool = False,
 ) -> List[Related]:
-    edges = load_edges(conn, directory=scope_key)
+    # In cross-scope mode the seeds must still originate from ``scope_key``
+    # (we do not want a keyword that only lives in another corpus to
+    # bootstrap the walk), but PPR expansion and final document collection
+    # are unrestricted. When ``scope_key`` is None (global query) cross_scope
+    # is a no-op: the walk already spans the whole graph.
+    if cross_scope and scope_key is not None:
+        seed_docs = _docs_for_keywords(conn, seeds, scope_key)
+        if not seed_docs:
+            return []
+        edge_scope_key: Optional[str] = None
+        doc_scope_key: Optional[str] = None
+    else:
+        edge_scope_key = scope_key
+        doc_scope_key = scope_key
+
+    edges = load_edges(conn, directory=edge_scope_key)
     adjacency = build_adjacency(edges)
     ranked_keywords = personalized_pagerank(
         seeds, adjacency, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
@@ -151,7 +190,7 @@ def _related_graph(
     if not ranked_keywords:
         # No graph signal: fall back to documents that directly contain the
         # seed keywords so the caller still gets something useful.
-        direct = _docs_for_keywords(conn, seeds, scope_key)
+        direct = _docs_for_keywords(conn, seeds, doc_scope_key)
         results = [
             Related(doc_path=doc, score=score, mode="graph", reason="direct-seed", keywords=list(seeds))
             for doc, score in direct.items()
@@ -168,9 +207,9 @@ def _related_graph(
     placeholders = ",".join("?" for _ in keyword_list)
     params: List = list(keyword_list)
     where = f"LOWER(keyword) IN ({placeholders})"
-    if scope_key is not None:
+    if doc_scope_key is not None:
         where += " AND directory = ?"
-        params.append(scope_key)
+        params.append(doc_scope_key)
     rows = conn.execute(
         f"SELECT keyword, doc_path, occurrence_count FROM keyword_docs WHERE {where}",
         params,
@@ -344,3 +383,129 @@ def _related_heading(
     ]
     results.sort(key=lambda r: (-r.score, r.doc_path))
     return results[:limit]
+
+
+def compute_crossed_scopes_preview(
+    conn: sqlite3.Connection,
+    seeds: Sequence[str],
+    limit: int,
+    scope_key: Optional[str],
+    alpha: float,
+    iters: int,
+) -> Optional[dict]:
+    """Estimate what opening ``--cross-scope`` would pull into a graph query.
+
+    Returns ``None`` when there is nothing to preview (no scope filter is
+    active, so the query already spans the whole graph). Otherwise returns::
+
+        {
+          "would_add": <int docs reachable in *other* scopes>,
+          "top_other_scopes": [{"scope": str, "count": int}, ...],
+          "top_bridge_keywords": [{"keyword": str, "cross_weight": float}, ...],
+        }
+
+    The estimate runs one unrestricted PPR and a single SQL count, an order
+    of magnitude cheaper than a full cross-scope materialisation. Callers
+    read it to decide whether escalating to ``--cross-scope`` is worthwhile
+    (large ``would_add`` with domain-specific bridge keywords) or likely
+    polysemy noise (bridge keywords are generic terms).
+    """
+    if scope_key is None:
+        return None
+
+    edges = load_edges(conn, directory=None)
+    adjacency = build_adjacency(edges)
+    ranked_keywords = personalized_pagerank(
+        seeds, adjacency, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
+    )
+    kw_score = {kw: score for kw, score in ranked_keywords}
+    for seed in seeds:
+        kw_score.setdefault(seed, max(kw_score.values()) if kw_score else 1.0)
+    if not kw_score:
+        return {"would_add": 0, "top_other_scopes": [], "top_bridge_keywords": []}
+
+    keyword_list = list(kw_score.keys())
+    placeholders = ",".join("?" for _ in keyword_list)
+    params: List = list(keyword_list)
+    params.append(scope_key)
+    rows = conn.execute(
+        f"""
+        SELECT directory, keyword, doc_path, occurrence_count
+        FROM keyword_docs
+        WHERE LOWER(keyword) IN ({placeholders}) AND directory != ?
+        """,
+        params,
+    ).fetchall()
+
+    scope_counts: Dict[str, set] = {}
+    bridge_weight: Dict[str, float] = {}
+    seen_docs: set = set()
+    for row in rows:
+        directory = row["directory"]
+        doc_key = (directory, row["doc_path"])
+        kw = _fold(row["keyword"])
+        weight = kw_score.get(kw, 0.0)
+        if weight <= 0:
+            continue
+        if doc_key not in seen_docs:
+            seen_docs.add(doc_key)
+            scope_counts.setdefault(directory, set()).add(row["doc_path"])
+        bridge_weight[kw] = bridge_weight.get(kw, 0.0) + weight * float(row["occurrence_count"])
+
+    top_scopes = sorted(
+        ((scope, len(docs)) for scope, docs in scope_counts.items()),
+        key=lambda item: (-item[1], item[0]),
+    )[:5]
+    top_bridges = sorted(
+        bridge_weight.items(), key=lambda item: (-item[1], item[0])
+    )[:5]
+    return {
+        "would_add": len(seen_docs),
+        "top_other_scopes": [{"scope": s, "count": c} for s, c in top_scopes],
+        "top_bridge_keywords": [
+            {"keyword": k, "cross_weight": round(w, 6)} for k, w in top_bridges
+        ],
+    }
+
+
+def related_graph_with_preview(
+    keywords: Sequence[str],
+    *,
+    limit: int = DEFAULT_LIMIT,
+    db_path: Union[str, Path, None] = None,
+    directory: Optional[Union[str, Path]] = None,
+    alpha: float = DEFAULT_ALPHA,
+    iters: int = DEFAULT_ITERS,
+    cross_scope: bool = False,
+    preview: bool = True,
+) -> dict:
+    """``mode=graph`` variant returning results plus cross-scope observability.
+
+    Returns ``{"results": List[Related], "crossed_scopes_preview": dict|None}``.
+    The preview is only computed when ``preview`` is true and a ``directory``
+    scope is active; it is ``None`` otherwise. Used by the ``related --json``
+    CLI so a caller can see what ``--cross-scope`` would pull in before
+    committing to it.
+    """
+    seeds = [s for s in (_fold(k) for k in keywords) if s]
+    if not seeds:
+        return {"results": [], "crossed_scopes_preview": None}
+
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    scope_key = _resolve_directory(directory)
+    conn = connect(target_db)
+    try:
+        ensure_schema(conn)
+        results = _related_graph(
+            conn, seeds, limit, scope_key, alpha, iters, cross_scope=cross_scope
+        )
+        crossed_preview = None
+        if preview:
+            crossed_preview = compute_crossed_scopes_preview(
+                conn, seeds, limit, scope_key, alpha, iters
+            )
+        return {"results": results, "crossed_scopes_preview": crossed_preview}
+    finally:
+        conn.close()

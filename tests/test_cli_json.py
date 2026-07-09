@@ -91,7 +91,12 @@ def test_related_graph_json_contract(graph_db: Path):
     )
     assert result.exit_code == 0, result.output
     payload = _parse(result.output)
-    assert isinstance(payload, list)
+    # graph mode now returns an envelope so callers can read the
+    # crossed_scopes_preview observability field (see
+    # MIGRATION_user_scoped_db.md §4 修正 3).
+    assert isinstance(payload, dict)
+    assert isinstance(payload["results"], list)
+    assert "crossed_scopes_preview" in payload
 
 
 def test_index_build_json_contract(cross_heading_fixture: Path, tmp_path, sidecar_env):

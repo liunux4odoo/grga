@@ -160,11 +160,13 @@ Deep-search also adds top-level `query`, `strategy`
 
 ## `grga related`
 
-Returns a **JSON array** (not an envelope) of `Related` objects, sorted by
-`score` descending. Empty array `[]` when the graph index is missing or no
-neighbours are found.
+`--mode dir` and `--mode heading` return a **JSON array** of `Related`
+objects sorted by `score` descending; `--mode graph` returns a
+**JSON envelope** carrying the same `Related` array plus a
+`crossed_scopes_preview` observability field (see below).
 
 ```jsonc
+// --mode dir | --mode heading
 [
   {
     "doc_path": "uninstall.md",   // string — related document
@@ -174,6 +176,25 @@ neighbours are found.
     "keywords": ["brew","linux"]  // string[] — matched keywords/headings
   }
 ]
+
+// --mode graph
+{
+  "results": [ /* Related[] as above */ ],
+  "crossed_scopes_preview": {
+    "would_add": 47,               // int — additional docs reachable if
+                                   //   --cross-scope were enabled
+    "top_other_scopes": [          // scopes contributing those docs
+      {"scope": "/abs/path/to/papers", "count": 32},
+      {"scope": "/abs/path/to/notes",  "count": 15}
+    ],
+    "top_bridge_keywords": [       // keywords bridging into other scopes
+      {"keyword": "attention", "cross_weight": 0.42},
+      {"keyword": "model",     "cross_weight": 0.31}
+    ]
+  }
+  // crossed_scopes_preview is `null` when --directory is omitted (the
+  // query already spans every scope) or when --no-preview is passed.
+}
 ```
 
 `reason` values by mode:
@@ -183,7 +204,55 @@ neighbours are found.
 - `heading` → `"shared-heading"` (in this case `keywords[]` holds the shared
   heading paths, not keywords).
 
+Cross-scope flags (see SKILL.md "Storage model" for the philosophy):
+
+- `--cross-scope` (`--mode graph` only): seeds are validated against
+  `--directory`, but PPR expansion and doc collection cross into every
+  other scope in the shared DB. Off by default.
+- `--same-scope` (`--mode heading` only): restrict heading matches to
+  `--directory`. Off by default; heading mode is cross-scope by default
+  because shared heading paths are structural filters that resist
+  same-name-different-meaning noise.
+- `--no-preview` (`--mode graph` only): skip the
+  `crossed_scopes_preview` computation.
+
 **Precondition**: run `grga index build` first; otherwise the array is empty.
+
+---
+
+## `grga graph inspect`
+
+Reports how a single keyword distributes across scopes in the shared
+user-scoped DB, plus a heuristic same-name-different-meaning warning. Read
+this *before* enabling `related --cross-scope` on the keyword.
+
+```jsonc
+{
+  "keyword": "attention",         // string — echoes request
+  "total_docs": 89,               // int — rows in keyword_docs
+  "docs_by_scope": {              // {scope: doc_count}, desc by count
+    "/abs/papers/nlp":         42,
+    "/abs/papers/psychology":  31,
+    "/abs/notes":              16
+  },
+  "top_cooccurring_keywords": [
+    {"keyword": "transformer",
+     "weight": 0.71,
+     "shared_scopes": ["/abs/papers/nlp"]},
+    {"keyword": "cognition",
+     "weight": 0.58,
+     "shared_scopes": ["/abs/papers/psychology"]}
+  ],
+  "suspected_polysemy": true,      // bool — true when per-scope neighbour
+                                   //   heads have min pairwise Jaccard < 0.2
+  "polysemy_hint": "This keyword appears in 3 scopes with largely disjoint …"
+}
+```
+
+`suspected_polysemy` uses the top ``--limit`` co-occurring keywords per
+scope and flags cases where different corpora keep entirely different
+company around the term (the classic ML-`attention` vs psychology-`attention`
+pattern).
 
 ---
 

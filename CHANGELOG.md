@@ -4,7 +4,19 @@ All notable changes to `grga` are recorded here.
 
 ## Unreleased
 
+### Changed
+
+- **Storage model reframed as user-scoped.** grga's DB is a single per-user
+  knowledge graph (`~/.config/grga/deep_keywords.db`). All `index build`
+  scopes write into it; `--directory` is a query-time filter, not a
+  partition key. See "Storage model (user-scoped)" in SKILL.md.
+
 ### Breaking changes
+
+- **`related --mode heading` now searches across scopes by default.** Pass
+  `--same-scope` to restore the old scope-limited behaviour. Heading paths
+  are structural filters (`Install > macOS` means the same thing across
+  corpora), so cross-scope is the more useful default.
 
 - **`grga search` multi-word semantics: space now means AND, not OR.**
   Adjacent terms with no explicit operator (e.g. `grga search "韩立 师傅"`)
@@ -27,6 +39,28 @@ All notable changes to `grga` are recorded here.
   their previous semantics.
 
 ### Added
+
+- **`related --cross-scope` flag** (`mode=graph` only): keep seeds in
+  `--directory` but let PPR expansion cross into every other scope in the
+  shared DB. Off by default — cross-corpus association is an *escalation*,
+  not the default retrieval path.
+
+- **`related --same-scope` flag** (`mode=heading` only): force heading
+  matches to stay within `--directory` (the previous default).
+
+- **`crossed_scopes_preview` metadata on `related --mode graph --json`.**
+  Even with `--cross-scope` off, the graph JSON envelope now carries a
+  `crossed_scopes_preview` object (`would_add`, `top_other_scopes`,
+  `top_bridge_keywords`) so a caller can see what opening cross-scope would
+  pull in *before* committing to it. Disable with `--no-preview`. The graph
+  `--json` output is therefore now an envelope `{results, crossed_scopes_preview}`
+  rather than a bare array (`dir` / `heading` modes still return arrays).
+
+- **`grga graph inspect <keyword>` command.** Reports a keyword's
+  `docs_by_scope` distribution, `top_cooccurring_keywords`, and a
+  `suspected_polysemy` heuristic (per-scope neighbour sets with pairwise
+  Jaccard < 0.2) so callers can spot same-name-different-meaning collisions
+  before enabling `--cross-scope`.
 
 - **`--max-total / -N` global result cap on `grga search`.** Defaults to
   `1000` (`0` disables). grga now streams rga's JSON output, and once the

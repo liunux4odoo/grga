@@ -14,6 +14,8 @@ tools_app = typer.Typer(no_args_is_help=True, help="Manage bundled command line 
 app.add_typer(tools_app, name="tools")
 index_app = typer.Typer(no_args_is_help=True, help="Build and manage the L2 graph index.")
 app.add_typer(index_app, name="index")
+graph_app = typer.Typer(no_args_is_help=True, help="Inspect the shared user-scoped graph.")
+app.add_typer(graph_app, name="graph")
 
 CONFIG_PATH = Path.home() / ".config" / "grga" / "settings.json"
 
@@ -707,10 +709,13 @@ def related_command(
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of related documents."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to a previously indexed scope."),
+    cross_scope: bool = typer.Option(False, "--cross-scope", help="mode=graph only: seed docs stay in --directory, PPR expansion crosses into every other scope."),
+    same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
+    no_preview: bool = typer.Option(False, "--no-preview", help="mode=graph only: skip the crossed_scopes_preview metadata."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List documents related to the given keywords via the L2 graph."""
-    from grga.related import VALID_MODES, related as related_docs
+    from grga.related import VALID_MODES, related as related_docs, related_graph_with_preview
 
     if mode not in VALID_MODES:
         typer.echo(f"mode must be one of: {', '.join(VALID_MODES)}", err=True)
@@ -719,6 +724,29 @@ def related_command(
     if not seeds:
         typer.echo("keywords cannot be empty", err=True)
         raise typer.Exit(2)
+    if cross_scope and mode != "graph":
+        typer.echo("--cross-scope only applies to --mode graph", err=True)
+        raise typer.Exit(2)
+    if same_scope and mode != "heading":
+        typer.echo("--same-scope only applies to --mode heading", err=True)
+        raise typer.Exit(2)
+
+    if mode == "graph" and json_output:
+        payload = related_graph_with_preview(
+            seeds,
+            limit=limit,
+            db_path=str(db_path) if db_path else None,
+            directory=str(directory) if directory else None,
+            cross_scope=cross_scope,
+            preview=not no_preview,
+        )
+        results = payload["results"]
+        out = {
+            "results": [r.to_dict() for r in results],
+            "crossed_scopes_preview": payload["crossed_scopes_preview"],
+        }
+        typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
+        return
 
     results = related_docs(
         seeds,
@@ -726,6 +754,8 @@ def related_command(
         limit=limit,
         db_path=str(db_path) if db_path else None,
         directory=str(directory) if directory else None,
+        cross_scope=cross_scope,
+        same_scope=same_scope,
     )
     if json_output:
         typer.echo(json.dumps([r.to_dict() for r in results], ensure_ascii=False, indent=2))
@@ -737,6 +767,39 @@ def related_command(
         kw = ("  <- " + ", ".join(item.keywords)) if item.keywords else ""
         typer.echo(f"{item.score:.4f}  {item.doc_path}{kw}")
     typer.echo(f"{len(results)} related documents ({mode})", err=True)
+
+
+@graph_app.command("inspect")
+def graph_inspect_command(
+    keyword: str = typer.Argument(..., help="Keyword to inspect."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    limit: int = typer.Option(20, "--limit", "-n", help="Cap top_cooccurring_keywords returned."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+):
+    """Inspect a keyword's distribution across scopes and polysemy signals."""
+    from grga.graph.inspect import inspect_keyword
+
+    report = inspect_keyword(
+        keyword,
+        db_path=str(db_path) if db_path else None,
+        limit=limit,
+    )
+    if json_output:
+        typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    typer.echo(f"keyword: {report['keyword']}")
+    typer.echo(f"total_docs: {report['total_docs']}")
+    if report["docs_by_scope"]:
+        typer.echo("docs_by_scope:")
+        for scope, count in report["docs_by_scope"].items():
+            typer.echo(f"  {count:>4}  {scope}")
+    if report["top_cooccurring_keywords"]:
+        typer.echo("top_cooccurring_keywords:")
+        for entry in report["top_cooccurring_keywords"]:
+            scopes = ", ".join(entry["shared_scopes"])
+            typer.echo(f"  {entry['weight']:8.3f}  {entry['keyword']}  [{scopes}]")
+    if report["suspected_polysemy"]:
+        typer.echo(f"suspected_polysemy: {report['polysemy_hint']}", err=True)
 
 
 def main():

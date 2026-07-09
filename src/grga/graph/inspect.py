@@ -1,0 +1,223 @@
+"""Keyword inspection over the shared graph (user-scoped observability).
+
+``inspect_keyword`` answers "before I open ``--cross-scope`` on this seed,
+how does it distribute across my corpora and is it likely polysemous?".
+
+It is a pure read over ``keyword_docs`` (v2):
+
+* ``docs_by_scope``  - how many documents in each indexed scope contain the
+  keyword. A keyword spread thinly across many unrelated scopes is the
+  classic same-name-different-meaning ("attention", "model", "client")
+  signature.
+* ``top_cooccurring_keywords`` - the highest-weight neighbours of the
+  keyword, together with the scopes they were observed in.
+* ``suspected_polysemy`` - a cheap heuristic: if the per-scope sets of top
+  co-occurring keywords barely overlap (pairwise Jaccard < 0.2), the
+  keyword probably means different things in different corpora and the
+  caller should think twice before enabling cross-scope expansion.
+
+The command never touches an LLM and never writes.
+"""
+from __future__ import annotations
+
+import sqlite3
+from itertools import combinations
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Union
+
+from grga.graph.schema import connect, ensure_schema
+
+DEFAULT_LIMIT = 20
+DEFAULT_COOCCUR_LIMIT = 10
+POLYSEMY_JACCARD_THRESHOLD = 0.2
+
+
+def _fold(term: str) -> str:
+    return term.casefold().strip()
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    union = a | b
+    if not union:
+        return 1.0
+    return len(a & b) / len(union)
+
+
+def inspect_keyword(
+    keyword: str,
+    *,
+    db_path: Union[str, Path, None] = None,
+    limit: int = DEFAULT_LIMIT,
+    cooccur_limit: int = DEFAULT_COOCCUR_LIMIT,
+) -> dict:
+    """Return a scope-distribution + polysemy report for ``keyword``.
+
+    Args:
+        keyword: the term to inspect (case-insensitive).
+        db_path: SQLite path (defaults to the shared deep-search DB).
+        limit: cap on ``top_cooccurring_keywords`` returned.
+        cooccur_limit: how many top neighbours to consider *per scope* when
+            estimating polysemy (keeps the Jaccard comparison focused on the
+            characteristic head of each scope).
+
+    Returns a dict::
+
+        {
+          "keyword": str,
+          "total_docs": int,
+          "docs_by_scope": {scope: count, ...},
+          "top_cooccurring_keywords": [
+            {"keyword": str, "weight": float, "shared_scopes": [scope, ...]},
+            ...
+          ],
+          "suspected_polysemy": bool,
+          "polysemy_hint": str,
+        }
+    """
+    folded = _fold(keyword)
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    conn = connect(target_db)
+    try:
+        ensure_schema(conn)
+        return _inspect(conn, keyword, folded, limit, cooccur_limit)
+    finally:
+        conn.close()
+
+
+def _inspect(
+    conn: sqlite3.Connection,
+    original: str,
+    folded: str,
+    limit: int,
+    cooccur_limit: int,
+) -> dict:
+    empty = {
+        "keyword": original,
+        "total_docs": 0,
+        "docs_by_scope": {},
+        "top_cooccurring_keywords": [],
+        "suspected_polysemy": False,
+        "polysemy_hint": "",
+    }
+    if not folded:
+        return empty
+
+    # Documents (per scope) that contain the keyword.
+    seed_rows = conn.execute(
+        """
+        SELECT directory, doc_path
+        FROM keyword_docs
+        WHERE LOWER(keyword) = ?
+        """,
+        (folded,),
+    ).fetchall()
+    if not seed_rows:
+        return empty
+
+    docs_by_scope: Dict[str, int] = {}
+    seed_docs_by_scope: Dict[str, set] = {}
+    total_docs = 0
+    for row in seed_rows:
+        directory = row["directory"]
+        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
+        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
+        total_docs += 1
+
+    # Co-occurring keywords: other keywords living in the same (scope, doc).
+    cooccur_weight: Dict[str, float] = {}
+    cooccur_scopes: Dict[str, set] = {}
+    per_scope_cooccur: Dict[str, Dict[str, float]] = {}
+    for directory, docs in seed_docs_by_scope.items():
+        doc_list = list(docs)
+        placeholders = ",".join("?" for _ in doc_list)
+        rows = conn.execute(
+            f"""
+            SELECT LOWER(keyword) AS kw, occurrence_count
+            FROM keyword_docs
+            WHERE directory = ? AND doc_path IN ({placeholders})
+            """,
+            [directory, *doc_list],
+        ).fetchall()
+        for row in rows:
+            kw = _fold(row["kw"])
+            if not kw or kw == folded:
+                continue
+            weight = float(row["occurrence_count"])
+            cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
+            cooccur_scopes.setdefault(kw, set()).add(directory)
+            scope_map = per_scope_cooccur.setdefault(directory, {})
+            scope_map[kw] = scope_map.get(kw, 0.0) + weight
+
+    top_cooccurring = sorted(
+        cooccur_weight.items(), key=lambda item: (-item[1], item[0])
+    )[:limit]
+    top_cooccurring_out: List[dict] = [
+        {
+            "keyword": kw,
+            "weight": round(weight, 6),
+            "shared_scopes": sorted(cooccur_scopes.get(kw, set())),
+        }
+        for kw, weight in top_cooccurring
+    ]
+
+    suspected, hint = _detect_polysemy(
+        docs_by_scope, per_scope_cooccur, cooccur_limit
+    )
+
+    return {
+        "keyword": original,
+        "total_docs": total_docs,
+        "docs_by_scope": dict(
+            sorted(docs_by_scope.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "top_cooccurring_keywords": top_cooccurring_out,
+        "suspected_polysemy": suspected,
+        "polysemy_hint": hint,
+    }
+
+
+def _detect_polysemy(
+    docs_by_scope: Dict[str, int],
+    per_scope_cooccur: Dict[str, Dict[str, float]],
+    cooccur_limit: int,
+) -> tuple[bool, str]:
+    """Heuristic: multi-scope keyword whose per-scope neighbour heads diverge.
+
+    We take the top-``cooccur_limit`` co-occurring keywords of each scope and
+    compute pairwise Jaccard similarity between the scope head-sets. If the
+    *minimum* similarity across any scope pair drops below
+    ``POLYSEMY_JACCARD_THRESHOLD`` we flag suspected polysemy: the keyword
+    keeps very different company in different corpora, the tell-tale sign of
+    a same-name-different-meaning collision.
+    """
+    scopes = list(per_scope_cooccur.keys())
+    if len(scopes) < 2:
+        return False, ""
+
+    head_sets: Dict[str, set] = {}
+    for scope in scopes:
+        top = sorted(
+            per_scope_cooccur[scope].items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:cooccur_limit]
+        head_sets[scope] = {kw for kw, _ in top}
+
+    min_sim = 1.0
+    for a, b in combinations(scopes, 2):
+        sim = _jaccard(head_sets[a], head_sets[b])
+        if sim < min_sim:
+            min_sim = sim
+
+    if min_sim < POLYSEMY_JACCARD_THRESHOLD:
+        hint = (
+            f"This keyword appears in {len(scopes)} scopes with largely "
+            f"disjoint top-cooccurring keywords (min Jaccard "
+            f"{min_sim:.2f} < {POLYSEMY_JACCARD_THRESHOLD}). Consider "
+            f"disambiguation before enabling --cross-scope."
+        )
+        return True, hint
+    return False, ""
