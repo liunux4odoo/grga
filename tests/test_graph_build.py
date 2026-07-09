@@ -46,19 +46,27 @@ def test_extract_keywords_basic():
     assert grga_row[2] == 1  # first line
 
 
-def test_extract_keywords_preserves_casing_after_leading_stopwords():
-    """Regression: stopword-heavy first lines must not truncate the casing scan.
+def test_extract_keywords_stores_folded_form_v3():
+    """Schema v3: extract_keywords emits casefolded keywords (PERF plan §P1-2).
 
-    Before the fix, ``extract_keywords`` compared ``len(original)`` (which
-    included stopword tokens) against ``len(counts)`` (which excluded them),
-    causing the casing loop to exit before later mixed-case keywords were
-    captured. This test would have failed by returning ``bar``/``baz`` in
-    place of ``Bar``/``Baz``.
+    Prior to v3 the tokeniser preserved the original casing of the first
+    occurrence so ``keyword_docs.keyword`` held mixed-case strings. Read
+    paths then had to wrap every lookup in ``LOWER(keyword)``, which is
+    non-sargable and forced a full-table SCAN when the query lacked a
+    ``directory`` predicate. v3 stores the folded form so lookups can use
+    the ``(directory, keyword, ...)`` index directly.
     """
     text = "the and Foo\nBar Bar Bar\nBaz Baz Baz\n"
-    result = {term.lower(): term for term, _, _ in extract_keywords(text, min_count=2)}
-    assert result.get("bar") == "Bar", result
-    assert result.get("baz") == "Baz", result
+    terms = [term for term, _, _ in extract_keywords(text, min_count=2)]
+    # Every term is its casefolded form; no mixed-case leakage.
+    for term in terms:
+        assert term == term.casefold(), (
+            f"v3 must emit folded keywords, got {term!r}"
+        )
+    # And the actual folded contents are preserved.
+    fold_set = set(terms)
+    assert "bar" in fold_set
+    assert "baz" in fold_set
 
 
 def test_build_populates_both_tables(sidecar_env, tmp_path):

@@ -18,7 +18,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional, Union
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Preserved v1 tables. Never dropped, altered, or renamed.
 V1_TABLES = ("keyword_counts", "keyword_pairs", "keyword_sources")
@@ -140,12 +140,95 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
         """
     )
     current = read_schema_version(conn)
+    if current < 3:
+        _migrate_v2_to_v3(conn)
     if current < SCHEMA_VERSION:
         # ``?`` placeholders are not accepted for PRAGMA statements, but the
         # value is a hard-coded module constant so string formatting is safe.
         conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
     conn.commit()
     return read_schema_version(conn)
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3: casefold every ``keyword_docs.keyword`` value.
+
+    Prior to v3 keywords were stored in their original casing and every
+    read path had to wrap them in ``LOWER(keyword)`` — a non-sargable
+    expression that forced a full-table SCAN when the query lacked a
+    ``directory`` predicate (PERF plan §P1-2). v3 stores the folded form
+    directly so the existing ``idx_keyword_docs_kw`` index covers those
+    lookups.
+
+    SQLite's ``LOWER()`` is ASCII-only, so we can't do the transform in
+    SQL for unicode-heavy corpora (CJK, ß, dotted-i, etc.). We read every
+    row, casefold in Python, drop and re-insert. The operation is idempotent
+    and safe to run against an already-folded database.
+
+    The primary key is ``(directory, keyword, doc_path)``. Two rows with
+    different original casings (``Install`` and ``install``) in the same
+    ``(directory, doc_path)`` collide after folding — we merge their
+    ``occurrence_count`` / ``first_line`` / ``updated_at`` into a single row
+    rather than hit a constraint error.
+    """
+    all_rows = conn.execute(
+        """
+        SELECT directory, keyword, doc_path, occurrence_count,
+               first_line, updated_at, scope
+        FROM keyword_docs
+        """
+    ).fetchall()
+    if not all_rows:
+        return
+
+    needs_migration = any(
+        (r[1] or "") != (r[1] or "").casefold().strip() for r in all_rows
+    )
+    if not needs_migration:
+        return
+
+    merged: dict = {}
+    for r in all_rows:
+        directory = r[0]
+        keyword = (r[1] or "").casefold().strip()
+        doc_path = r[2]
+        if not keyword:
+            continue
+        key = (directory, keyword, doc_path)
+        occ = float(r[3] or 0)
+        first_line = int(r[4] or 0)
+        updated_at = r[5]
+        scope = r[6] or ""
+        if key in merged:
+            existing = merged[key]
+            existing["occurrence_count"] += occ
+            if first_line and (existing["first_line"] == 0 or first_line < existing["first_line"]):
+                existing["first_line"] = first_line
+            if updated_at and (existing["updated_at"] is None or updated_at > existing["updated_at"]):
+                existing["updated_at"] = updated_at
+        else:
+            merged[key] = {
+                "occurrence_count": occ,
+                "first_line": first_line,
+                "updated_at": updated_at,
+                "scope": scope,
+            }
+    conn.execute("DELETE FROM keyword_docs")
+    conn.executemany(
+        """
+        INSERT INTO keyword_docs
+            (directory, keyword, doc_path, occurrence_count, first_line,
+             updated_at, scope)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                d, k, dp, v["occurrence_count"], v["first_line"],
+                v["updated_at"], v["scope"],
+            )
+            for (d, k, dp), v in merged.items()
+        ],
+    )
 
 
 def list_tables(conn: sqlite3.Connection) -> list[str]:

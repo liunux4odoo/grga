@@ -154,6 +154,12 @@ def extract_keywords(
     they are the very first token of the file (this keeps titles and rare
     proper nouns). Results are truncated to ``max_terms`` entries sorted by
     count desc, then first_line asc for stability.
+
+    Since schema v3 the emitted ``term`` is the **casefolded** form (not the
+    original casing): ``keyword_docs.keyword`` stores folded keywords so
+    read queries can use a plain ``keyword IN (...)`` index lookup instead
+    of the non-sargable ``LOWER(keyword)`` that forced a full-table scan
+    (PERF plan §P1-2).
     """
     counts: Dict[str, int] = {}
     first_lines: Dict[str, int] = {}
@@ -168,25 +174,12 @@ def extract_keywords(
                 first_lines[key] = line_no
     if not counts:
         return []
-    # Preserve the original casing of the first occurrence we saw. Track
-    # completion against the *kept* (non-stopword) keys only; comparing raw
-    # sizes would let a stopword-heavy first line trip the break before later
-    # keywords are captured, silently storing their casefolded form.
-    original: Dict[str, str] = {}
-    needed = set(counts.keys())
-    for line in text.splitlines():
-        for match in _TOKEN_RE.finditer(line):
-            term = match.group(0)
-            key = term.casefold()
-            if key in needed and key not in original:
-                original[key] = term
-        if needed <= original.keys():
-            break
     result = []
     for key, count in counts.items():
         if count < min_count and first_lines[key] > 1:
             continue
-        result.append((original.get(key, key), count, first_lines[key]))
+        # Store the folded key directly (v3): no original-casing lookup.
+        result.append((key, count, first_lines[key]))
     result.sort(key=lambda item: (-item[1], item[2], item[0]))
     return result[:max_terms]
 

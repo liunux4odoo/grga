@@ -90,17 +90,27 @@ def load_edges(
         # transient Python tuples on every call. ``keyword_docs`` stores one
         # row per (folded keyword, doc), so ``LOWER(...)`` ordering yields
         # canonical unordered pairs without self-pairs or duplicates.
+        # ``keyword_docs`` stores casefolded keyword strings (schema v3),
+        # so the self-join comparison is a direct column compare — no
+        # ``LOWER(...)`` wrapper needed. The ``+`` unary prefix on the
+        # keyword comparison is a deliberate SQLite optimiser barrier: it
+        # stops the planner from range-scanning ``idx_keyword_docs_kw``
+        # (``keyword > ?``, a huge fan-out) and forces the selective
+        # ``(directory, doc_path)`` join instead. Dropping ``LOWER`` had let
+        # the planner "see" the keyword index and pick the ~30x slower plan;
+        # the barrier keeps the join on doc_path where each doc has only a
+        # handful of keywords.
         where_clause = "WHERE a.directory = ?" if directory is not None else ""
         rows = conn.execute(
             f"""
-            SELECT LOWER(a.keyword) AS kw_a,
-                   LOWER(b.keyword) AS kw_b,
+            SELECT a.keyword AS kw_a,
+                   b.keyword AS kw_b,
                    SUM(MIN(a.occurrence_count, b.occurrence_count)) AS weight
             FROM keyword_docs a
             JOIN keyword_docs b
               ON a.doc_path = b.doc_path
              AND a.directory = b.directory
-             AND LOWER(a.keyword) < LOWER(b.keyword)
+             AND +a.keyword < +b.keyword
             {where_clause}
             GROUP BY kw_a, kw_b
             """,

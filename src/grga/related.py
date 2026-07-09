@@ -168,7 +168,7 @@ def _docs_for_keywords(
         return {}
     placeholders = ",".join("?" for _ in keywords)
     params: List = list(keywords)
-    where = f"LOWER(keyword) IN ({placeholders})"
+    where = f"keyword IN ({placeholders})"
     if scope_key is not None:
         where += " AND directory = ?"
         params.append(scope_key)
@@ -196,7 +196,7 @@ def _scoped_docs_for_keywords(
         return {}
     placeholders = ",".join("?" for _ in keywords)
     params: List = list(keywords)
-    where = f"LOWER(keyword) IN ({placeholders})"
+    where = f"keyword IN ({placeholders})"
     if scope_key is not None:
         where += " AND directory = ?"
         params.append(scope_key)
@@ -322,7 +322,7 @@ def _related_graph_impl(
     keyword_list = list(kw_score.keys())
     placeholders = ",".join("?" for _ in keyword_list)
     params: List = list(keyword_list)
-    where = f"LOWER(keyword) IN ({placeholders})"
+    where = f"keyword IN ({placeholders})"
     if doc_scope_key is not None:
         where += " AND directory = ?"
         params.append(doc_scope_key)
@@ -565,7 +565,7 @@ def _preview_from_kw_score(
         f"""
         SELECT directory, keyword, doc_path, occurrence_count
         FROM keyword_docs
-        WHERE LOWER(keyword) IN ({placeholders}) AND directory != ?
+        WHERE keyword IN ({placeholders}) AND directory != ?
         """,
         params,
     ).fetchall()

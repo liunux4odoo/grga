@@ -169,7 +169,7 @@ def _cooccurrences(
         placeholders = ",".join("?" for _ in doc_list)
         rows = conn.execute(
             f"""
-            SELECT LOWER(keyword) AS kw, occurrence_count
+            SELECT keyword AS kw, occurrence_count
             FROM keyword_docs
             WHERE directory = ? AND doc_path IN ({placeholders})
             """,
@@ -203,7 +203,7 @@ def _seed_docs(
         """
         SELECT directory, doc_path
         FROM keyword_docs
-        WHERE LOWER(keyword) = ?
+        WHERE keyword = ?
         """,
         (folded,),
     ).fetchall()
@@ -234,9 +234,9 @@ def _seed_docs_batch(
     placeholders = ",".join("?" for _ in uniq)
     rows = conn.execute(
         f"""
-        SELECT LOWER(keyword) AS kw, directory, doc_path
+        SELECT keyword AS kw, directory, doc_path
         FROM keyword_docs
-        WHERE LOWER(keyword) IN ({placeholders})
+        WHERE keyword IN ({placeholders})
         """,
         uniq,
     ).fetchall()
