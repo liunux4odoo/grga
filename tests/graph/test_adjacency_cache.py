@@ -60,13 +60,14 @@ def test_second_call_hits_cache(two_scope_db):
             "grga.graph.ppr", fromlist=["load_edges"]
         ).load_edges,
     ) as spy:
-        _, adj1 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
-        _, adj2 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
+        _, adj1, idx1 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
+        _, adj2, idx2 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
     assert spy.call_count == 1, (
         f"expected 1 SQL rebuild, got {spy.call_count}"
     )
     # Second return is the *same object* (returned by reference).
     assert adj1 is adj2
+    assert idx1 is idx2
 
 
 def test_mtime_bump_invalidates(two_scope_db):

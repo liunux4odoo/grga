@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from grga.graph.ppr import Edge, build_adjacency, personalized_pagerank
+from grga.graph.ppr import (
+    Edge,
+    build_adjacency,
+    build_indexed_graph,
+    indexed_graph_from_adjacency,
+    personalized_pagerank,
+    personalized_pagerank_indexed,
+)
 
 
 def _graph():
@@ -141,3 +148,72 @@ def test_ppr_scores_match_reference_implementation():
                 f"score drift for seeds={seeds}, node={k_ref}: "
                 f"ref={s_ref} got={s_got}"
             )
+
+
+def test_indexed_ppr_matches_dict_ppr():
+    """P1-1 対拍：IndexedGraph 版 PPR 必须与 dict 版逐位一致。
+
+    生成一个 10 节点、~20 边的确定图，同时经 dict adjacency 和
+    IndexedGraph 两条路径跑 PPR，断言 top-k 排名一致、分数误差 < 1e-9。
+    这是把 PPR 从 dict-of-dicts 迁移到 index-of-lists 的语义护栏。
+    """
+    import random
+
+    random.seed(1337)
+    edges: list = []
+    nodes = [f"k{i}" for i in range(10)]
+    seen = set()
+    for _ in range(20):
+        a, b = random.sample(nodes, 2)
+        key = tuple(sorted((a, b)))
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(Edge(a=key[0], b=key[1], weight=1.0 + random.random() * 3.0))
+
+    dict_adj = build_adjacency(edges)
+    indexed_from_edges = build_indexed_graph(edges)
+    indexed_from_adj = indexed_graph_from_adjacency(dict_adj)
+
+    # Both index constructions must be structurally equivalent to the dict
+    # (same nodes, same total out-degree per node).
+    for name in dict_adj:
+        assert name in indexed_from_edges.node_index
+        assert name in indexed_from_adj.node_index
+        idx1 = indexed_from_edges.node_index[name]
+        idx2 = indexed_from_adj.node_index[name]
+        assert abs(indexed_from_edges.out_degree[idx1] - sum(dict_adj[name].values())) < 1e-12
+        assert abs(indexed_from_adj.out_degree[idx2] - sum(dict_adj[name].values())) < 1e-12
+
+    for seeds in (["k0"], ["k3", "k7"], ["k1", "k4", "k9"]):
+        dict_result = personalized_pagerank(seeds, dict_adj, top_k=15)
+        idx_from_edges = personalized_pagerank_indexed(
+            seeds, indexed_from_edges, top_k=15
+        )
+        idx_from_adj = personalized_pagerank_indexed(
+            seeds, indexed_from_adj, top_k=15
+        )
+
+        # Same nodes in the same tie-broken order.
+        assert [k for k, _ in dict_result] == [k for k, _ in idx_from_edges], (
+            f"order drift (edges) for {seeds}"
+        )
+        assert [k for k, _ in dict_result] == [k for k, _ in idx_from_adj], (
+            f"order drift (adjacency) for {seeds}"
+        )
+        # Scores within float noise.
+        for (k1, s1), (_, s2) in zip(dict_result, idx_from_edges):
+            assert abs(s1 - s2) < 1e-9, f"{seeds}: {k1} dict={s1} idx-edges={s2}"
+        for (k1, s1), (_, s2) in zip(dict_result, idx_from_adj):
+            assert abs(s1 - s2) < 1e-9, f"{seeds}: {k1} dict={s1} idx-adj={s2}"
+
+
+def test_indexed_ppr_missing_seed_returns_empty():
+    edges = [Edge("install", "macos", 1.0), Edge("macos", "brew", 1.0)]
+    graph = build_indexed_graph(edges)
+    assert personalized_pagerank_indexed(["nonexistent-token"], graph) == []
+
+
+def test_indexed_ppr_empty_graph_returns_empty():
+    graph = build_indexed_graph([])
+    assert personalized_pagerank_indexed(["install"], graph) == []

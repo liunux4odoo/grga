@@ -346,8 +346,8 @@ def test_preview_reuses_ppr_reduces_cost(two_scopes):
     clear_adjacency_cache()
     with patch.object(
         related_mod,
-        "personalized_pagerank",
-        wraps=related_mod.personalized_pagerank,
+        "personalized_pagerank_indexed",
+        wraps=related_mod.personalized_pagerank_indexed,
     ) as spy:
         payload = related_graph_with_preview(
             ["alpha"],

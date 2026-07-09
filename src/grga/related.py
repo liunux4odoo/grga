@@ -25,8 +25,10 @@ from grga.graph.ppr import (
     DEFAULT_ALPHA,
     DEFAULT_ITERS,
     build_adjacency,
+    build_indexed_graph,
     load_edges,
     personalized_pagerank,
+    personalized_pagerank_indexed,
 )
 from grga.graph.schema import connect, ensure_schema
 
@@ -280,17 +282,20 @@ def _related_graph_impl(
     # fetch through ``adjacency_cache`` when a ``db_path`` was threaded in
     # by the top-level ``related()``; fall back to a fresh build when
     # invoked without one (kept for legacy in-process callers that pass a
-    # bare connection).
+    # bare connection). The indexed graph drives the fast PPR path.
     if db_path is not None:
         from grga.graph.adjacency_cache import get_adjacency
 
-        _, adjacency = get_adjacency(db_path, edge_scope_key)
+        _, _, indexed = get_adjacency(db_path, edge_scope_key)
+        ranked_keywords = personalized_pagerank_indexed(
+            seeds, indexed, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
+        )
     else:
         edges = load_edges(conn, directory=edge_scope_key)
-        adjacency = build_adjacency(edges)
-    ranked_keywords = personalized_pagerank(
-        seeds, adjacency, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
-    )
+        indexed = build_indexed_graph(edges)
+        ranked_keywords = personalized_pagerank_indexed(
+            seeds, indexed, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
+        )
     if not ranked_keywords:
         # No graph signal: fall back to documents that directly contain the
         # seed keywords so the caller still gets something useful.
@@ -650,13 +655,16 @@ def compute_crossed_scopes_preview(
     if db_path is not None:
         from grga.graph.adjacency_cache import get_adjacency
 
-        _, adjacency = get_adjacency(db_path, None)
+        _, _, indexed = get_adjacency(db_path, None)
+        ranked_keywords = personalized_pagerank_indexed(
+            seeds, indexed, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
+        )
     else:
         edges = load_edges(conn, directory=None)
-        adjacency = build_adjacency(edges)
-    ranked_keywords = personalized_pagerank(
-        seeds, adjacency, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
-    )
+        indexed = build_indexed_graph(edges)
+        ranked_keywords = personalized_pagerank_indexed(
+            seeds, indexed, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
+        )
     kw_score = {kw: score for kw, score in ranked_keywords}
     for seed in seeds:
         kw_score.setdefault(seed, max(kw_score.values()) if kw_score else 1.0)

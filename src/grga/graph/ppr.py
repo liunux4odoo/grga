@@ -133,6 +133,156 @@ def build_adjacency(edges: Sequence[Edge]) -> Dict[str, Dict[str, float]]:
     return adj
 
 
+@dataclass
+class IndexedGraph:
+    """Integer-indexed adjacency for allocation-free PPR iteration.
+
+    The dict-of-dicts adjacency (:func:`build_adjacency`) drives PPR through
+    millions of string-keyed ``dict.get`` calls — 64% of a ``related
+    --mode graph`` call per the PERF baseline. This structure maps every
+    node to a dense integer id so the power-iteration inner loop touches
+    only ``list[int]`` indexing and float arithmetic, zero hashing.
+
+    Fields:
+        node_ids: ``node_ids[i]`` is the string keyword for index ``i``.
+        node_index: inverse map ``keyword -> index``.
+        neighbors: ``neighbors[i]`` is a list of ``(j, weight)`` edges.
+        out_degree: ``out_degree[i]`` is the pre-summed total edge weight
+            out of node ``i`` (a dangling node has ``0.0``).
+    """
+
+    node_ids: List[str]
+    node_index: Dict[str, int]
+    neighbors: List[List[Tuple[int, float]]]
+    out_degree: List[float]
+
+
+def build_indexed_graph(edges: Sequence[Edge]) -> IndexedGraph:
+    """Build an :class:`IndexedGraph` directly from undirected ``edges``."""
+    node_index: Dict[str, int] = {}
+    neighbors: List[List[Tuple[int, float]]] = []
+
+    def _id(name: str) -> int:
+        idx = node_index.get(name)
+        if idx is None:
+            idx = len(node_index)
+            node_index[name] = idx
+            neighbors.append([])
+        return idx
+
+    # Aggregate parallel edges the same way build_adjacency does.
+    agg: Dict[Tuple[int, int], float] = {}
+    for edge in edges:
+        if edge.weight <= 0:
+            continue
+        ia, ib = _id(edge.a), _id(edge.b)
+        if ia == ib:
+            continue
+        agg[(ia, ib)] = agg.get((ia, ib), 0.0) + edge.weight
+
+    out_degree = [0.0] * len(node_index)
+    for (ia, ib), w in agg.items():
+        neighbors[ia].append((ib, w))
+        neighbors[ib].append((ia, w))
+        out_degree[ia] += w
+        out_degree[ib] += w
+
+    node_ids = [""] * len(node_index)
+    for name, idx in node_index.items():
+        node_ids[idx] = name
+    return IndexedGraph(
+        node_ids=node_ids,
+        node_index=node_index,
+        neighbors=neighbors,
+        out_degree=out_degree,
+    )
+
+
+def indexed_graph_from_adjacency(
+    adjacency: Dict[str, Dict[str, float]],
+) -> IndexedGraph:
+    """Convert a pre-built dict adjacency into an :class:`IndexedGraph`.
+
+    Used by the legacy :func:`personalized_pagerank` dict API so it can
+    delegate to the indexed implementation without a second graph load.
+    """
+    node_ids = list(adjacency.keys())
+    node_index = {name: i for i, name in enumerate(node_ids)}
+    neighbors: List[List[Tuple[int, float]]] = []
+    out_degree: List[float] = []
+    for name in node_ids:
+        nbrs = adjacency[name]
+        # Every neighbour key is guaranteed present in ``adjacency`` because
+        # build_adjacency inserts both endpoints of each edge.
+        neighbors.append([(node_index[k], w) for k, w in nbrs.items()])
+        out_degree.append(sum(nbrs.values()))
+    return IndexedGraph(
+        node_ids=node_ids,
+        node_index=node_index,
+        neighbors=neighbors,
+        out_degree=out_degree,
+    )
+
+
+def personalized_pagerank_indexed(
+    seeds: Iterable[str],
+    graph: IndexedGraph,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+    alpha: float = DEFAULT_ALPHA,
+    iters: int = DEFAULT_ITERS,
+) -> List[Tuple[str, float]]:
+    """PPR over an :class:`IndexedGraph`; semantics match :func:`personalized_pagerank`.
+
+    Same power iteration, same teleport / dangling-leak handling, same
+    seed-exclusion and top-k tie-breaking — only the data layout differs
+    (dense integer arrays instead of nested string dicts).
+    """
+    n = len(graph.node_ids)
+    if n == 0:
+        return []
+    seed_folded = [s for s in (_fold(x) for x in seeds) if s]
+    seed_ids = [graph.node_index[s] for s in seed_folded if s in graph.node_index]
+    if not seed_ids:
+        return []
+
+    p = 1.0 / len(seed_ids)
+    personal = [0.0] * n
+    for sid in seed_ids:
+        personal[sid] = p
+    seed_id_set = set(seed_ids)
+    neighbors = graph.neighbors
+    out_degree = graph.out_degree
+
+    score = personal[:]
+    for _ in range(max(1, iters)):
+        new_score = [alpha * personal[i] for i in range(n)]
+        for i in range(n):
+            si = score[i]
+            if si <= 0:
+                continue
+            deg = out_degree[i]
+            nbrs = neighbors[i]
+            if not nbrs or deg <= 0:
+                # Dangling: leak mass back onto the seed personal vector.
+                leak = (1.0 - alpha) * si
+                for sid in seed_ids:
+                    new_score[sid] += leak * personal[sid]
+                continue
+            share = (1.0 - alpha) * si / deg
+            for j, w in nbrs:
+                new_score[j] += share * w
+        score = new_score
+
+    ranked = [
+        (graph.node_ids[i], s)
+        for i, s in enumerate(score)
+        if i not in seed_id_set and s > 0
+    ]
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return ranked[:top_k]
+
+
 def personalized_pagerank(
     seeds: Iterable[str],
     adjacency: Dict[str, Dict[str, float]],
@@ -156,59 +306,20 @@ def personalized_pagerank(
     Seed nodes missing from the graph are dropped. If no seed is present
     the function returns an empty list (a sane degrade rather than a
     ValueError).
+
+    This function is a thin compatibility shim on top of
+    :func:`personalized_pagerank_indexed`: it materialises the dict
+    adjacency into an :class:`IndexedGraph` first, then delegates. Hot-path
+    callers should build the indexed graph once (via
+    :func:`build_indexed_graph`) and call the indexed variant directly to
+    skip the conversion.
     """
-    # ``seeds`` are folded exactly once here and never again inside the
-    # power-iteration body — the inner loop must stay fold-free (see PERF
-    # plan P0-3). Any caller that stores adjacency keys or seeds unfolded
-    # is a bug in that caller, not in PPR.
-    seed_set = [s for s in (_fold(x) for x in seeds) if s]
-    if not seed_set or not adjacency:
+    if not adjacency:
         return []
-    seed_in_graph_list = [s for s in seed_set if s in adjacency]
-    if not seed_in_graph_list:
-        return []
-    seed_in_graph = set(seed_in_graph_list)
-
-    # Personalisation vector: uniform over seeds present in the graph.
-    p = 1.0 / len(seed_in_graph_list)
-    personal: Dict[str, float] = {s: p for s in seed_in_graph_list}
-
-    # Pre-compute per-node out-degree once. ``sum(neighbours.values())`` in
-    # the inner loop was O(deg) per iteration per node — hoisting it turns
-    # ``iters`` full sweeps into a single upfront pass. On the 600-doc
-    # bench this halves PPR's own time.
-    out_degree: Dict[str, float] = {
-        node: sum(neighbours.values())
-        for node, neighbours in adjacency.items()
-    }
-
-    scores: Dict[str, float] = dict(personal)
-
-    for _ in range(max(1, iters)):
-        next_scores: Dict[str, float] = {
-            node: alpha * personal.get(node, 0.0) for node in adjacency
-        }
-        for node, mass in scores.items():
-            neighbours = adjacency.get(node)
-            if not neighbours:
-                # Dangling nodes leak mass back to the personal vector.
-                leak = (1.0 - alpha) * mass
-                for target, weight in personal.items():
-                    next_scores[target] = next_scores.get(target, 0.0) + leak * weight
-                continue
-            total = out_degree.get(node, 0.0)
-            if total <= 0:
-                continue
-            share = (1.0 - alpha) * mass / total
-            for nbr, weight in neighbours.items():
-                next_scores[nbr] = next_scores.get(nbr, 0.0) + share * weight
-        scores = next_scores
-
-    # Filter out the seeds themselves so callers get novel neighbours.
-    ranked = [
-        (node, score)
-        for node, score in scores.items()
-        if node not in seed_in_graph and score > 0
-    ]
-    ranked.sort(key=lambda item: (-item[1], item[0]))
-    return ranked[:top_k]
+    return personalized_pagerank_indexed(
+        seeds,
+        indexed_graph_from_adjacency(adjacency),
+        top_k=top_k,
+        alpha=alpha,
+        iters=iters,
+    )
