@@ -138,7 +138,7 @@ def related(
         if mode == "graph":
             return _related_graph(
                 conn, seeds, limit, scope_key, alpha, iters,
-                cross_scope=cross_scope,
+                cross_scope=cross_scope, db_path=target_db,
             )
         if mode == "dir":
             return _related_dir(conn, seeds, limit, scope_key)
@@ -218,6 +218,7 @@ def _related_graph(
     iters: int,
     *,
     cross_scope: bool = False,
+    db_path: Optional[Path] = None,
 ) -> List[Related]:
     # In cross-scope mode the seeds must still originate from ``scope_key``
     # (we do not want a keyword that only lives in another corpus to
@@ -234,8 +235,19 @@ def _related_graph(
         edge_scope_key = scope_key
         doc_scope_key = scope_key
 
-    edges = load_edges(conn, directory=edge_scope_key)
-    adjacency = build_adjacency(edges)
+    # Adjacency is expensive to rebuild (~30% of the call) and unchanged
+    # between successive queries against the same (db, scope). Route the
+    # fetch through ``adjacency_cache`` when a ``db_path`` was threaded in
+    # by the top-level ``related()``; fall back to a fresh build when
+    # invoked without one (kept for legacy in-process callers that pass a
+    # bare connection).
+    if db_path is not None:
+        from grga.graph.adjacency_cache import get_adjacency
+
+        _, adjacency = get_adjacency(db_path, edge_scope_key)
+    else:
+        edges = load_edges(conn, directory=edge_scope_key)
+        adjacency = build_adjacency(edges)
     ranked_keywords = personalized_pagerank(
         seeds, adjacency, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
     )
@@ -488,6 +500,8 @@ def compute_crossed_scopes_preview(
     scope_key: Optional[str],
     alpha: float,
     iters: int,
+    *,
+    db_path: Optional[Path] = None,
 ) -> Optional[dict]:
     """Estimate what opening ``--cross-scope`` would pull into a graph query.
 
@@ -513,8 +527,13 @@ def compute_crossed_scopes_preview(
     if scope_key is None:
         return None
 
-    edges = load_edges(conn, directory=None)
-    adjacency = build_adjacency(edges)
+    if db_path is not None:
+        from grga.graph.adjacency_cache import get_adjacency
+
+        _, adjacency = get_adjacency(db_path, None)
+    else:
+        edges = load_edges(conn, directory=None)
+        adjacency = build_adjacency(edges)
     ranked_keywords = personalized_pagerank(
         seeds, adjacency, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
     )
@@ -621,12 +640,13 @@ def related_graph_with_preview(
     try:
         ensure_schema(conn)
         results = _related_graph(
-            conn, seeds, limit, scope_key, alpha, iters, cross_scope=cross_scope
+            conn, seeds, limit, scope_key, alpha, iters,
+            cross_scope=cross_scope, db_path=target_db,
         )
         crossed_preview = None
         if preview:
             crossed_preview = compute_crossed_scopes_preview(
-                conn, seeds, limit, scope_key, alpha, iters
+                conn, seeds, limit, scope_key, alpha, iters, db_path=target_db,
             )
         return {"results": results, "crossed_scopes_preview": crossed_preview}
     finally:
