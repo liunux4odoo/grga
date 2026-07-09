@@ -706,7 +706,17 @@ def skill_install_command(
     force: bool = typer.Option(False, "--force", help="Overwrite existing skill directories."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
-    """Install bundled skill(s) into ``--to``.
+    """Install bundled skill(s) into ``--to`` as a stable copy.
+
+    Each skill is copied, not symlinked, so the installed tree is a
+    frozen snapshot that ``pip install -U grga`` cannot silently mutate.
+
+    Want a symlink instead (e.g. developing a skill and wanting edits
+    to the source to take effect live)? Derive it yourself:
+    ``ln -s "$(grga skill path)/<name>" <to>/<name>``. The tradeoff is
+    that a symlink follows the installed package, so upgrading or
+    uninstalling grga will change or break the link — the default copy
+    avoids exactly that.
 
     Exit code contract:
 

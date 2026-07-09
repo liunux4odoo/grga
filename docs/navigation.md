@@ -132,7 +132,9 @@ Markdown 章节树 + 磁盘缓存 sidecar。为 `expand --level chapter` 和
 
 ## Skills 与 Prompts
 
-- `skills/grga/`：内置 skill 的源模板，`grga skill install` 会把它拷到目标位置
+- `skills/grga/`：内置 skill 的源模板，`grga skill install` 会把它**拷贝**（非
+  symlink）到目标位置——拷贝语义等于给用户一份 pip 升级动不了的稳定副本；
+  想要 live-edit 语义可以自己 `ln -s "$(grga skill path)/<name>" <dst>/<name>`
 - `skill_install.py`：安装器逻辑（拷贝 + `--force` 语义）
 - `prompts/suggest_*.txt`：suggest 三种 intent 的 LLM 提示词模板，改这里就等于
   改 L3 行为，属于**语义敏感区**

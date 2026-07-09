@@ -1,8 +1,17 @@
 """Install bundled grga skills into a target directory.
 
 Each skill lives under ``src/grga/skills/<name>/``. The install command
-copies a skill tree into ``<dest>/<name>/`` (leaving other skills alone),
-optionally overwriting with ``--force``.
+*copies* a skill tree into ``<dest>/<name>/`` (leaving other skills
+alone), optionally overwriting with ``--force``.
+
+Copy — not symlink — is deliberate: the installed tree is a frozen
+snapshot that a later ``pip install -U grga`` cannot silently change.
+Users who want live-editing (symlink) semantics can derive it from the
+already-exposed source path, e.g. ``ln -s "$(grga skill path)/<name>"
+<dest>/<name>``; see ``skill install --help`` for the caveats. We do not
+ship a ``--link`` flag because it would add cross-platform failure modes
+(Windows symlink privileges, dangling links after uninstall) for a use
+case the copy path plus ``skill path`` already covers.
 """
 
 import json
