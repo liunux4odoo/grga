@@ -1,7 +1,8 @@
 # grga trace 信号扩展规范
 
 > **版本**：v0.2（2026-07-09，极简版）
-> **状态**：设计阶段 · 未开始实现
+> **状态**：已实现（`src/grga/trace.py` + `related`/`suggest` 的 `--json` 输出；
+> 契约 schema 见 `schemas/trace-signals-v1.json`，测试见 `tests/test_trace_signals.py`）
 > **前置**：`docs/design/v2-design.md`（v2 五动词原语）
 > **背景**：为支持 caller 端"agentic search 过程可视化"，grga 需要暴露一部分
 > **caller 无法从现有返回值派生的内部图动作**。grga 本体依然 stateless，且
@@ -167,7 +168,10 @@ grga 是被 N 个 caller 共用的公共基础设施，往它上面加负担的�
 
 ### 5.2 `suggest`
 
-- 必须 emit **至少 1 个** `llm_propose`，`nodes` 为 LLM 提出的新 `kw:*`。
+- 当 LLM 返回非空建议时，**必须为每个建议 emit 一个** `llm_propose`，`nodes`
+  为 LLM 提出的新 `kw:*`。
+- 当 LLM 返回空建议（无新 kw）时，`graph_actions = []`，按 §6 边界规则处理，
+  **不视为错误**。这包括 `intent=rerank`——它按设计不产出新关键字。
 - `meta.rationale` 允许为空字符串但字段必须存在。
 - **不 emit `llm_replace`**——是否用新 query 替换旧 query 是 caller 的
   反思决定，grga 不越界记录。

@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, T
 from grga.graph.votes import VoteResult, record_votes, record_votes_from_keywords
 from grga.models import Hit
 from grga.prompts import available_intents, load_prompt
+from grga.trace import GraphAction, encode_keyword, llm_propose
 
 _logger = logging.getLogger("grga.suggest")
 
@@ -61,6 +62,10 @@ class Suggestion:
     model: str = ""
     raw: dict = field(default_factory=dict)
     votes: Optional[dict] = None
+    #: ``trace-signals.md`` v1 actions. Populated for every ``suggest()``
+    #: call: one :func:`grga.trace.llm_propose` per suggested keyword group,
+    #: empty when the LLM proposed no new ``kw:*`` nodes (§6 boundary rules).
+    graph_actions: List[GraphAction] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -379,6 +384,21 @@ def suggest(
         model=model_name,
         raw=raw,
     )
+
+    # trace-signals v1: emit one ``llm_propose`` per suggested keyword. The
+    # spec (§5.2) says suggest must emit ≥1 ``llm_propose`` *when it proposes
+    # anything*; a genuinely empty suggestion (§6 boundary) yields an empty
+    # ``graph_actions``. ``rerank`` returns no new keywords, so it also emits
+    # nothing here — only ``expand`` / ``reformulate`` populate ``kw:*``.
+    if keywords:
+        suggestion.graph_actions = [
+            llm_propose(
+                [encode_keyword(kw)],
+                origin_query=query,
+                rationale=reason,
+            )
+            for kw in keywords
+        ]
 
     if record_votes_enabled:
         votes_summary: dict = {"pairs_seen": 0, "pairs_recorded": 0, "votes_added": 0.0}

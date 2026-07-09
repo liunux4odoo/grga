@@ -40,6 +40,7 @@ from grga.toolchain import (
     tools_root,
     update_tools,
 )
+from grga.trace import envelope as trace_envelope
 
 app = typer.Typer(no_args_is_help=True, help="Search files with ripgrep-all helpers.")
 tools_app = typer.Typer(no_args_is_help=True, help="Manage bundled command line tools.")
@@ -928,7 +929,8 @@ def suggest_command(
         raise typer.Exit(1)
 
     if json_output:
-        typer.echo(json.dumps(suggestion.to_dict(), ensure_ascii=False, indent=2))
+        payload = trace_envelope(suggestion.to_dict(), suggestion.graph_actions)
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     if suggestion.reason:
         typer.echo(f"# {suggestion.reason}", err=True)
@@ -1021,13 +1023,17 @@ def related_command(
             directory=str(directory) if directory else None,
             cross_scope=cross_scope,
             preview=preview,
+            collect_trace=json_output,
         )
         results = payload["results"]
         if json_output:
-            out = {
-                "results": [r.to_dict() for r in results],
-                "crossed_scopes_preview": payload["crossed_scopes_preview"],
-            }
+            out = trace_envelope(
+                {
+                    "results": [r.to_dict() for r in results],
+                    "crossed_scopes_preview": payload["crossed_scopes_preview"],
+                },
+                payload["graph_actions"],
+            )
             typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
             return
         # Human-readable + --preview: render results, then a one-line
@@ -1049,7 +1055,14 @@ def related_command(
         same_scope=same_scope,
     )
     if json_output:
-        typer.echo(json.dumps([r.to_dict() for r in results], ensure_ascii=False, indent=2))
+        # dir / heading modes never emit graph_actions (their signal is
+        # caller-derivable from ``results`` per docs/design/trace-signals.md
+        # §1.1). The envelope keeps the field present for schema stability.
+        out = trace_envelope(
+            {"results": [r.to_dict() for r in results]},
+            [],
+        )
+        typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
         return
     if not results:
         typer.echo("no related documents found", err=True)

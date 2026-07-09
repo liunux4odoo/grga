@@ -31,6 +31,7 @@ from grga.graph.ppr import (
     personalized_pagerank_indexed,
 )
 from grga.graph.schema import connect, ensure_schema
+from grga.trace import GraphAction
 
 VALID_MODES = ("graph", "dir", "heading")
 DEFAULT_LIMIT = 20
@@ -223,11 +224,177 @@ def _related_graph(
     db_path: Optional[Path] = None,
 ) -> List[Related]:
     """Public-facing wrapper preserving the historical ``List[Related]`` shape."""
-    results, _ = _related_graph_impl(
+    results, _, _ = _related_graph_impl(
         conn, seeds, limit, scope_key, alpha, iters,
         cross_scope=cross_scope, db_path=db_path,
     )
     return results
+
+
+def _build_graph_trace(
+    indexed,
+    seeds: Sequence[str],
+    kw_score: Dict[str, float],
+    results: Sequence[Related],
+    *,
+    fallback: bool = False,
+) -> List["GraphAction"]:
+    """Reconstruct a walk trace from a finished ``mode=graph`` computation.
+
+    PPR is a diffusion, not a literal walk, so there is no ground-truth
+    edge sequence to report. We reconstruct a *deterministic BFS tree*
+    over the co-occurrence graph (restricted to the keywords PPR actually
+    scored) to give viewers a stable, explainable traversal:
+
+    * ``traverse_edge`` — one per BFS tree edge (keyword→keyword), then one
+      per (contributing keyword → document) edge.
+    * ``score_node`` — one per PPR-ranked keyword and one per result doc.
+
+    ``fallback=True`` marks the "no graph signal" branch, where results are
+    direct-seed hits: we emit only seed→file edges (hop 1) plus file scores.
+    """
+    from collections import deque
+
+    from grga import trace as _trace
+
+    actions: List[_trace.GraphAction] = []
+    seed_set = {s for s in seeds}
+
+    if fallback:
+        # Direct-seed degrade: seeds point straight at the docs that contain
+        # them; no keyword graph was walked.
+        for r in results:
+            file_node = _trace.encode_file(r.doc_path)
+            for kw in sorted(r.keywords):
+                if kw not in seed_set:
+                    continue
+                actions.append(
+                    _trace.traverse_edge(
+                        _trace.encode_keyword(kw), file_node,
+                        edge_kind="keyword_doc", weight=r.score, hop=1,
+                    )
+                )
+            actions.append(
+                _trace.score_node(
+                    file_node, algo="direct-seed",
+                    score=r.score, hops_from_seed=1,
+                )
+            )
+        return actions
+
+    node_index = getattr(indexed, "node_index", {})
+    node_ids = getattr(indexed, "node_ids", [])
+    neighbors = getattr(indexed, "neighbors", [])
+
+    # ``wanted`` is the set of keywords PPR scored (``kw_score`` includes the
+    # seeds via setdefault upstream). We BFS the *full* graph — not just the
+    # scored subset — so a scored node reached only via an unscored
+    # intermediate (seed → A(unscored) → B(scored)) still gets a correct
+    # ``hops_from_seed`` and a connecting edge. Restricting the walk to
+    # ``wanted`` used to orphan such nodes (missing ``traverse_edge`` +
+    # ``hops_from_seed=-1``), which broke the "every walked edge is
+    # reported" contract (trace-signals.md §5.1).
+    wanted = {
+        node_index[kw] for kw in kw_score if kw in node_index
+    }
+    seed_ids = [node_index[s] for s in seeds if s in node_index]
+    seed_id_set = set(seed_ids)
+
+    hop: Dict[int, int] = {sid: 0 for sid in seed_ids}
+    parent: Dict[int, Tuple[int, float]] = {}  # child -> (parent, edge weight)
+    dq: deque = deque(seed_ids)
+    while dq:
+        cur = dq.popleft()
+        # Deterministic neighbour order: heaviest edge first, then node id.
+        ordered = sorted(
+            neighbors[cur],
+            key=lambda t: (-t[1], node_ids[t[0]]),
+        )
+        for j, w in ordered:
+            if j in hop:
+                continue
+            hop[j] = hop[cur] + 1
+            parent[j] = (cur, w)
+            dq.append(j)
+
+    # Emit only the edges on shortest paths from a seed to a scored keyword:
+    # walk parent pointers up from each reachable ``wanted`` node, collecting
+    # each tree edge once. This keeps the trace bounded to the result-relevant
+    # subtree while staying connected (no dangling scored node).
+    emitted: Dict[Tuple[int, int], Tuple[float, int]] = {}
+    for target in wanted:
+        if target in seed_id_set or target not in hop:
+            continue
+        node = target
+        while node in parent:
+            par, w = parent[node]
+            key = (par, node)
+            if key in emitted:
+                break  # ancestor chain already recorded
+            emitted[key] = (w, hop[node])
+            node = par
+
+    for (frm, to), (weight, h) in sorted(
+        emitted.items(),
+        key=lambda item: (item[1][1], node_ids[item[0][0]], node_ids[item[0][1]]),
+    ):
+        actions.append(
+            _trace.traverse_edge(
+                _trace.encode_keyword(node_ids[frm]),
+                _trace.encode_keyword(node_ids[to]),
+                edge_kind="co_occurrence", weight=weight, hop=h,
+            )
+        )
+
+    hop_by_kw = {node_ids[idx]: h for idx, h in hop.items()}
+
+    # score_node for every PPR-ranked (non-seed) keyword, in descending
+    # score then keyword order so the trace is byte-stable. A keyword with
+    # positive PPR score is by construction reachable from a seed, so
+    # ``hop_by_kw`` has an entry; the ``continue`` guard is defensive only.
+    ranked = sorted(
+        ((kw, sc) for kw, sc in kw_score.items() if kw not in seed_set),
+        key=lambda item: (-item[1], item[0]),
+    )
+    for kw, sc in ranked:
+        h = hop_by_kw.get(kw)
+        if h is None:
+            continue
+        actions.append(
+            _trace.score_node(
+                _trace.encode_keyword(kw), algo="ppr",
+                score=sc, hops_from_seed=h,
+            )
+        )
+
+    # Keyword→document edges + document scores.
+    for r in sorted(results, key=lambda x: (-x.score, x.doc_path, x.directory or "")):
+        file_node = _trace.encode_file(r.doc_path)
+        contributing = sorted(
+            r.keywords,
+            key=lambda kw: (-kw_score.get(kw, 0.0), kw),
+        )
+        min_kw_hop = None
+        for kw in contributing:
+            kw_hop = hop_by_kw.get(kw)
+            edge_hop = (kw_hop + 1) if kw_hop is not None else 1
+            if min_kw_hop is None or edge_hop < min_kw_hop:
+                min_kw_hop = edge_hop
+            actions.append(
+                _trace.traverse_edge(
+                    _trace.encode_keyword(kw), file_node,
+                    edge_kind="keyword_doc",
+                    weight=kw_score.get(kw, 0.0), hop=edge_hop,
+                )
+            )
+        actions.append(
+            _trace.score_node(
+                file_node, algo="ppr",
+                score=r.score,
+                hops_from_seed=min_kw_hop if min_kw_hop is not None else 1,
+            )
+        )
+    return actions
 
 
 def _related_graph_impl(
@@ -240,8 +407,16 @@ def _related_graph_impl(
     *,
     cross_scope: bool = False,
     db_path: Optional[Path] = None,
-) -> Tuple[List[Related], Dict[str, float]]:
-    """Run PPR + doc collection and return ``(results, kw_score)``.
+    collect_trace: bool = False,
+) -> Tuple[List[Related], Dict[str, float], List["GraphAction"]]:
+    """Run PPR + doc collection and return ``(results, kw_score, trace)``.
+
+    .. note::
+       Return arity changed in the trace-signals v1 rollout: this helper
+       now yields a **3-tuple** ``(results, kw_score, trace)`` (was a
+       2-tuple). ``trace`` is an empty list unless ``collect_trace=True``.
+       Internal callers only; external code should use :func:`related` or
+       :func:`related_graph_with_preview`.
 
     Split out of :func:`_related_graph` so callers that also need the
     keyword-score dict (e.g. potential future observability code) can get
@@ -264,7 +439,7 @@ def _related_graph_impl(
     if cross_scope and scope_key is not None:
         seed_docs = _docs_for_keywords(conn, seeds, scope_key)
         if not seed_docs:
-            return [], {}
+            return [], {}, []
         edge_scope_key: Optional[str] = None
         doc_scope_key: Optional[str] = None
     else:
@@ -306,7 +481,12 @@ def _related_graph_impl(
             for (directory, doc), score in direct.items()
         ]
         results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
-        return results[:limit], {}
+        capped = results[:limit]
+        trace = (
+            _build_graph_trace(indexed, seeds, {}, capped, fallback=True)
+            if collect_trace else []
+        )
+        return capped, {}, trace
 
     kw_score = {kw: score for kw, score in ranked_keywords}
     # Include the seeds so their own documents are represented.
@@ -352,7 +532,12 @@ def _related_graph_impl(
         for (directory, doc), score in doc_score.items()
     ]
     results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
-    return results[:limit], kw_score
+    capped = results[:limit]
+    trace = (
+        _build_graph_trace(indexed, seeds, kw_score, capped)
+        if collect_trace else []
+    )
+    return capped, kw_score, trace
 
 
 def _related_dir(
@@ -676,20 +861,23 @@ def related_graph_with_preview(
     iters: int = DEFAULT_ITERS,
     cross_scope: bool = False,
     preview: bool = False,
+    collect_trace: bool = False,
 ) -> dict:
     """``mode=graph`` variant returning results plus cross-scope observability.
 
-    Returns ``{"results": List[Related], "crossed_scopes_preview": dict|None}``.
-    The preview is **opt-in** (``preview=True``) because it runs a
-    full-graph PPR whose cost scales with *every other* scope in the shared
-    DB — undesirable as an implicit tax on ordinary scoped queries. It is
-    still ``None`` when no ``directory`` scope is active even if requested.
-    Used by ``related --preview --json`` so a caller can see what
+    Returns ``{"results": List[Related], "crossed_scopes_preview": dict|None,
+    "graph_actions": List[GraphAction]}``. ``graph_actions`` is populated
+    only when ``collect_trace=True`` (the ``--json`` path); otherwise it is
+    an empty list. The preview is **opt-in** (``preview=True``) because it
+    runs a full-graph PPR whose cost scales with *every other* scope in the
+    shared DB — undesirable as an implicit tax on ordinary scoped queries.
+    It is still ``None`` when no ``directory`` scope is active even if
+    requested. Used by ``related --preview --json`` so a caller can see what
     ``--cross-scope`` would pull in before committing to it.
     """
     seeds = [s for s in (_fold(k) for k in keywords) if s]
     if not seeds:
-        return {"results": [], "crossed_scopes_preview": None}
+        return {"results": [], "crossed_scopes_preview": None, "graph_actions": []}
 
     from grga.deep_search import DEFAULT_DB_PATH
 
@@ -709,9 +897,10 @@ def related_graph_with_preview(
         # PPR via the standalone ``compute_crossed_scopes_preview`` (its
         # adjacency is cached by :mod:`grga.graph.adjacency_cache`, so the
         # second PPR is cheap after the first call).
-        results, _ = _related_graph_impl(
+        results, _, trace = _related_graph_impl(
             conn, seeds, limit, scope_key, alpha, iters,
             cross_scope=cross_scope, db_path=target_db,
+            collect_trace=collect_trace,
         )
         crossed_preview = None
         if preview and scope_key is not None:
@@ -719,6 +908,10 @@ def related_graph_with_preview(
                 conn, seeds, limit, scope_key, alpha, iters,
                 db_path=target_db,
             )
-        return {"results": results, "crossed_scopes_preview": crossed_preview}
+        return {
+            "results": results,
+            "crossed_scopes_preview": crossed_preview,
+            "graph_actions": trace,
+        }
     finally:
         conn.close()

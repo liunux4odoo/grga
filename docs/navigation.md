@@ -20,6 +20,7 @@ src/grga/
 ├── structure/                  # Markdown 章节解析 + sidecar 缓存
 ├── skills/, skill_install.py   # 内置 Skill 树 + 安装器
 ├── prompts/                    # suggest 的三个 intent 提示词
+├── trace.py                    # trace-signals v1 契约（related/suggest 的 graph_actions）
 ├── toolchain.py                # 外部工具 (rga/rg/pandoc/fzf) 下载与解析
 ├── runtime_env.py              # 交互性 / 离线 / prefer-system 判定
 ├── exit_codes.py               # 冻结的退出码契约 + JSON 错误 emit
@@ -119,6 +120,11 @@ Markdown 章节树 + 磁盘缓存 sidecar。为 `expand --level chapter` 和
   函数 (`emit_error` / `emit_warning`) 也在此。
 - `docs/exit-codes.md`：外部消费者可见的退出码列表。
 - `docs/design/trace-signals.md`：`related` / `suggest` 的 `graph_actions` 输出规范。
+- `trace.py`：trace-signals v1 的实现层。`GraphAction` 数据类 + 冻结的 op /
+  node 前缀词汇表 + node id 编码器 (`encode_keyword` / `encode_file` /
+  `encode_heading`) + `envelope()`。只有 `related`（graph 模式）与 `suggest`
+  在 `--json` 下 emit；热路径动词 (`search`/`probe`/`expand`/`deep-search`)
+  **绝不 emit**。契约由 `schemas/trace-signals-v1.json` 校验。
 
 改任何 CLI 的 `--json` 输出前，先看这两份文件的冻结点。
 

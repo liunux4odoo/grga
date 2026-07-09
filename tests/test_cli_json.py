@@ -75,9 +75,15 @@ def test_related_json_contract(graph_db: Path, cross_heading_fixture: Path):
     )
     assert result.exit_code == 0, result.output
     payload = _parse(result.output)
-    assert isinstance(payload, list)
-    if payload:
-        row = payload[0]
+    # Since trace-signals v1, every related --json mode returns an envelope
+    # carrying trace_signals_version + graph_actions (empty for dir/heading).
+    assert isinstance(payload, dict)
+    assert payload["trace_signals_version"] == "1.0"
+    assert payload["graph_actions"] == []
+    rows = payload["results"]
+    assert isinstance(rows, list)
+    if rows:
+        row = rows[0]
         for key in ("doc_path", "score", "mode", "reason", "keywords"):
             assert key in row, f"missing {key}"
         assert row["mode"] == "heading"
@@ -91,12 +97,14 @@ def test_related_graph_json_contract(graph_db: Path):
     )
     assert result.exit_code == 0, result.output
     payload = _parse(result.output)
-    # graph mode now returns an envelope so callers can read the
+    # graph mode returns an envelope so callers can read the
     # crossed_scopes_preview observability field (see
-    # MIGRATION_user_scoped_db.md §4 修正 3).
+    # MIGRATION_user_scoped_db.md §4 修正 3) plus trace-signals v1 fields.
     assert isinstance(payload, dict)
     assert isinstance(payload["results"], list)
     assert "crossed_scopes_preview" in payload
+    assert payload["trace_signals_version"] == "1.0"
+    assert isinstance(payload["graph_actions"], list)
 
 
 def test_index_build_json_contract(cross_heading_fixture: Path, tmp_path, sidecar_env):
@@ -158,3 +166,5 @@ def test_suggest_json_contract(monkeypatch, tmp_path, docs_fixture: Path):
                 "tokens_used", "model"):
         assert key in payload, f"missing {key}"
     assert payload["llm_generated"] is True
+    assert payload["trace_signals_version"] == "1.0"
+    assert isinstance(payload["graph_actions"], list)
