@@ -281,3 +281,19 @@ For deeper internals (three-layer expansion model, graph schema, refeed
 loop) read `docs/design/v2-design.md`; for every JSON field read
 `docs/api.md`.
 
+## References
+
+Detailed material lives under `references/`, loaded on demand so the
+SKILL.md body stays lean. Read the relevant file when its trigger fires:
+
+| File | Read it when |
+|---|---|
+| `references/verbs.md` | Need a verb's full conceptual signature or per-field semantics (this body has only purpose + "Use when"). |
+| `references/storage-model.md` | A scoped query is thin and you are weighing `--cross-scope`; or deciding when to override `--db`; or indexing multiple corpora. |
+| `references/reflection-loop.md` | Executing a tier (T0-T3) and need the concrete "if observation X then action Y" decision table, or metadata idioms. |
+| `references/troubleshooting.md` | A verb misbehaves — empty `related`, `expand` degraded, `suggest` hangs, promoted pairs not showing up. |
+
+Companion workflows (opt-in, not needed for basic search) live under
+`workflows/` — see "Optional workflows" above.
+
+
