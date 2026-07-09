@@ -111,25 +111,10 @@ def _inspect(
         return empty
 
     # Documents (per scope) that contain the keyword.
-    seed_rows = conn.execute(
-        """
-        SELECT directory, doc_path
-        FROM keyword_docs
-        WHERE LOWER(keyword) = ?
-        """,
-        (folded,),
-    ).fetchall()
-    if not seed_rows:
+    docs_by_scope, seed_docs_by_scope = _seed_docs(conn, folded)
+    if not docs_by_scope:
         return empty
-
-    docs_by_scope: Dict[str, int] = {}
-    seed_docs_by_scope: Dict[str, set] = {}
-    total_docs = 0
-    for row in seed_rows:
-        directory = row["directory"]
-        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
-        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
-        total_docs += 1
+    total_docs = sum(docs_by_scope.values())
 
     # Co-occurring keywords: other keywords living in the same (scope, doc).
     cooccur_weight, cooccur_scopes, per_scope_cooccur = _cooccurrences(
@@ -202,6 +187,69 @@ def _cooccurrences(
     return cooccur_weight, cooccur_scopes, per_scope_cooccur
 
 
+def _seed_docs(
+    conn: sqlite3.Connection,
+    folded: str,
+) -> tuple[Dict[str, int], Dict[str, set]]:
+    """Return ``(docs_by_scope, seed_docs_by_scope)`` for a single keyword.
+
+    Shared by :func:`_inspect` and :func:`compute_suspected_polysemy` so the
+    seed set is resolved identically at both entry points — otherwise the
+    preview's ``suspected_polysemy`` flag could drift from the standalone
+    ``graph inspect`` verdict on the same keyword. Returns empty maps when
+    the keyword is absent.
+    """
+    seed_rows = conn.execute(
+        """
+        SELECT directory, doc_path
+        FROM keyword_docs
+        WHERE LOWER(keyword) = ?
+        """,
+        (folded,),
+    ).fetchall()
+    docs_by_scope: Dict[str, int] = {}
+    seed_docs_by_scope: Dict[str, set] = {}
+    for row in seed_rows:
+        directory = row["directory"]
+        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
+        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
+    return docs_by_scope, seed_docs_by_scope
+
+
+def _seed_docs_batch(
+    conn: sqlite3.Connection,
+    folded_keywords: Sequence[str],
+) -> Dict[str, tuple[Dict[str, int], Dict[str, set]]]:
+    """Batched :func:`_seed_docs` — one scan resolves many keywords at once.
+
+    Used by :func:`compute_suspected_polysemy_batch` so annotating the top-N
+    preview bridge keywords costs a single ``keyword IN (...)`` query instead
+    of N separate full scans of ``keyword_docs``. Returns
+    ``{folded_keyword: (docs_by_scope, seed_docs_by_scope)}`` for every
+    requested keyword that has at least one row.
+    """
+    uniq = [kw for kw in dict.fromkeys(folded_keywords) if kw]
+    if not uniq:
+        return {}
+    placeholders = ",".join("?" for _ in uniq)
+    rows = conn.execute(
+        f"""
+        SELECT LOWER(keyword) AS kw, directory, doc_path
+        FROM keyword_docs
+        WHERE LOWER(keyword) IN ({placeholders})
+        """,
+        uniq,
+    ).fetchall()
+    out: Dict[str, tuple[Dict[str, int], Dict[str, set]]] = {}
+    for row in rows:
+        kw = _fold(row["kw"])
+        docs_by_scope, seed_docs_by_scope = out.setdefault(kw, ({}, {}))
+        directory = row["directory"]
+        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
+        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
+    return out
+
+
 def compute_suspected_polysemy(
     conn: sqlite3.Connection,
     keyword: str,
@@ -218,26 +266,42 @@ def compute_suspected_polysemy(
     folded = _fold(keyword)
     if not folded:
         return False, ""
-    seed_rows = conn.execute(
-        """
-        SELECT directory, doc_path
-        FROM keyword_docs
-        WHERE LOWER(keyword) = ?
-        """,
-        (folded,),
-    ).fetchall()
-    if not seed_rows:
+    docs_by_scope, seed_docs_by_scope = _seed_docs(conn, folded)
+    if not docs_by_scope:
         return False, ""
-
-    docs_by_scope: Dict[str, int] = {}
-    seed_docs_by_scope: Dict[str, set] = {}
-    for row in seed_rows:
-        directory = row["directory"]
-        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
-        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
-
     _, _, per_scope_cooccur = _cooccurrences(conn, folded, seed_docs_by_scope)
     return _detect_polysemy(docs_by_scope, per_scope_cooccur, cooccur_limit)
+
+
+def compute_suspected_polysemy_batch(
+    conn: sqlite3.Connection,
+    keywords: Sequence[str],
+    cooccur_limit: int = DEFAULT_COOCCUR_LIMIT,
+) -> Dict[str, bool]:
+    """Batched polysemy verdict for many keywords: ``{keyword: suspected}``.
+
+    Resolves every keyword's seed set in one ``keyword IN (...)`` scan (see
+    :func:`_seed_docs_batch`) rather than one full scan per keyword. The
+    verdict is identical to calling :func:`compute_suspected_polysemy`
+    individually. Missing keywords map to ``False``. The returned dict is
+    keyed on the *folded* keyword.
+    """
+    folded = [_fold(kw) for kw in keywords]
+    seed_map = _seed_docs_batch(conn, folded)
+    out: Dict[str, bool] = {}
+    for kw in dict.fromkeys(folded):
+        if not kw:
+            continue
+        docs_by_scope, seed_docs_by_scope = seed_map.get(kw, ({}, {}))
+        if not docs_by_scope:
+            out[kw] = False
+            continue
+        _, _, per_scope_cooccur = _cooccurrences(conn, kw, seed_docs_by_scope)
+        suspected, _ = _detect_polysemy(
+            docs_by_scope, per_scope_cooccur, cooccur_limit
+        )
+        out[kw] = suspected
+    return out
 
 
 def _detect_polysemy(

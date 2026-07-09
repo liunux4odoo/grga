@@ -500,11 +500,15 @@ def compute_crossed_scopes_preview(
           "top_bridge_keywords": [{"keyword": str, "cross_weight": float}, ...],
         }
 
-    The estimate runs one unrestricted PPR and a single SQL count, an order
-    of magnitude cheaper than a full cross-scope materialisation. Callers
-    read it to decide whether escalating to ``--cross-scope`` is worthwhile
-    (large ``would_add`` with domain-specific bridge keywords) or likely
-    polysemy noise (bridge keywords are generic terms).
+    The estimate runs one unrestricted PPR and a single SQL count, plus a
+    single batched ``keyword IN (...)`` scan of ``keyword_docs`` to annotate
+    the top-N bridge keywords with a polysemy verdict (see
+    :func:`grga.graph.inspect.compute_suspected_polysemy_batch`). This is
+    still an order of magnitude cheaper than a full cross-scope
+    materialisation. Callers read it to decide whether escalating to
+    ``--cross-scope`` is worthwhile (large ``would_add`` with
+    domain-specific bridge keywords) or likely polysemy noise (bridge
+    keywords are generic terms).
     """
     if scope_key is None:
         return None
@@ -560,17 +564,21 @@ def compute_crossed_scopes_preview(
     # (inside → preview → inspect → enable) into three steps: the caller
     # no longer has to loop ``grga graph inspect`` over the top bridges to
     # detect same-name-different-meaning collisions before flipping
-    # ``--cross-scope``.
-    from grga.graph.inspect import compute_suspected_polysemy
+    # ``--cross-scope``. The batched helper resolves all top-N seed sets in
+    # one ``keyword IN (...)`` scan of ``keyword_docs`` (previously N full
+    # scans, one per bridge — the annotation was silently linear in total
+    # corpus size).
+    from grga.graph.inspect import compute_suspected_polysemy_batch
 
+    bridge_keywords = [kw for kw, _ in top_bridges]
+    polysemy_map = compute_suspected_polysemy_batch(conn, bridge_keywords)
     top_bridge_out: List[dict] = []
     for kw, weight in top_bridges:
-        suspected, _ = compute_suspected_polysemy(conn, kw)
         top_bridge_out.append(
             {
                 "keyword": kw,
                 "cross_weight": round(weight, 6),
-                "suspected_polysemy": suspected,
+                "suspected_polysemy": bool(polysemy_map.get(_fold(kw), False)),
             }
         )
     return {
