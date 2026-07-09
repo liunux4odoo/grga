@@ -101,7 +101,11 @@ def _inspect(
         "docs_by_scope": {},
         "top_cooccurring_keywords": [],
         "suspected_polysemy": False,
-        "polysemy_hint": "",
+        "polysemy_hint": (
+            f"'{original}' is not indexed in the graph. It may still appear "
+            f"in the corpus text — try `grga search \"{original}\"` for "
+            f"full-text hits, or `grga index build` to (re)index a scope."
+        ),
     }
     if not folded:
         return empty

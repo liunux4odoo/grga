@@ -94,3 +94,19 @@ def test_unknown_keyword_returns_empty_report(polysemy_db):
     assert report["docs_by_scope"] == {}
     assert report["top_cooccurring_keywords"] == []
     assert report["suspected_polysemy"] is False
+
+
+def test_inspect_missing_keyword_gives_hint(polysemy_db):
+    """A keyword not in the graph must not read like 'the corpus lacks it'.
+
+    total_docs=0 means the term never entered keyword_docs (graph indexes
+    heading / structured terms), not that the corpus text lacks it. The
+    hint must be non-empty and point the caller at full-text search /
+    (re)indexing.
+    """
+    report = inspect_keyword("attention-not-indexed-xyz", db_path=polysemy_db["db"])
+    assert report["total_docs"] == 0
+    hint = report["polysemy_hint"]
+    assert hint, "empty-result hint must be actionable, not blank"
+    assert "grga search" in hint
+    assert "attention-not-indexed-xyz" in hint
