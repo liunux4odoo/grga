@@ -36,13 +36,28 @@ DEFAULT_LIMIT = 20
 
 @dataclass
 class Related:
-    """A single related document (or keyword) with provenance."""
+    """A single related document (or keyword) with provenance.
+
+    ``doc_path`` is relative to its indexed scope. In cross-scope results
+    the same relative path can occur in several scopes, so ``directory``
+    disambiguates: it holds the resolved scope root the document was
+    indexed under (``None`` when unknown / not tracked). ``qualified_path``
+    joins the two into a filesystem-resolvable path.
+    """
 
     doc_path: str
     score: float
     mode: str
     reason: str = ""
     keywords: List[str] = field(default_factory=list)
+    directory: Optional[str] = None
+
+    @property
+    def qualified_path(self) -> str:
+        """Scope-qualified path (``<directory>/<doc_path>`` when scoped)."""
+        if self.directory:
+            return str(Path(self.directory) / self.doc_path)
+        return self.doc_path
 
     def to_dict(self) -> dict:
         return {
@@ -51,6 +66,8 @@ class Related:
             "mode": self.mode,
             "reason": self.reason,
             "keywords": list(self.keywords),
+            "directory": self.directory,
+            "qualified_path": self.qualified_path,
         }
 
 
@@ -157,6 +174,35 @@ def _docs_for_keywords(
     return docs
 
 
+def _scoped_docs_for_keywords(
+    conn: sqlite3.Connection,
+    keywords: Sequence[str],
+    scope_key: Optional[str],
+) -> Dict[tuple, float]:
+    """Like :func:`_docs_for_keywords` but keyed on ``(directory, doc_path)``.
+
+    Needed whenever results may span more than one scope (cross-scope or
+    global queries), where a bare relative ``doc_path`` is ambiguous.
+    """
+    if not keywords:
+        return {}
+    placeholders = ",".join("?" for _ in keywords)
+    params: List = list(keywords)
+    where = f"LOWER(keyword) IN ({placeholders})"
+    if scope_key is not None:
+        where += " AND directory = ?"
+        params.append(scope_key)
+    rows = conn.execute(
+        f"SELECT directory, doc_path, occurrence_count FROM keyword_docs WHERE {where}",
+        params,
+    ).fetchall()
+    docs: Dict[tuple, float] = {}
+    for row in rows:
+        key = (row["directory"], row["doc_path"])
+        docs[key] = docs.get(key, 0.0) + float(row["occurrence_count"])
+    return docs
+
+
 def _related_graph(
     conn: sqlite3.Connection,
     seeds: Sequence[str],
@@ -190,12 +236,19 @@ def _related_graph(
     if not ranked_keywords:
         # No graph signal: fall back to documents that directly contain the
         # seed keywords so the caller still gets something useful.
-        direct = _docs_for_keywords(conn, seeds, doc_scope_key)
+        direct = _scoped_docs_for_keywords(conn, seeds, doc_scope_key)
         results = [
-            Related(doc_path=doc, score=score, mode="graph", reason="direct-seed", keywords=list(seeds))
-            for doc, score in direct.items()
+            Related(
+                doc_path=doc,
+                score=score,
+                mode="graph",
+                reason="direct-seed",
+                keywords=list(seeds),
+                directory=directory,
+            )
+            for (directory, doc), score in direct.items()
         ]
-        results.sort(key=lambda r: (-r.score, r.doc_path))
+        results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
         return results[:limit]
 
     kw_score = {kw: score for kw, score in ranked_keywords}
@@ -211,20 +264,24 @@ def _related_graph(
         where += " AND directory = ?"
         params.append(doc_scope_key)
     rows = conn.execute(
-        f"SELECT keyword, doc_path, occurrence_count FROM keyword_docs WHERE {where}",
+        f"SELECT directory, keyword, doc_path, occurrence_count FROM keyword_docs WHERE {where}",
         params,
     ).fetchall()
 
-    doc_score: Dict[str, float] = {}
-    doc_keywords: Dict[str, set] = {}
+    # Key on (directory, doc_path): the same relative path can exist in
+    # several scopes when the query spans more than one, so collapsing on
+    # doc_path alone would merge unrelated documents.
+    doc_score: Dict[tuple, float] = {}
+    doc_keywords: Dict[tuple, set] = {}
     for row in rows:
         kw = _fold(row["keyword"])
         weight = kw_score.get(kw, 0.0)
         if weight <= 0:
             continue
+        key = (row["directory"], row["doc_path"])
         contribution = weight * float(row["occurrence_count"])
-        doc_score[row["doc_path"]] = doc_score.get(row["doc_path"], 0.0) + contribution
-        doc_keywords.setdefault(row["doc_path"], set()).add(kw)
+        doc_score[key] = doc_score.get(key, 0.0) + contribution
+        doc_keywords.setdefault(key, set()).add(kw)
 
     results = [
         Related(
@@ -232,11 +289,12 @@ def _related_graph(
             score=score,
             mode="graph",
             reason="ppr",
-            keywords=sorted(doc_keywords.get(doc, set())),
+            keywords=sorted(doc_keywords.get((directory, doc), set())),
+            directory=directory,
         )
-        for doc, score in doc_score.items()
+        for (directory, doc), score in doc_score.items()
     ]
-    results.sort(key=lambda r: (-r.score, r.doc_path))
+    results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
     return results[:limit]
 
 
@@ -246,14 +304,18 @@ def _related_dir(
     limit: int,
     scope_key: Optional[str],
 ) -> List[Related]:
-    seed_docs = _docs_for_keywords(conn, seeds, scope_key)
+    seed_docs = _scoped_docs_for_keywords(conn, seeds, scope_key)
     if not seed_docs:
         return []
     # Directory of each seed doc -> aggregated seed relevance.
-    dir_weight: Dict[str, float] = {}
-    for doc, weight in seed_docs.items():
+    # ``scope`` here is the indexed scope root; ``parent`` is the doc's
+    # filesystem parent *inside* that scope. We key on the tuple so two
+    # scopes cannot silently share a `parent`.
+    dir_weight: Dict[tuple, float] = {}
+    seed_doc_keys = set(seed_docs.keys())
+    for (scope, doc), weight in seed_docs.items():
         parent = str(Path(doc).parent)
-        dir_weight[parent] = dir_weight.get(parent, 0.0) + weight
+        dir_weight[(scope, parent)] = dir_weight.get((scope, parent), 0.0) + weight
     if not dir_weight:
         return []
 
@@ -263,23 +325,31 @@ def _related_dir(
         where = " WHERE directory = ?"
         params.append(scope_key)
     rows = conn.execute(
-        f"SELECT DISTINCT doc_path FROM keyword_docs{where}",
+        f"SELECT DISTINCT directory, doc_path FROM keyword_docs{where}",
         params,
     ).fetchall()
 
     results: List[Related] = []
     for row in rows:
+        scope = row["directory"]
         doc = row["doc_path"]
         parent = str(Path(doc).parent)
-        weight = dir_weight.get(parent)
+        weight = dir_weight.get((scope, parent))
         if weight is None:
             continue
-        if doc in seed_docs:
+        if (scope, doc) in seed_doc_keys:
             continue  # skip the seed docs themselves
         results.append(
-            Related(doc_path=doc, score=weight, mode="dir", reason=f"dir:{parent}", keywords=list(seeds))
+            Related(
+                doc_path=doc,
+                score=weight,
+                mode="dir",
+                reason=f"dir:{parent}",
+                keywords=list(seeds),
+                directory=scope,
+            )
         )
-    results.sort(key=lambda r: (-r.score, r.doc_path))
+    results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
     return results[:limit]
 
 
@@ -289,32 +359,38 @@ def _related_heading(
     limit: int,
     scope_key: Optional[str],
 ) -> List[Related]:
-    seed_docs = _docs_for_keywords(conn, seeds, scope_key)
+    # Track seed docs as (directory, doc_path) so identically-named files
+    # in different scopes are not conflated when the query spans multiple
+    # scopes (the default for mode=heading in the user-scoped model).
+    seed_docs = _scoped_docs_for_keywords(conn, seeds, scope_key)
     if not seed_docs:
         return []
-    seed_doc_set = set(seed_docs.keys())
+    seed_doc_set: set = set(seed_docs.keys())  # {(directory, doc_path), ...}
+    seed_directories = {directory for directory, _ in seed_doc_set}
 
-    # Heading paths present in the seed documents.
-    placeholders = ",".join("?" for _ in seed_doc_set)
-    params: List = list(seed_doc_set)
-    where = f"doc_path IN ({placeholders})"
-    if scope_key is not None:
-        where += " AND directory = ?"
-        params.append(scope_key)
+    # Heading paths present in the seed documents. Restrict the lookup to
+    # the *seed scopes* (a subset of the DB) so identically-named files in
+    # unrelated scopes cannot inject stray heading paths into the seed set.
+    seed_doc_paths = sorted({doc for _, doc in seed_doc_set})
+    doc_ph = ",".join("?" for _ in seed_doc_paths)
+    dir_ph = ",".join("?" for _ in seed_directories)
+    where = f"doc_path IN ({doc_ph}) AND directory IN ({dir_ph})"
+    params: List = [*seed_doc_paths, *sorted(seed_directories)]
     rows = conn.execute(
-        f"SELECT DISTINCT heading_path FROM heading_docs WHERE {where}",
+        f"SELECT DISTINCT directory, doc_path, heading_path FROM heading_docs WHERE {where}",
         params,
     ).fetchall()
     if not rows:
         return []
 
-    # Match on both the full serialised path (exact chapter reuse) and its
-    # leaf heading (cross-document section reuse, e.g. two files each having
-    # a "macOS" subsection under different parents). We assign the leaf
-    # signal a lower weight so exact chapter matches float to the top.
+    # Keep only heading rows attached to *actual* seed docs (the doc_path IN
+    # + directory IN filter above is a cross-product; discard the mismatched
+    # cells here so we do not pull heading paths from an unrelated scope).
     seed_full_paths: List[str] = []
     seed_leaves: List[str] = []
     for row in rows:
+        if (row["directory"], row["doc_path"]) not in seed_doc_set:
+            continue
         heading_path = row["heading_path"] or ""
         if not heading_path:
             continue
@@ -325,6 +401,10 @@ def _related_heading(
     if not seed_full_paths:
         return []
 
+    # Match on both the full serialised path (exact chapter reuse) and its
+    # leaf heading (cross-document section reuse, e.g. two files each having
+    # a "macOS" subsection under different parents). We assign the leaf
+    # signal a lower weight so exact chapter matches float to the top.
     where_parts: List[str] = []
     params = []
     if seed_full_paths:
@@ -332,8 +412,6 @@ def _related_heading(
         where_parts.append(f"heading_path IN ({ph})")
         params.extend(seed_full_paths)
     if seed_leaves:
-        # Match on the leaf using GLOB (case-sensitive) plus an OR path for
-        # the trivial single-segment case.
         ph = ",".join("?" for _ in seed_leaves)
         leaf_clause = (
             "heading_path IN (" + ph + ") OR "
@@ -347,17 +425,19 @@ def _related_heading(
         combined = f"({combined}) AND directory = ?"
         params.append(scope_key)
     rows = conn.execute(
-        f"SELECT heading_path, doc_path FROM heading_docs WHERE {combined}",
+        f"SELECT directory, heading_path, doc_path FROM heading_docs WHERE {combined}",
         params,
     ).fetchall()
 
     full_set = set(seed_full_paths)
     leaf_set = set(seed_leaves)
-    doc_score: Dict[str, float] = {}
-    doc_headings: Dict[str, set] = {}
+    # Score on (directory, doc_path) so an identically-named file in a
+    # different scope is a distinct result, not a merge.
+    doc_score: Dict[tuple, float] = {}
+    doc_headings: Dict[tuple, set] = {}
     for row in rows:
-        doc = row["doc_path"]
-        if doc in seed_doc_set:
+        key = (row["directory"], row["doc_path"])
+        if key in seed_doc_set:
             continue
         heading_path = row["heading_path"] or ""
         leaf = heading_path.rsplit(" > ", 1)[-1].strip()
@@ -368,8 +448,8 @@ def _related_heading(
             weight += 0.5
         if weight <= 0:
             continue
-        doc_score[doc] = doc_score.get(doc, 0.0) + weight
-        doc_headings.setdefault(doc, set()).add(heading_path)
+        doc_score[key] = doc_score.get(key, 0.0) + weight
+        doc_headings.setdefault(key, set()).add(heading_path)
 
     results = [
         Related(
@@ -377,11 +457,12 @@ def _related_heading(
             score=score,
             mode="heading",
             reason="shared-heading",
-            keywords=sorted(doc_headings.get(doc, set())),
+            keywords=sorted(doc_headings.get((directory, doc), set())),
+            directory=directory,
         )
-        for doc, score in doc_score.items()
+        for (directory, doc), score in doc_score.items()
     ]
-    results.sort(key=lambda r: (-r.score, r.doc_path))
+    results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
     return results[:limit]
 
 
@@ -477,15 +558,17 @@ def related_graph_with_preview(
     alpha: float = DEFAULT_ALPHA,
     iters: int = DEFAULT_ITERS,
     cross_scope: bool = False,
-    preview: bool = True,
+    preview: bool = False,
 ) -> dict:
     """``mode=graph`` variant returning results plus cross-scope observability.
 
     Returns ``{"results": List[Related], "crossed_scopes_preview": dict|None}``.
-    The preview is only computed when ``preview`` is true and a ``directory``
-    scope is active; it is ``None`` otherwise. Used by the ``related --json``
-    CLI so a caller can see what ``--cross-scope`` would pull in before
-    committing to it.
+    The preview is **opt-in** (``preview=True``) because it runs a
+    full-graph PPR whose cost scales with *every other* scope in the shared
+    DB — undesirable as an implicit tax on ordinary scoped queries. It is
+    still ``None`` when no ``directory`` scope is active even if requested.
+    Used by ``related --preview --json`` so a caller can see what
+    ``--cross-scope`` would pull in before committing to it.
     """
     seeds = [s for s in (_fold(k) for k in keywords) if s]
     if not seeds:

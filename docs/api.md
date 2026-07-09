@@ -162,38 +162,48 @@ Deep-search also adds top-level `query`, `strategy`
 
 `--mode dir` and `--mode heading` return a **JSON array** of `Related`
 objects sorted by `score` descending; `--mode graph` returns a
-**JSON envelope** carrying the same `Related` array plus a
-`crossed_scopes_preview` observability field (see below).
+**JSON envelope** carrying the same `Related` array plus an opt-in
+`crossed_scopes_preview` observability field.
+
+`Related` objects always carry both `doc_path` (relative to the indexed
+scope) and `directory` (the resolved scope root the document was indexed
+under). `qualified_path` is the two joined together, filesystem-resolvable
+even when results span multiple scopes.
 
 ```jsonc
 // --mode dir | --mode heading
 [
   {
-    "doc_path": "uninstall.md",   // string — related document
-    "score": 1.596026,            // float — rounded to 6 dp
-    "mode": "graph",              // string — graph | dir | heading
-    "reason": "ppr",              // string — provenance tag
-    "keywords": ["brew","linux"]  // string[] — matched keywords/headings
+    "doc_path": "docs/install.md",         // string — relative to `directory`
+    "score": 1.596026,                     // float — rounded to 6 dp
+    "mode": "graph",                       // string — graph | dir | heading
+    "reason": "ppr",                       // string — provenance tag
+    "keywords": ["brew","linux"],          // string[] — matched keywords/headings
+    "directory": "/abs/path/to/project_a", // string|null — indexed scope root
+    "qualified_path": "/abs/path/to/project_a/docs/install.md"
   }
 ]
 
 // --mode graph
 {
   "results": [ /* Related[] as above */ ],
-  "crossed_scopes_preview": {
-    "would_add": 47,               // int — additional docs reachable if
-                                   //   --cross-scope were enabled
-    "top_other_scopes": [          // scopes contributing those docs
-      {"scope": "/abs/path/to/papers", "count": 32},
-      {"scope": "/abs/path/to/notes",  "count": 15}
-    ],
-    "top_bridge_keywords": [       // keywords bridging into other scopes
-      {"keyword": "attention", "cross_weight": 0.42},
-      {"keyword": "model",     "cross_weight": 0.31}
-    ]
-  }
-  // crossed_scopes_preview is `null` when --directory is omitted (the
-  // query already spans every scope) or when --no-preview is passed.
+  "crossed_scopes_preview": null           // null unless --preview was passed
+  //
+  // When --preview is passed together with -d, this becomes:
+  // {
+  //   "would_add": 47,               // additional docs reachable if
+  //                                  //   --cross-scope were enabled
+  //   "top_other_scopes": [          // scopes contributing those docs
+  //     {"scope": "/abs/path/to/papers", "count": 32},
+  //     {"scope": "/abs/path/to/notes",  "count": 15}
+  //   ],
+  //   "top_bridge_keywords": [       // keywords bridging into other scopes
+  //     {"keyword": "attention", "cross_weight": 0.42},
+  //     {"keyword": "model",     "cross_weight": 0.31}
+  //   ]
+  // }
+  // It stays null when --directory is omitted (query already spans every
+  // scope) or when --preview is not passed.
 }
 ```
 
@@ -208,13 +218,17 @@ Cross-scope flags (see SKILL.md "Storage model" for the philosophy):
 
 - `--cross-scope` (`--mode graph` only): seeds are validated against
   `--directory`, but PPR expansion and doc collection cross into every
-  other scope in the shared DB. Off by default.
+  other scope in the shared DB. Off by default. Results carry each
+  document's own `directory`, so identically-named files from different
+  scopes remain distinct.
 - `--same-scope` (`--mode heading` only): restrict heading matches to
   `--directory`. Off by default; heading mode is cross-scope by default
   because shared heading paths are structural filters that resist
   same-name-different-meaning noise.
-- `--no-preview` (`--mode graph` only): skip the
-  `crossed_scopes_preview` computation.
+- `--preview` (`--mode graph --json` only): also compute
+  `crossed_scopes_preview`. **Opt-in** because it runs a full-graph PPR
+  whose cost scales with every other scope in the shared DB — undesirable
+  as an implicit tax on ordinary scoped queries.
 
 **Precondition**: run `grga index build` first; otherwise the array is empty.
 

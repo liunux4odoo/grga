@@ -711,7 +711,7 @@ def related_command(
     directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to a previously indexed scope."),
     cross_scope: bool = typer.Option(False, "--cross-scope", help="mode=graph only: seed docs stay in --directory, PPR expansion crosses into every other scope."),
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
-    no_preview: bool = typer.Option(False, "--no-preview", help="mode=graph only: skip the crossed_scopes_preview metadata."),
+    preview: bool = typer.Option(False, "--preview", help="mode=graph --json only: also compute crossed_scopes_preview (runs a full-graph PPR; opt-in because its cost scales with other scopes)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List documents related to the given keywords via the L2 graph."""
@@ -730,6 +730,9 @@ def related_command(
     if same_scope and mode != "heading":
         typer.echo("--same-scope only applies to --mode heading", err=True)
         raise typer.Exit(2)
+    if preview and not (mode == "graph" and json_output):
+        typer.echo("--preview only applies to --mode graph with --json", err=True)
+        raise typer.Exit(2)
 
     if mode == "graph" and json_output:
         payload = related_graph_with_preview(
@@ -738,7 +741,7 @@ def related_command(
             db_path=str(db_path) if db_path else None,
             directory=str(directory) if directory else None,
             cross_scope=cross_scope,
-            preview=not no_preview,
+            preview=preview,
         )
         results = payload["results"]
         out = {

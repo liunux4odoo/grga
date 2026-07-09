@@ -53,14 +53,20 @@ Three levers control cross-corpus behaviour on `related`:
 
 Observability before you escalate:
 
-- `related --mode graph --json` always includes a
-  `crossed_scopes_preview` field with `would_add`, `top_other_scopes`,
-  and `top_bridge_keywords`. It answers "if I *did* open `--cross-scope`,
-  what would come in?" without paying the full cross-scope cost. `null`
-  when `-d` is not given.
+- `related --mode graph --preview --json` computes a `crossed_scopes_preview`
+  field (`would_add`, `top_other_scopes`, `top_bridge_keywords`) that
+  answers "if I *did* open `--cross-scope`, what would come in?". **Opt-in**
+  because the preview runs a full-graph PPR whose cost scales with every
+  other scope in the shared DB — you would not want that as a silent tax
+  on every ordinary scoped query. Pass it when the isolated result is thin
+  enough that escalating might be worth it.
 - `grga graph inspect <keyword>` reports `docs_by_scope`,
   `top_cooccurring_keywords`, and a `suspected_polysemy` heuristic. Use
   it on suspicious bridge keywords surfaced by the preview.
+
+Cross-scope results include a per-item `directory` field and a
+`qualified_path` (``<directory>/<doc_path>``) so identically-named files
+from different scopes remain distinct.
 
 ### When to enable --cross-scope (advanced)
 
@@ -68,10 +74,11 @@ Observability before you escalate:
 Recommended sequence:
 
 1. Run `search + expand + related` inside `-d` first (isolated mode).
-2. If the result is thin, read `crossed_scopes_preview` in the last
-   `related --mode graph --json` output. `would_add` tiny → nothing new.
-   `would_add` big **and** `top_bridge_keywords` full of generic words
-   (`model`, `agent`, `attention`) → likely polysemy noise.
+2. If the result is thin, re-run `related --mode graph --preview --json`
+   (preview is opt-in — this is where you pay for it). Read
+   `crossed_scopes_preview`: `would_add` tiny → nothing new. `would_add`
+   big **and** `top_bridge_keywords` full of generic words (`model`,
+   `agent`, `attention`) → likely polysemy noise.
 3. On promising bridge keywords, run `grga graph inspect <keyword>` and
    read `suspected_polysemy` / `polysemy_hint`.
 4. Only enable `--cross-scope` when (a) the preview shows real incremental
@@ -210,11 +217,18 @@ related(keywords: list[str], *, mode="graph"|"dir"|"heading",
         same_scope=False,    # heading only: stay inside --directory
 ) ->
   # dir | heading
-  [{doc_path, score, mode, reason, keywords[]}]
-  # graph
-  {results: [...], crossed_scopes_preview: {would_add, top_other_scopes,
-                                             top_bridge_keywords} | null}
+  [{doc_path, score, mode, reason, keywords[], directory, qualified_path}]
+  # graph (list variant, no preview)
+  [{doc_path, score, mode, reason, keywords[], directory, qualified_path}]
+  # graph via `related_graph_with_preview(..., preview=True)`
+  {results: [...],
+   crossed_scopes_preview: {would_add, top_other_scopes,
+                             top_bridge_keywords} | null}
 ```
+
+Every ``Related`` carries ``directory`` (the indexed scope root) and
+``qualified_path`` (``<directory>/<doc_path>``) so cross-scope results
+whose relative paths collide (e.g. two ``README.md``) remain distinct.
 
 Modes:
 

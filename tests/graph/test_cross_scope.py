@@ -153,6 +153,7 @@ def test_crossed_scopes_preview_reports_other_scope(two_scopes):
         db_path=two_scopes["db"],
         directory=two_scopes["a"],
         limit=20,
+        preview=True,
     )
     # Isolated results (default) do not include B ...
     assert "b1.md" not in {r.doc_path for r in payload["results"]}
@@ -164,6 +165,19 @@ def test_crossed_scopes_preview_reports_other_scope(two_scopes):
     assert str(two_scopes["b"]) in scopes
 
 
+def test_preview_off_by_default(two_scopes):
+    """Preview is opt-in: bare related_graph_with_preview does not pay for it."""
+    from grga.related import related_graph_with_preview
+
+    payload = related_graph_with_preview(
+        ["alpha"],
+        db_path=two_scopes["db"],
+        directory=two_scopes["a"],
+        limit=20,
+    )
+    assert payload["crossed_scopes_preview"] is None
+
+
 def test_preview_none_for_global_query(two_scopes):
     from grga.related import related_graph_with_preview
 
@@ -172,5 +186,104 @@ def test_preview_none_for_global_query(two_scopes):
         db_path=two_scopes["db"],
         directory=None,
         limit=20,
+        preview=True,
     )
     assert payload["crossed_scopes_preview"] is None
+
+
+@pytest.fixture
+def collision_scopes(monkeypatch, tmp_path):
+    """Two scopes that share identical relative filenames.
+
+    Both scope A and scope B contain ``README.md`` and ``docs/install.md``,
+    with distinct content. If cross-scope aggregation ever keys on the bare
+    ``doc_path`` string the results from A and B will silently merge (or
+    one will be dropped by an ``in seed_doc_set`` check).
+    """
+    monkeypatch.setenv("GRGA_SIDECAR_ROOT", str(tmp_path / "sidecars"))
+    a = tmp_path / "proj_a"
+    b = tmp_path / "proj_b"
+    (a / "docs").mkdir(parents=True)
+    (b / "docs").mkdir(parents=True)
+
+    (a / "README.md").write_text(
+        "# Project A\n\nalphaseed alphaseed pinkelephant pinkelephant.\n",
+        encoding="utf-8",
+    )
+    (a / "docs" / "install.md").write_text(
+        "# Install A\n\n## macOS\n\nalphaseed install content for A.\n",
+        encoding="utf-8",
+    )
+    (b / "README.md").write_text(
+        "# Project B\n\npinkelephant pinkelephant blueelephant blueelephant.\n",
+        encoding="utf-8",
+    )
+    (b / "docs" / "install.md").write_text(
+        "# Install B\n\n## macOS\n\nblueelephant install content for B.\n",
+        encoding="utf-8",
+    )
+
+    db = tmp_path / "shared.db"
+    build_graph_index(a, db_path=db, min_term_count=1)
+    build_graph_index(b, db_path=db, min_term_count=1)
+    return {"a": a, "b": b, "db": db}
+
+
+def test_graph_cross_scope_does_not_collide_on_same_relative_path(collision_scopes):
+    """Cross-scope graph results must expose (directory, doc_path) distinctly.
+
+    Seeding on ``alphaseed`` under scope A with --cross-scope should surface
+    the B-side README/install docs via the shared ``pinkelephant`` bridge.
+    Prior to the fix, both A/README.md and B/README.md keyed on the string
+    ``README.md`` and silently merged.
+    """
+    results = related(
+        ["alphaseed"],
+        mode="graph",
+        db_path=collision_scopes["db"],
+        directory=collision_scopes["a"],
+        cross_scope=True,
+        limit=20,
+    )
+    pairs = {(r.directory, r.doc_path) for r in results}
+    # Distinct scope tags survive the aggregation.
+    assert (str(collision_scopes["a"]), "README.md") in pairs
+    assert (str(collision_scopes["b"]), "README.md") in pairs
+    # A qualified_path is filesystem-resolvable and unique per scope.
+    qualified = {r.qualified_path for r in results}
+    assert len(qualified) == len(results)
+
+
+def test_heading_cross_scope_does_not_drop_same_named_result(collision_scopes):
+    """Heading cross-scope must not treat B/install.md as a seed-doc twin.
+
+    ``alphaseed`` lives in A/docs/install.md; both scopes' install.md carry
+    a ``... > macOS`` heading. B/docs/install.md must still surface as a
+    heading match — pre-fix, the ``if doc in seed_doc_set`` check keyed on
+    the string ``docs/install.md`` and dropped it.
+    """
+    results = related(
+        ["alphaseed"],
+        mode="heading",
+        db_path=collision_scopes["db"],
+        directory=collision_scopes["a"],  # heading is cross-scope by default
+        limit=20,
+    )
+    pairs = {(r.directory, r.doc_path) for r in results}
+    assert (str(collision_scopes["b"]), "docs/install.md") in pairs, pairs
+
+
+def test_related_to_dict_carries_directory(collision_scopes):
+    """JSON envelope items include directory / qualified_path fields."""
+    from grga.related import related_graph_with_preview
+
+    payload = related_graph_with_preview(
+        ["alphaseed"],
+        db_path=collision_scopes["db"],
+        directory=collision_scopes["a"],
+        cross_scope=True,
+    )
+    for item in payload["results"]:
+        d = item.to_dict()
+        assert "directory" in d and d["directory"]
+        assert "qualified_path" in d and d["qualified_path"].endswith(d["doc_path"])

@@ -49,12 +49,19 @@ All notable changes to `grga` are recorded here.
   matches to stay within `--directory` (the previous default).
 
 - **`crossed_scopes_preview` metadata on `related --mode graph --json`.**
-  Even with `--cross-scope` off, the graph JSON envelope now carries a
+  Opt-in via `--preview`: the graph JSON envelope then carries a
   `crossed_scopes_preview` object (`would_add`, `top_other_scopes`,
   `top_bridge_keywords`) so a caller can see what opening cross-scope would
-  pull in *before* committing to it. Disable with `--no-preview`. The graph
-  `--json` output is therefore now an envelope `{results, crossed_scopes_preview}`
-  rather than a bare array (`dir` / `heading` modes still return arrays).
+  pull in *before* committing to it. It is opt-in because the preview runs
+  a full-graph PPR whose cost scales with every other scope in the shared
+  DB. The graph `--json` output is now an envelope
+  `{results, crossed_scopes_preview}` rather than a bare array (`dir` /
+  `heading` modes still return arrays).
+
+- **`Related` objects now carry `directory` and `qualified_path`.** Every
+  related result records the indexed scope root it came from, so
+  cross-scope / global queries no longer conflate identically-named files
+  (`README.md`, `docs/install.md`) from different scopes.
 
 - **`grga graph inspect <keyword>` command.** Reports a keyword's
   `docs_by_scope` distribution, `top_cooccurring_keywords`, and a
