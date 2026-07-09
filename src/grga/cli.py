@@ -742,7 +742,7 @@ def related_command(
     directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to a previously indexed scope."),
     cross_scope: bool = typer.Option(False, "--cross-scope", help="mode=graph only: seed docs stay in --directory, PPR expansion crosses into every other scope."),
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
-    preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview (runs a full-graph PPR; opt-in because its cost scales with other scopes). With --json it is embedded in the envelope; without --json a compact summary is printed to stderr."),
+    preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview. Since v2.3 the preview shares the main query's PPR pass and costs at most one extra keyword_docs scan. With --json it is embedded in the envelope; without --json a compact summary is printed to stderr."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List documents related to the given keywords via the L2 graph."""

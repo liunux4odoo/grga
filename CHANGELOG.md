@@ -4,6 +4,48 @@ All notable changes to `grga` are recorded here.
 
 ## Unreleased
 
+### Performance
+
+- **`related --mode graph` is 2–5× faster across every corpus size.** Five
+  stacked optimisations (PERF plan §P0-1 through §P1-2), each with bench
+  data in its own commit:
+  - **P0-1** LRU cache of ``(edges, adjacency, indexed_graph)`` keyed on
+    ``(db_path, mtime, scope)`` (cap 8, mtime-invalidated by `index build`
+    / `suggest` / `promote`).
+  - **P0-2** Preview reuses the main PPR result — a single unrestricted
+    PPR now feeds both the scope-limited result list and the cross-scope
+    `crossed_scopes_preview` annotation. `--preview` no longer costs a
+    second full PPR.
+  - **P0-3** PPR internals: hoisted ``sum(neighbours.values())`` into an
+    ``out_degree`` map computed once per graph, and switched
+    ``seed_in_graph`` to a set for O(1) exclusion. Semantics pinned by a
+    reference-implementation diff test (score drift < 1e-9).
+  - **P1-1** `IndexedGraph` — integer-indexed adjacency (``list[list[(int,
+    float)]]``) with `personalized_pagerank_indexed`. The legacy dict API
+    now delegates. Eliminates the 2.33M `dict.get` calls that dominated
+    the profile.
+  - **P1-2** ``keyword_docs.keyword`` stored casefolded (schema v3, one-
+    shot migration bumps ``PRAGMA user_version`` 2→3, merging any
+    same-fold collisions in place). Every read path drops the non-
+    sargable ``LOWER(keyword)`` wrapper. The self-join in ``load_edges``
+    keeps a ``+column`` optimiser barrier so SQLite still joins on
+    ``(directory, doc_path)`` instead of range-scanning ``(directory,
+    keyword > ?)``.
+
+  Bench (600 docs / 3 scopes / 7414 keyword_docs rows, 5-call avg):
+
+  |               | v2.2 baseline | v2.3 target |
+  | ------------- | ------------- | ----------- |
+  | scoped        | 151 ms        | **42 ms**   |
+  | global        | 350 ms        | **94 ms**   |
+  | cross-scope   | 354 ms        | **72 ms**   |
+  | preview=True  | 527 ms (3.8×) | **96 ms**   |
+  | PPR own time (3 calls) | 1.83 s | **0.18 s** |
+
+  Numpy fallback is intentionally not shipped (PERF plan §P2-1); the pure-
+  Python indexed path lands well inside the 100 ms perception threshold
+  for personal-corpus graphs.
+
 ### Changed
 
 - **Storage model reframed as user-scoped.** grga's DB is a single per-user

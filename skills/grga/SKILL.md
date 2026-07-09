@@ -58,11 +58,10 @@ Observability before you escalate:
   answers "if I *did* open `--cross-scope`, what would come in?". Each
   `top_bridge_keywords` entry carries a `suspected_polysemy` flag (the same
   heuristic `grga graph inspect` applies), so the preview already tells you
-  whether a bridge word is ambient jargon. **Opt-in** because the preview
-  runs a full-graph PPR whose cost scales with every other scope in the
-  shared DB — you would not want that as a silent tax on every ordinary
-  scoped query. Pass it when the isolated result is thin enough that
-  escalating might be worth it.
+  whether a bridge word is ambient jargon. Since v2.3 the preview shares
+  the main query's PPR pass (no separate full-graph walk) so it costs at
+  most one extra `keyword_docs` scan on top of a regular scoped query —
+  cheap enough to pass routinely when the isolated result looks thin.
 - `grga graph inspect <keyword>` reports `docs_by_scope`,
   `top_cooccurring_keywords`, and a `suspected_polysemy` heuristic. Use it
   for a deeper drill-down (per-scope neighbours, the `polysemy_hint` text)
