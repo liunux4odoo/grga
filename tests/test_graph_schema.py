@@ -237,8 +237,82 @@ def test_schema_migration_v3_is_idempotent(tmp_path: Path):
         conn.close()
 
 
+def test_schema_migration_scope_merge_deterministic(tmp_path: Path):
+    """On collision, ``scope`` merge is deterministic and doesn't drop values.
+
+    Two v2 rows folding to the same ``(directory, keyword, doc_path)`` may
+    carry different ``scope`` values (unusual but possible if writers
+    ever diverge from the "``scope`` follows ``directory``" convention).
+    The merge picks a non-empty ``scope`` deterministically (lex-max on
+    ties) rather than silently keeping whichever row happened to be
+    iterated first. This test seeds a collision where the row with the
+    "smaller" scope comes first and asserts the merged row still carries
+    the lex-max non-empty value regardless of iteration order.
+    """
+    db = tmp_path / "v2_scope_merge.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE keyword_docs (
+            scope TEXT NOT NULL DEFAULT '',
+            directory TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            doc_path TEXT NOT NULL,
+            occurrence_count REAL NOT NULL DEFAULT 0,
+            first_line INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT,
+            PRIMARY KEY (directory, keyword, doc_path)
+        );
+        """
+    )
+    # Two rows folding to the same key with distinct scopes.
+    conn.executemany(
+        "INSERT INTO keyword_docs (scope, directory, keyword, doc_path, occurrence_count, first_line) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            # Empty scope first — must be replaced by the non-empty one.
+            ("",       "/d", "API", "spec.md", 4, 1),
+            ("scope-b", "/d", "api", "spec.md", 6, 3),
+        ],
+    )
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    conn = connect(db)
+    try:
+        ensure_schema(conn)
+        row = conn.execute(
+            "SELECT scope, occurrence_count FROM keyword_docs "
+            "WHERE directory='/d' AND keyword='api' AND doc_path='spec.md'"
+        ).fetchone()
+        assert row is not None
+        assert row["scope"] == "scope-b", (
+            f"non-empty scope should win the merge; got {row['scope']!r}"
+        )
+        assert row["occurrence_count"] == 10, (
+            f"occurrence_count should still be summed; got {row['occurrence_count']}"
+        )
+    finally:
+        conn.close()
+
+
 def test_schema_query_plan_uses_index_after_v3(tmp_path: Path):
-    """After v3, ``WHERE keyword IN (...)`` walks the index — not a full SCAN."""
+    """After v3, ``WHERE directory=? AND keyword IN (...)`` seeks the index.
+
+    v3's real speedup is that ``keyword_docs.keyword`` is stored casefolded
+    so read queries drop the non-sargable ``LOWER(keyword)`` wrapper. With
+    a ``directory`` predicate the query then seeks
+    ``idx_keyword_docs_kw (directory, keyword, ...)`` directly — the SQL
+    plan reports ``SEARCH ... USING INDEX``. This test pins that shape
+    (SEARCH, not SCAN, and mentions the ``idx_keyword_docs_kw`` index).
+
+    The *global* ``keyword IN (...)`` case (no ``directory`` filter) still
+    walks the whole autoindex because every index leads with ``directory``;
+    a dedicated ``(keyword, ...)`` index is deferred to PERF plan §P2-2.
+    We assert only the scoped case here to avoid false confidence about
+    the global lookup.
+    """
     db = tmp_path / "v3plan.db"
     conn = connect(db)
     try:
@@ -254,16 +328,31 @@ def test_schema_query_plan_uses_index_after_v3(tmp_path: Path):
             ],
         )
         conn.commit()
-        plan = conn.execute(
+
+        # Scoped query: must SEARCH using a composite index on
+        # ``(directory, keyword, ...)``. SQLite may pick either the
+        # explicit ``idx_keyword_docs_kw`` or the primary-key autoindex
+        # ``sqlite_autoindex_keyword_docs_1`` (both have the same leading
+        # columns and are equally selective for this query). The real
+        # signal we need is (a) SEARCH not SCAN and (b) the seek includes
+        # ``keyword=?``, not a range or a directory-only seek.
+        scoped = conn.execute(
             "EXPLAIN QUERY PLAN SELECT directory, doc_path FROM keyword_docs "
-            "WHERE keyword IN ('kw10','kw20','kw30')"
+            "WHERE directory = ? AND keyword IN ('kw10','kw20','kw30')",
+            ("/dir_0",),
         ).fetchall()
-        detail = " | ".join(row[-1] for row in plan)
-        # SQLite's plan text mentions the index name when the search uses it.
-        # The exact phrasing is version-dependent; both "USING INDEX" and
-        # "USING COVERING INDEX" are acceptable, but SCAN is not.
-        assert "SCAN" not in detail or "INDEX" in detail, (
-            f"planner still SCANs on keyword IN (...): {detail}"
+        scoped_detail = " | ".join(row[-1] for row in scoped)
+        assert "SEARCH" in scoped_detail, (
+            f"scoped keyword IN (...) must SEARCH, not SCAN: {scoped_detail}"
+        )
+        assert "keyword=?" in scoped_detail, (
+            f"scoped plan must seek on keyword (not just directory): "
+            f"{scoped_detail}"
+        )
+        # ``keyword>?`` or ``keyword<?`` would signal the P1-2 regression
+        # (planner range-scans on the keyword axis instead of seeking).
+        assert "keyword>?" not in scoped_detail and "keyword<?" not in scoped_detail, (
+            f"scoped plan must not range-scan keyword: {scoped_detail}"
         )
     finally:
         conn.close()

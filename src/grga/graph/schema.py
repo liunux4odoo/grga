@@ -206,6 +206,12 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 existing["first_line"] = first_line
             if updated_at and (existing["updated_at"] is None or updated_at > existing["updated_at"]):
                 existing["updated_at"] = updated_at
+            # ``scope`` normally follows ``directory`` so colliding rows
+            # agree, but don't rely on it: pick deterministically (prefer a
+            # non-empty value, then the lexicographically greatest) so the
+            # merge result never depends on row iteration order.
+            if scope and (not existing["scope"] or scope > existing["scope"]):
+                existing["scope"] = scope
         else:
             merged[key] = {
                 "occurrence_count": occ,

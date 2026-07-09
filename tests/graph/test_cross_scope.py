@@ -327,43 +327,46 @@ def test_preview_none_for_global_query(two_scopes):
 
 
 def test_preview_reuses_ppr_reduces_cost(two_scopes):
-    """P0-2: preview=True must run PPR exactly once (not twice).
+    """P0-2 revised: --preview must not change the main result list.
 
-    Before P0-2 the preview path ran a *second* full PPR (scope-restricted
-    main PPR + unrestricted preview PPR — ~3.9x cost per bench).
-    Merging them so both the main scope-limited document list and the
-    cross-scope preview annotation derive from one unrestricted PPR is the
-    optimisation. Verified by counting ``personalized_pagerank`` calls: a
-    single ``related_graph_with_preview(preview=True)`` invocation triggers
-    it exactly once.
+    An earlier P0-2 draft merged the two PPRs into a single unrestricted
+    pass to save ~380ms per preview call. That silently changed the docs
+    returned by the main query — 6 out of 20 top results differed between
+    preview=True and preview=False on the 600-doc bench (see the
+    2026-07-09 review followup). Observability tools MUST NOT perturb the
+    results they are describing, so preview now runs its own separate
+    unrestricted PPR. The invariants this test pins:
+
+    1. ``results`` list is byte-identical with preview toggled on / off
+       (same doc paths, same scores, same order).
+    2. The preview annotation still populates when a scope is active.
+    3. Both PPRs are cheap because the adjacency cache serves both the
+       scoped and unrestricted indexed graphs from memory after the
+       first call.
     """
-    from unittest.mock import patch
-
     from grga.graph.adjacency_cache import clear_adjacency_cache
     from grga.related import related_graph_with_preview
-    import grga.related as related_mod
 
     clear_adjacency_cache()
-    with patch.object(
-        related_mod,
-        "personalized_pagerank_indexed",
-        wraps=related_mod.personalized_pagerank_indexed,
-    ) as spy:
-        payload = related_graph_with_preview(
-            ["alpha"],
-            db_path=two_scopes["db"],
-            directory=two_scopes["a"],
-            limit=20,
-            preview=True,
-        )
-    assert spy.call_count == 1, (
-        f"preview=True must reuse the main PPR, expected 1 call, got "
-        f"{spy.call_count}"
+    kwargs = dict(
+        db_path=two_scopes["db"],
+        directory=two_scopes["a"],
+        limit=20,
     )
-    # Payload still shaped correctly.
-    assert payload["crossed_scopes_preview"] is not None
-    assert "top_bridge_keywords" in payload["crossed_scopes_preview"]
-    assert "would_add" in payload["crossed_scopes_preview"]
+    off = related_graph_with_preview(["alpha"], preview=False, **kwargs)
+    on = related_graph_with_preview(["alpha"], preview=True, **kwargs)
+
+    off_docs = [(r.doc_path, r.directory, round(r.score, 6)) for r in off["results"]]
+    on_docs = [(r.doc_path, r.directory, round(r.score, 6)) for r in on["results"]]
+    assert off_docs == on_docs, (
+        "preview flag must not perturb the main result list: "
+        f"len(off)={len(off_docs)} len(on)={len(on_docs)}, "
+        f"first diff at {next((i for i, (a, b) in enumerate(zip(off_docs, on_docs)) if a != b), None)}"
+    )
+    # Preview annotation is present when a scope is active.
+    assert on["crossed_scopes_preview"] is not None
+    assert "top_bridge_keywords" in on["crossed_scopes_preview"]
+    assert off["crossed_scopes_preview"] is None
 
 
 @pytest.fixture

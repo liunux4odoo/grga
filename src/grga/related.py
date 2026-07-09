@@ -240,22 +240,21 @@ def _related_graph_impl(
     *,
     cross_scope: bool = False,
     db_path: Optional[Path] = None,
-    _use_unrestricted_ppr: bool = False,
 ) -> Tuple[List[Related], Dict[str, float]]:
     """Run PPR + doc collection and return ``(results, kw_score)``.
 
-    Split out of :func:`_related_graph` so the preview path can reuse the
-    same PPR result for both the main scope-restricted document list *and*
-    the cross-scope bridge-keyword annotation, eliminating the second PPR
-    that previously cost ~380 ms per preview call (see PERF plan P0-2).
+    Split out of :func:`_related_graph` so callers that also need the
+    keyword-score dict (e.g. potential future observability code) can get
+    it without a second traversal. The primary caller,
+    :func:`_related_graph`, drops the second element.
 
-    Args:
-        _use_unrestricted_ppr: when True and ``scope_key`` is set, run PPR
-            on the whole graph (unrestricted) but still filter final docs
-            to ``scope_key``. Semantically equivalent to running a normal
-            scoped query and then a *separate* unrestricted PPR for the
-            preview, but at half the PPR cost. Used exclusively by
-            :func:`related_graph_with_preview(preview=True)`.
+    The ``kw_score`` we return here is always the **scope-restricted** one
+    — mixing it with cross-scope PPR results was tried once (P0-2 draft)
+    and abandoned because it silently changed which docs came back
+    whenever the caller passed ``--preview``. The preview annotation now
+    runs its own unrestricted PPR via
+    :func:`compute_crossed_scopes_preview` (whose adjacency is cached, so
+    the extra pass is cheap after the first call).
     """
     # In cross-scope mode the seeds must still originate from ``scope_key``
     # (we do not want a keyword that only lives in another corpus to
@@ -268,11 +267,6 @@ def _related_graph_impl(
             return [], {}
         edge_scope_key: Optional[str] = None
         doc_scope_key: Optional[str] = None
-    elif _use_unrestricted_ppr and scope_key is not None:
-        # Preview path: PPR spans whole graph so top_bridge_keywords is
-        # relevant across scopes; main document list stays scope-limited.
-        edge_scope_key = None
-        doc_scope_key = scope_key
     else:
         edge_scope_key = scope_key
         doc_scope_key = scope_key
@@ -545,11 +539,11 @@ def _preview_from_kw_score(
 ) -> dict:
     """Build a ``crossed_scopes_preview`` dict from an existing PPR ``kw_score``.
 
-    Extracted from :func:`compute_crossed_scopes_preview` so callers that
-    already ran a PPR (see :func:`_related_graph_impl` with
-    ``_use_unrestricted_ppr=True``) can reuse the same keyword rankings
-    instead of paying a second PPR — that's the P0-2 halving of preview
-    cost (see ``PERF_optimization_plan.md``).
+    Extracted from :func:`compute_crossed_scopes_preview` so the SQL /
+    aggregation / polysemy-annotation stage is shared and independently
+    testable. ``kw_score`` is expected to come from an *unrestricted* PPR
+    (the preview is about cross-scope reach), which
+    :func:`compute_crossed_scopes_preview` computes.
 
     ``scope_key`` MUST be a real scope string (never ``None``); the caller
     is responsible for the "no scope filter → no preview" short-circuit.
@@ -642,12 +636,13 @@ def compute_crossed_scopes_preview(
           "top_bridge_keywords": [{"keyword": str, "cross_weight": float}, ...],
         }
 
-    Standalone entry point: runs its own unrestricted PPR and then delegates
-    the SQL/aggregation to :func:`_preview_from_kw_score`. Callers going
-    through :func:`related_graph_with_preview` avoid the second PPR — the
-    main scope-limited query is already run with
-    ``_use_unrestricted_ppr=True`` and its ``kw_score`` is passed directly
-    to :func:`_preview_from_kw_score`.
+    Runs an unrestricted PPR (over the whole graph) and delegates the
+    SQL / aggregation / polysemy-annotation stage to
+    :func:`_preview_from_kw_score`. Called by
+    :func:`related_graph_with_preview` when ``preview=True``, and safe to
+    call standalone by external code. The adjacency is fetched through
+    :mod:`grga.graph.adjacency_cache` so the extra PPR is cheap after the
+    first call within a session.
     """
     if scope_key is None:
         return None
@@ -703,36 +698,27 @@ def related_graph_with_preview(
     conn = connect(target_db)
     try:
         ensure_schema(conn)
-        # When preview is requested and a scope is active, run *one*
-        # unrestricted PPR whose ``kw_score`` feeds both the main
-        # scope-limited document list and the cross-scope preview
-        # annotation. Prior to P0-2 the preview path ran a separate second
-        # PPR at ~380 ms extra per call.
-        wants_shared_ppr = preview and scope_key is not None and not cross_scope
-        results, kw_score = _related_graph_impl(
+        # Main result list ALWAYS uses the scope-restricted PPR so callers
+        # get identical results with or without ``preview``. Prior to the
+        # 2026-07-09 review-followup this branch used
+        # ``_use_unrestricted_ppr=True`` and re-scored the in-scope docs
+        # with cross-scope keyword weights — silently changing ~30% of the
+        # top-20 depending on the preview flag. That broke the observability
+        # contract (``--preview`` must not perturb the results it's
+        # describing). Now the preview annotation runs its own unrestricted
+        # PPR via the standalone ``compute_crossed_scopes_preview`` (its
+        # adjacency is cached by :mod:`grga.graph.adjacency_cache`, so the
+        # second PPR is cheap after the first call).
+        results, _ = _related_graph_impl(
             conn, seeds, limit, scope_key, alpha, iters,
             cross_scope=cross_scope, db_path=target_db,
-            _use_unrestricted_ppr=wants_shared_ppr,
         )
         crossed_preview = None
-        if preview:
-            if scope_key is None:
-                # Nothing to preview: query already spans every scope.
-                crossed_preview = None
-            elif wants_shared_ppr:
-                crossed_preview = _preview_from_kw_score(
-                    conn, kw_score, scope_key
-                )
-            else:
-                # cross_scope=True path: main PPR was already unrestricted
-                # so its kw_score is usable for preview too, but the main
-                # results are cross-scope by definition, so "would_add" is
-                # not a meaningful escalation signal — fall back to the
-                # legacy standalone preview call for a stable payload.
-                crossed_preview = compute_crossed_scopes_preview(
-                    conn, seeds, limit, scope_key, alpha, iters,
-                    db_path=target_db,
-                )
+        if preview and scope_key is not None:
+            crossed_preview = compute_crossed_scopes_preview(
+                conn, seeds, limit, scope_key, alpha, iters,
+                db_path=target_db,
+            )
         return {"results": results, "crossed_scopes_preview": crossed_preview}
     finally:
         conn.close()
