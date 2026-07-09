@@ -702,6 +702,37 @@ def suggest_command(
     typer.echo(f"tokens: {suggestion.tokens_used} ({suggestion.model})", err=True)
 
 
+def _echo_preview_summary(preview: Optional[dict]) -> None:
+    """Render a compact ``crossed_scopes_preview`` summary to stderr.
+
+    Used on the human-readable ``related --mode graph --preview`` path (no
+    ``--json``) so the preview signal is surfaced instead of silently
+    discarded. ``None`` (no scope filter active) prints a short note.
+    """
+    if preview is None:
+        typer.echo(
+            "# preview: no --directory scope active, query already spans "
+            "every scope (nothing to cross into)",
+            err=True,
+        )
+        return
+    would_add = preview.get("would_add", 0)
+    scope_count = len(preview.get("top_other_scopes", []))
+    typer.echo(
+        f"# preview: --cross-scope would add {would_add} docs across "
+        f"{scope_count} other scope(s)",
+        err=True,
+    )
+    bridges = preview.get("top_bridge_keywords", [])
+    if bridges:
+        rendered = ", ".join(
+            f"{b['keyword']} (polysemy?)" if b.get("suspected_polysemy")
+            else b["keyword"]
+            for b in bridges
+        )
+        typer.echo(f"# top bridge keywords: {rendered}", err=True)
+
+
 @app.command("related")
 def related_command(
     keywords: List[str] = typer.Argument(..., help="Seed keywords."),
@@ -730,11 +761,11 @@ def related_command(
     if same_scope and mode != "heading":
         typer.echo("--same-scope only applies to --mode heading", err=True)
         raise typer.Exit(2)
-    if preview and not (mode == "graph" and json_output):
-        typer.echo("--preview only applies to --mode graph with --json", err=True)
+    if preview and mode != "graph":
+        typer.echo("--preview only applies to --mode graph", err=True)
         raise typer.Exit(2)
 
-    if mode == "graph" and json_output:
+    if mode == "graph" and (json_output or preview):
         payload = related_graph_with_preview(
             seeds,
             limit=limit,
@@ -744,11 +775,20 @@ def related_command(
             preview=preview,
         )
         results = payload["results"]
-        out = {
-            "results": [r.to_dict() for r in results],
-            "crossed_scopes_preview": payload["crossed_scopes_preview"],
-        }
-        typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
+        if json_output:
+            out = {
+                "results": [r.to_dict() for r in results],
+                "crossed_scopes_preview": payload["crossed_scopes_preview"],
+            }
+            typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
+            return
+        # Human-readable + --preview: render results, then a one-line
+        # preview summary to stderr so the signal is not silently dropped.
+        for item in results:
+            kw = ("  <- " + ", ".join(item.keywords)) if item.keywords else ""
+            typer.echo(f"{item.score:.4f}  {item.doc_path}{kw}")
+        _echo_preview_summary(payload["crossed_scopes_preview"])
+        typer.echo(f"{len(results)} related documents ({mode})", err=True)
         return
 
     results = related_docs(
