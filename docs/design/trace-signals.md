@@ -128,6 +128,25 @@ grga 是被 N 个 caller 共用的公共基础设施，往它上面加负担的�
 - 保留 `chunk:` / `scope:` / `sym:` 等前缀**作为未来扩展词汇表**，v1 实现里
   不允许出现。任何 caller 若观察到未列前缀应视为 grga 侧 bug 或未来版本。
 
+**已知 v1 限制（cross-scope 节点冲突）**：
+
+`file:` / `head:` 的 id 主体是**相对 scope 根**的路径，因此隐含假设"一次
+trace 只覆盖单一 scope"。在 `related --mode graph --cross-scope`（默认关闭
+的 escalation）下，结果集可能同时含有多个 scope 里**相对路径相同**的文档
+（如两个 `README.md`）。它们会塌缩成同一个 `file:` 节点 id，导致：
+
+- 同一 `file:` 节点出现多条 `score_node`（违反 §5.1"每节点一条"的隐含
+  假设）；
+- 来自不同 scope 的 `traverse_edge(kw→file)` 融合到同一目标节点。
+
+注意这**只影响 trace 层的节点身份**；搜索结果本身（`Related.qualified_path`）
+已正确按 `(directory, doc_path)` 去冲突，不受影响。消费者若要跨 scope 可视化
+或去重，应在采集时避免 `--cross-scope`，或把 cross-scope trace 视为近似。
+
+彻底修复需要一个**可移植的 scope 身份方案**（不能用绝对路径，否则 trace 不
+再跨机器确定）。该方案是 MINOR bump（见 §10 的 `meta.scope` 占位），**待真实
+caller 证据触发**再定，不在 v1 预判。
+
 ---
 
 ## 4. 动作类型（v1 冻结）
@@ -240,6 +259,11 @@ grga 是被 N 个 caller 共用的公共基础设施，往它上面加负担的�
 ## 10. 未来预留（v1 明确不做）
 
 - 上收任何 §4 的"未来扩展词汇表"到实现层——**需要证据触发**
+- `meta.scope`（planned, MINOR bump）：给 `traverse_edge` / `score_node`
+  的 meta 加一个**可移植**的 scope 身份 token，解决 §3"已知 v1 限制"里
+  cross-scope 下 `file:` / `head:` 节点身份塌缩的问题。token 具体形式
+  （scope 别名 / 稳定哈希 / basename）**待 caller 侧派生代码笨拙的证据**
+  再定，不预判。占位在此，实现里不允许出现。
 - `parent_trace_id` / `handoff`：跨 caller 交接
 - 代码符号节点 `sym:` 与 tree-sitter 集成
 - 实时流式 emit（SSE / stream）
