@@ -4,6 +4,35 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-10 · L2 co-occurrence graph: hub handling + df metadata interface
+
+**Plan step**: L2 关键字共现图扩展的邻居质量改进,以及为 caller 提供 hub
+判定能力(候选新增 `graph nodes` 接口暴露 per-scope df)。
+
+**Decision**: **不在共现关系图 + 单一 ranking 框架内继续救 hub;不做 df 元
+数据接口**。V5_npmi 在非 hub seed 上的 caller-first 结果(top-5 Useful%
+均值 87.5%)可作为独立改进考虑进入主干,与本次 hub 决策解耦。
+
+**Rationale**: 四轮实验(V0/V1-3 行窗口, V4 章节窗口, V5_npmi 归一化) +
+α 手工推演(6 seed × 3 caller archetype)提供分类性证据:
+
+1. 共现关系图 + 单一 ranking 结构性无法救 hub —— 四种变量组合(raw / DF
+   剪枝 / 章节窗口 / npmi)都让 hub 邻居退化为高频虚词或独占叙述词
+2. df 元数据接口 α 推演净收益仅 7.7%,且在 domain 词场景下 -2000 token
+   负收益 —— df 单维度**结构性无法区分** hub(主角)vs domain(语域词)
+3. 甜蜜点场景(极端 hub / rare seed)caller 用现有工具就能识别,不需要新
+   接口
+
+**Impact**: 详细复盘、决策路径、数学证据、拒绝的候选方案、重启前置条件全部
+沉淀在 `docs/design/graph-l2-postmortem-2026-07-10.md`。未来重启此话题前必
+读该文档 §7。
+
+**Files**:
+- `docs/design/graph-l2-postmortem-2026-07-10.md`(本决策的完整复盘)
+- `experiments/cooccur_2026_07_10*/`(三轮实验目录,accept 全过)
+
+---
+
 ## 2026-07-09 · `--prefer-system` CLI coverage
 
 **Plan step**: `PLAN-0.2.0-followup.md` Task 3 lists `search / deep-search

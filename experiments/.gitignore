@@ -1,0 +1,4 @@
+# Experiment artifacts — ignore heavy caches and bytecode
+data/
+__pycache__/
+*.pyc
