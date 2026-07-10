@@ -127,11 +127,14 @@ The **only** verb that calls an LLM; never runs autonomously. Intents:
 run `grga index promote` to graduate them into the permanent graph.
 
 Use when: search returns too few / low-quality results, or the query is
-intrinsically vague. **Never** the first verb.
+intrinsically vague. **Never** the first verb. See
+`## Stuck signals & escalation` for the concrete signals that should
+trigger `suggest`, and for the relaxed guardrails that apply in
+cold-start / testing contexts.
 
 ### Supporting commands (offline / infra)
 
-- `grga index build -s <scope> --db <path> --json` — index a scope's `keyword_docs` / `heading_docs` into the shared graph. Prerequisite for `related`.
+- `grga index build -s <scope> --db <path> --json` — index a scope's `keyword_docs` / `heading_docs` into the shared graph. Prerequisite for `related`. **Also valid inline** during a stuck-signal escalation — see `## Stuck signals & escalation`; do not treat "offline / infra" as "must be pre-built before the session."
 - `grga index promote --threshold N --db <path> [--dry-run] --json` — merge high-vote pairs from `llm_extension_votes` into `keyword_pairs`. Idempotent.
 - `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope`, `top_cooccurring_keywords`, and `suspected_polysemy`.
 
@@ -178,10 +181,135 @@ Guardrail across tiers: **always re-probe an LLM-reformulated query
 before searching it** — it is unvalidated and can be either empty or
 explosive.
 
+### Stuck signals & escalation
+
+The tier ladder above describes the *happy path*. What follows is the
+dual — *how to recognise you are stuck, and which tier to escalate to*.
+This section exists because the most common failure of the reflection
+loop is not "wrong tier for the task" but "stayed on the current tier
+too long, cycling through minor query variants."
+
+**None of the thresholds below are hard rules.** They are starting
+suggestions. Tighten them on small / familiar corpora where mistakes
+should trigger fast; loosen them on large / unfamiliar corpora where a
+few misfires are expected before the shape of the terminology settles.
+The caller is expected to self-calibrate.
+
+#### Stuck signals
+
+Four signals that suggest the current tier is exhausted. Watch for them
+while inside T0/T1; when one fires, follow the escalation table below.
+
+- **Vocabulary-mismatch signal** — consecutive `probe` calls return
+  `total_lines == 0`.
+  - Suggested range: **2–4 consecutive zero-hits** before treating the
+    whole term family as wrong.
+  - Low end (~2): small corpus / familiar domain, fail fast.
+  - High end (~4): large or unfamiliar corpus, allow a few misses first.
+
+- **Literal-fixation signal** — the same underlying concept has been
+  tried in several literal wordings, all failing.
+  - Suggested range: **3–6 wordings** for the same concept before
+    concluding the concept is not expressed literally at all.
+  - Symptom: you notice yourself producing minor variants (`八位` → `八名`
+    → `八 X`) rather than genuinely new phrasings.
+
+- **Wandering signal** — many probes inside the *same family* without
+  the signal converging (neither reaching a workable count nor hitting
+  a hard zero).
+  - Suggested range: **≥ 5 same-family probes with no convergence
+    trend**. "Convergence" means `total_lines` is monotonically moving
+    toward a workable range (say tens–hundreds), or you have hit an
+    informative zero.
+  - Symptom: `total_lines` is bouncing around without directional signal.
+
+- **Hit-paradox signal** — a `search` returns either far too few
+  (near-zero hits) or far too many *but all irrelevant* (noise).
+  - No numeric threshold — this is a **qualitative** call, read from
+    `line_ratio`, `heading_path`, `occurrence_index`, and a quick
+    scan of `matches[i].text`.
+  - Symptom: hits cluster in an unrelated section of the corpus, or
+    `heading_path` is uniformly wrong.
+
+**Self-calibration rule of thumb**: on a task that must terminate quickly
+or on a corpus you already understand, pull all ranges toward the low
+end. On an exploratory task or an unknown corpus, allow the high end.
+When in doubt, err toward escalating **earlier** rather than later —
+a wasted T2/T3 call costs less than five wasted T0/T1 variants.
+
+**When multiple signals fire together**: the escalation table below is
+first-choice, not exclusive. If vocabulary-mismatch and literal-fixation
+fire simultaneously (a common combo — you tried several literal wordings
+and they all zero-hit), prefer the **cheaper** action first (T2
+`related` before T3 `suggest`). Escalate to the more expensive tier only
+if the cheaper one also fails to unblock.
+
+#### Escalation table (signal → preferred next tier)
+
+| Signal | First choice | Rationale |
+|---|---|---|
+| Vocabulary-mismatch | **T2 `related`** (build index inline if absent) | The corpus uses a term you have not guessed yet. Structural neighbours (co-occurrence graph) route around the vocabulary you got wrong. |
+| Literal-fixation | **T3 `suggest --intent reformulate`** | You are stuck in a literal spelling of the concept. The LLM's job is precisely to break the literal frame. |
+| Wandering | **T3 `suggest --intent expand`** | The keyword space is under-expanded; more probing inside the same family will not help. |
+| Hit-paradox | **T3 `suggest --intent rerank`** | Hits exist but the ordering is wrong; ask the LLM to re-rank the already-fetched matches. |
+
+If T2 `related` requires an index that is not yet built, **build it
+inline** — see the next subsection. Do not treat a missing index as a
+reason to skip T2.
+
+#### `index build` is part of the reflection path, not just infra
+
+`grga index build -s <scope> --db <path> --json` is documented in the
+"Supporting commands (offline / infra)" section because it is offline
+work, but that framing under-sells its role. **When a stuck signal points
+to T2 and the corpus is not yet indexed, building the index inline is
+the correct next action** — typically < 60s on a small-to-medium corpus,
+often faster than one more round of T0/T1 variants. Do not read "offline
+/ infra" as "prerequisite the caller must have handled before the
+session" — read it as "one-off cost, amortised across every subsequent
+T2 call in the session."
+
+Concrete pattern when T2 is chosen but the index is absent:
+
+```bash
+grga index build -s <dir> --db <path> --json      # < 60s typical
+grga related <seed> --mode graph --db <path> --json
+```
+
+#### `suggest` guardrails: production vs. exploration
+
+The `suggest` verb section above ("never the first verb", "capped at 1–2
+escalations per task") is written for the **production caller context**
+— a real end-user query on a well-understood corpus where LLM cost and
+graph-vote pollution both matter.
+
+In two other contexts the guardrails should relax:
+
+- **Cold-start on an unfamiliar corpus.** You do not yet know the
+  corpus's terminology; a `suggest --intent expand` early in the session
+  is legitimate and often cheaper than five wrong-terminology probes.
+- **Skill / workflow testing, exploratory analysis.** You are
+  deliberately exercising the loop; `suggest` is what you are here to
+  test. Pass `--no-votes` to prevent test queries from polluting
+  `llm_extension_votes`.
+
+The 1–2-escalation cap still applies **per user task**, not per session
+in exploratory contexts.
+
 ## Caller anti-patterns
 
-Two mental-model traps that defeat the reflection loop even when every verb
-behaves correctly.
+Mental-model traps that defeat the reflection loop even when every verb
+behaves correctly. The first is a *query-design* trap; the rest are all
+variants of the same *tool-substitution* trap — reaching for a low-level
+primitive (`grep`, `sqlite3`, `cp`, `find`, …) mid-workflow instead of
+staying inside the skill's public verbs.
+
+**Meta-rule for the tool-substitution family** (rules 2–4 below):
+whenever you feel the urge to drop out of grga into a lower-level tool,
+name the specific grga verb you are bypassing and why it is genuinely
+insufficient. If you cannot name one, the urge is muscle-memory, not
+necessity. Dropping out silently gives up the skill's stability
+guarantees, position metadata, and partition semantics.
 
 ### Do not pre-disambiguate identity questions
 
@@ -217,6 +345,58 @@ head` "just to look at raw text" silently collapses the reflection loop:
 
 Rule of thumb: **`grep` for a one-shot recon when you know you will not
 iterate. `grga` for anything you plan to refine, expand, or navigate.**
+
+### Do not open the shared DB with `sqlite3`
+
+`~/.config/grga/deep_keywords.db` is grga's **internal storage**, not a
+caller-facing interface. Reaching for `sqlite3 <db>` — even for a
+harmless-looking `.tables` or `SELECT DISTINCT scope FROM keyword_docs` —
+couples your workflow to a schema that is free to change between grga
+releases (columns get renamed, tables get split, indices get replaced).
+
+Two failure modes it hides:
+
+- **Wrong verb was chosen.** If your task does not use `related`, the
+  L2 graph is irrelevant; peeking at the DB is pure ceremony. Ask
+  *"does this task actually need the co-occurrence graph?"* first. If
+  no, you never needed to look at the DB at all.
+- **Right question, wrong tool.** If you *do* need to know a keyword's
+  scope distribution, top co-occurring keywords, or polysemy signal,
+  the stable public verb is `grga graph inspect <keyword> --db <path>
+  --json`. Its output is contract; the underlying SQL is not.
+
+Legitimate exceptions (few and explicit): you are actively developing
+grga itself, or debugging a suspected corruption / migration bug after
+`grga graph inspect` has already returned inconsistent output. General
+"let me just peek at what's in there" curiosity does not qualify.
+
+### Do not copy source data to a "clean" path
+
+`grga -d <dir>` accepts **any** directory. Non-ASCII paths, full-width
+punctuation, spaces, colons in filenames — quote the argument once
+(`-d "/path/with 全角标点：foo.txt"`) and grga (via `rga`) handles them
+fine. Copying a source file into `/tmp/clean/` "to make life easier"
+looks harmless but has three real costs:
+
+- **Disk redundancy** — you now maintain two copies of the same content.
+- **Silent staleness** — the copy diverges when the original is edited,
+  and nothing warns you.
+- **Broken partition keys for the L2 graph.** The `directory` column in
+  `keyword_docs` / `heading_docs` is a **partition key**. If you later
+  run `grga index build -s /tmp/clean --db ...`, the index is bound to
+  a path that vanishes on the next `/tmp` sweep — orphan rows that
+  cannot be found through the original directory. Even if you skip
+  indexing this session, the copy pattern trains a habit that *will*
+  poison the graph eventually.
+
+If a directory contains noise you actually need to exclude, do it at
+query time: `-g '*needle*'` (glob filter, passed through to rga),
+`--type <lang>`, or a narrower `-d` subpath. Do not copy.
+
+Legitimate exceptions: the source is on read-only or network-latency
+media that genuinely slows queries, or you need a frozen snapshot for
+reproducibility that survives edits to the original. Both should be
+named explicitly, not defaulted to.
 
 ## Typical composition patterns
 
