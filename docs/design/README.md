@@ -9,7 +9,7 @@
 | [`v2-design.md`](./v2-design.md) | **设计规范**（North Star） | 想理解"为什么这样设计" / 决策依据 / API 契约 |
 | [`v2-plan.md`](./v2-plan.md) | **开发计划**（可执行） | 想知道"现在做什么" / 任务分解 / 风险防护 |
 | [`decisions.md`](./decisions.md) | **决策日志** | 想知道具体功能/接口的决策依据（含拒绝的候选） |
-| [`graph-l2-postmortem-2026-07-10.md`](./graph-l2-postmortem-2026-07-10.md) | **L2 hub 处理复盘**（2026-07-10） | 想改共现图 hub / df 接口前必读;避免重复失败路径 |
+| [`graph-l2-postmortem-2026-07-10.md`](./graph-l2-postmortem-2026-07-10.md) | **L2 hub 处理复盘 + 三个心智模型** | 想改共现图 hub / df 接口 / 加评价性字段前必读;含"能力诚实 vs 道德选择"reframe |
 
 ## 🎯 快速上手（Code Agent 阅读顺序）
 
