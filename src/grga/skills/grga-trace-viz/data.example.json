@@ -1,0 +1,363 @@
+{
+  "session_version": "1.0",
+  "title": "grga 搜索会话可视化 · 凡人·草原元婴悖论",
+  "subtitle": "\"凡人·草原资源匮乏为何能出多位元婴后期\" · 34 步 · 13 家族",
+  "family_order": [
+    "sqlite3-detour",
+    "cp-detour",
+    "setup",
+    "草原",
+    "草原+八",
+    "慕兰",
+    "慕兰+八",
+    "法士",
+    "慕兰+大法士",
+    "探路",
+    "字面数字",
+    "神师",
+    "三大部落"
+  ],
+  "family_colors": {
+    "sqlite3-detour": "#c0392b",
+    "cp-detour": "#c0392b",
+    "setup": "#7f8c8d",
+    "草原": "#3498db",
+    "草原+八": "#5dade2",
+    "慕兰": "#16a085",
+    "慕兰+八": "#48c9b0",
+    "法士": "#f39c12",
+    "慕兰+大法士": "#27ae60",
+    "探路": "#95a5a6",
+    "字面数字": "#e67e22",
+    "神师": "#8e44ad",
+    "三大部落": "#d35400"
+  },
+  "kind_markers": {
+    "prep": "○",
+    "antipattern": "✗",
+    "probe": "◇",
+    "search": "◆",
+    "expand": "▶",
+    "synthesize": "★"
+  },
+  "kind_labels": {
+    "prep": "准备",
+    "antipattern": "反模式岔路",
+    "probe": "probe (探)",
+    "search": "search (取)",
+    "expand": "expand (展)",
+    "synthesize": "综合"
+  },
+  "steps": [
+    {
+      "step": 1,
+      "family": "setup",
+      "kind": "prep",
+      "cmd": "read SKILL.md",
+      "signal": null,
+      "decision": "读 skill 文档",
+      "insight": "熟悉 probe/search/expand/related/suggest 五动词"
+    },
+    {
+      "step": 2,
+      "family": "sqlite3-detour",
+      "kind": "antipattern",
+      "cmd": "sqlite3 <db> .tables",
+      "signal": "6 tables",
+      "decision": "❌ 想看 L2 图有没有建过",
+      "insight": "skill 有 grga graph inspect 稳定接口；且本次不走 related 根本不需要 L2 图"
+    },
+    {
+      "step": 3,
+      "family": "sqlite3-detour",
+      "kind": "antipattern",
+      "cmd": "SELECT scope FROM keyword_docs",
+      "signal": "empty",
+      "decision": "❌ 直查图内容",
+      "insight": "schema 是内部实现会漂；应走 graph inspect 公开接口"
+    },
+    {
+      "step": 4,
+      "family": "setup",
+      "kind": "prep",
+      "cmd": "find -iname *凡人*",
+      "signal": "3 files",
+      "decision": "定位原书",
+      "insight": "22MB txt 找到"
+    },
+    {
+      "step": 5,
+      "family": "cp-detour",
+      "kind": "antipattern",
+      "cmd": "cp <origin> /tmp/fanren/",
+      "signal": "22MB",
+      "decision": "❌ 复制到 /tmp 换'干净路径'",
+      "insight": "grga -d 吃任意 Unicode 路径；复制→副本漂移+L2 分区键指向易失路径"
+    },
+    {
+      "step": 6,
+      "family": "草原",
+      "kind": "probe",
+      "cmd": "probe '草原 元婴'",
+      "signal": 913,
+      "decision": "太宽，加词收紧",
+      "insight": "913 行说明命中散布全书"
+    },
+    {
+      "step": 7,
+      "family": "草原",
+      "kind": "probe",
+      "cmd": "probe '草原 元婴后期'",
+      "signal": 178,
+      "decision": "降到可处理规模",
+      "insight": "仍偏宽，继续尝试"
+    },
+    {
+      "step": 8,
+      "family": "草原+八",
+      "kind": "probe",
+      "cmd": "probe '草原 八位 元婴'",
+      "signal": 0,
+      "decision": "猜'8'字面失败",
+      "insight": "书里没'八位元婴'这种字面表述"
+    },
+    {
+      "step": 9,
+      "family": "草原+八",
+      "kind": "probe",
+      "cmd": "probe '草原 八 元婴后期'",
+      "signal": 0,
+      "decision": "继续试字面",
+      "insight": "验证'8'确实不是字面词"
+    },
+    {
+      "step": 10,
+      "family": "草原+八",
+      "kind": "probe",
+      "cmd": "probe '草原 八名'",
+      "signal": 0,
+      "decision": "字面'8'路线放弃",
+      "insight": "→ 转向找相关证据"
+    },
+    {
+      "step": 11,
+      "family": "草原",
+      "kind": "probe",
+      "cmd": "probe '草原人'",
+      "signal": 0,
+      "decision": "术语校准",
+      "insight": "书里叫'慕兰人'不叫'草原人'——关键术语转向"
+    },
+    {
+      "step": 12,
+      "family": "草原",
+      "kind": "probe",
+      "cmd": "probe '草原 元婴期'",
+      "signal": 147,
+      "decision": "回到最有希望的组合",
+      "insight": "proceed to search"
+    },
+    {
+      "step": 13,
+      "family": "草原",
+      "kind": "search",
+      "cmd": "search '草原 元婴期'",
+      "signal": "14 hits",
+      "decision": "读命中",
+      "insight": "L32811+ 出现'慕兰草原'、'慕兰人'——核心实体：慕兰"
+    },
+    {
+      "step": 14,
+      "family": "慕兰",
+      "kind": "probe",
+      "cmd": "probe '慕兰 元婴'",
+      "signal": 2111,
+      "decision": "太宽",
+      "insight": "证实这是主流叙事线"
+    },
+    {
+      "step": 15,
+      "family": "慕兰+八",
+      "kind": "probe",
+      "cmd": "probe '慕兰 八位'",
+      "signal": 106,
+      "decision": "字面'8'再试",
+      "insight": "仍未直接命中"
+    },
+    {
+      "step": 16,
+      "family": "法士",
+      "kind": "probe",
+      "cmd": "probe '法士 元婴'",
+      "signal": 2613,
+      "decision": "太宽",
+      "insight": "法士=慕兰修士统称"
+    },
+    {
+      "step": 17,
+      "family": "慕兰+八",
+      "kind": "probe",
+      "cmd": "probe '慕兰 八名'",
+      "signal": 30,
+      "decision": "可处理",
+      "insight": "上升到有意义规模"
+    },
+    {
+      "step": 18,
+      "family": "慕兰+大法士",
+      "kind": "probe",
+      "cmd": "probe '慕兰 大法士'",
+      "signal": 46,
+      "decision": "探高阶概念",
+      "insight": "'大法士'可能对应元婴层级"
+    },
+    {
+      "step": 19,
+      "family": "慕兰+大法士",
+      "kind": "probe",
+      "cmd": "probe '大法士 元婴'",
+      "signal": 0,
+      "decision": "术语交集空",
+      "insight": "'大法士'与'元婴'不同套体系"
+    },
+    {
+      "step": 20,
+      "family": "慕兰+八",
+      "kind": "search",
+      "cmd": "search '慕兰 八名'",
+      "signal": "14 hits",
+      "decision": "读命中",
+      "insight": "L33306 '一行七八名元婴修士'——是天南的，不是慕兰的"
+    },
+    {
+      "step": 21,
+      "family": "慕兰+大法士",
+      "kind": "search",
+      "cmd": "search '慕兰 大法士'",
+      "signal": "🎯 7 hits",
+      "decision": "命中黄金段",
+      "insight": "L35573-35574：忘语借人物之口正面回答此问题——资源'相对'匮乏、稀有材料却丰富"
+    },
+    {
+      "step": 22,
+      "family": "慕兰+大法士",
+      "kind": "expand",
+      "cmd": "expand :35573 chapter",
+      "signal": "降级",
+      "decision": "chapter → paragraph",
+      "insight": "非 md 文件无 chapter 结构"
+    },
+    {
+      "step": 23,
+      "family": "慕兰+大法士",
+      "kind": "expand",
+      "cmd": "expand :35573 paragraph",
+      "signal": "5000 字",
+      "decision": "取到完整赌战会议章节",
+      "insight": "第 758 章上下文全展开"
+    },
+    {
+      "step": 24,
+      "family": "慕兰",
+      "kind": "probe",
+      "cmd": "probe '慕兰人 元婴'",
+      "signal": 799,
+      "decision": "侧面验证",
+      "insight": "高频常见"
+    },
+    {
+      "step": 25,
+      "family": "法士",
+      "kind": "probe",
+      "cmd": "probe '法士 后期'",
+      "signal": 176,
+      "decision": "探等级",
+      "insight": ""
+    },
+    {
+      "step": 26,
+      "family": "探路",
+      "kind": "probe",
+      "cmd": "probe '圣祖/圣族/圣女'",
+      "signal": "920/165/294",
+      "decision": "猜其他体系",
+      "insight": "'圣祖'高频但不是慕兰（是大晋阴罗宗）——概念错位"
+    },
+    {
+      "step": 27,
+      "family": "字面数字",
+      "kind": "search",
+      "cmd": "search '八名元婴'",
+      "signal": "21 hits",
+      "decision": "读上下文",
+      "insight": "L34064 '慕兰人中的神师'——发现新实体"
+    },
+    {
+      "step": 28,
+      "family": "神师",
+      "kind": "probe",
+      "cmd": "probe '神师'",
+      "signal": 96,
+      "decision": "锁定实体",
+      "insight": "神师=慕兰元婴后期修士的专名"
+    },
+    {
+      "step": 29,
+      "family": "神师",
+      "kind": "probe",
+      "cmd": "probe '慕兰/十/八位神师'",
+      "signal": "38/0/0",
+      "decision": "确认命名",
+      "insight": "'X神师'是排位而非固定数量"
+    },
+    {
+      "step": 30,
+      "family": "神师",
+      "kind": "search",
+      "cmd": "search '神师' full",
+      "signal": "488 hits",
+      "decision": "提取命名",
+      "insight": "仲神师/祝神师/田锺=第四神师"
+    },
+    {
+      "step": 31,
+      "family": "三大部落",
+      "kind": "search",
+      "cmd": "search '三大部落'",
+      "signal": "7 hits",
+      "decision": "结构证据",
+      "insight": "L34542：三大部落 + 神秘帝国黑袍人外援"
+    },
+    {
+      "step": 32,
+      "family": "三大部落",
+      "kind": "search",
+      "cmd": "search '大部落'",
+      "signal": "53 hits",
+      "decision": "历史追溯",
+      "insight": "L28411：第二和第四大部落增援→法士数量倍增"
+    },
+    {
+      "step": 33,
+      "family": "神师",
+      "kind": "probe",
+      "cmd": "probe 第一~十神师",
+      "signal": "only 第四=7",
+      "decision": "数字上限未定",
+      "insight": "用户问的'8'在文本里没有精确出处"
+    },
+    {
+      "step": 34,
+      "family": "神师",
+      "kind": "synthesize",
+      "cmd": "合成答案",
+      "signal": "answer",
+      "decision": "证据链闭合",
+      "insight": "稀有材料 + 传承之宝(圣禽) + 神秘帝国外援 + 大部落数量 → 撑起多个元婴后期"
+    }
+  ],
+  "summary": {
+    "stats_html": "<span class=\"stat\">总步数 34</span>\n<span class=\"stat\">家族 13</span>\n<span class=\"stat\">probe 20</span>\n<span class=\"stat\">search 8</span>\n<span class=\"stat\">expand 2</span>\n<span class=\"stat bad\">反模式 3</span>\n<span class=\"stat gold\">黄金 1</span>\n<span class=\"stat good\">综合 1</span>",
+    "path_features_html": "<ul>\n  <li><b>字面'8'岔路</b>（step 8-10, 15, 17）— 反复试字面耗掉 5 步，直到 step 20 明确证伪</li>\n  <li><b>术语校准转向</b>（step 11 → 13）— \"草原人\"零命中转\"慕兰\"，最关键的语义 pivot</li>\n  <li><b>黄金段命中</b>（step 21）— 46 行 probe 直接命中作者原文自答</li>\n  <li><b>新实体发现</b>（step 27）— 从字面\"八名元婴\"命中里意外捞出\"神师\"</li>\n  <li><b>结构证据补强</b>（step 31-32）— 命中\"三大部落\"宏观结构</li>\n</ul>"
+  }
+}
