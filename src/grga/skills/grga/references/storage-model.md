@@ -57,7 +57,11 @@ grga index build -s ~/code    --db ~/.config/grga/deep_keywords.db --json
 - `grga graph inspect <keyword>` reports `docs_by_scope`,
   `top_cooccurring_keywords`, and a `suspected_polysemy` heuristic. Use it
   for a deeper drill-down (per-scope neighbours, the `polysemy_hint` text)
-  when the preview's `suspected_polysemy` flag alone is not enough.
+  when the preview's `suspected_polysemy` flag alone is not enough. When
+  the keyword was never indexed (`total_docs == 0`), the response omits
+  the polysemy fields and returns an `index_hint` instead — key off which
+  field is present to tell "indexed but single-meaning" from "never
+  indexed".
 
 Cross-scope results include a per-item `directory` field and a
 `qualified_path` (``<directory>/<doc_path>``) so identically-named files

@@ -1112,7 +1112,13 @@ def graph_inspect_command(
         for entry in report["top_cooccurring_keywords"]:
             scopes = ", ".join(entry["shared_scopes"])
             typer.echo(f"  {entry['weight']:8.3f}  {entry['keyword']}  [{scopes}]")
-    if report["suspected_polysemy"]:
+    # The not-indexed branch (§1.5.1 naming ironclad) publishes an
+    # ``index_hint`` instead of ``polysemy_hint`` and drops
+    # ``suspected_polysemy`` altogether — use ``.get`` so the CLI stays
+    # branch-agnostic and never KeyErrors on the missing polysemy fields.
+    if report.get("index_hint"):
+        typer.echo(f"index_hint: {report['index_hint']}", err=True)
+    if report.get("suspected_polysemy"):
         typer.echo(f"suspected_polysemy: {report['polysemy_hint']}", err=True)
 
 

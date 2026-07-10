@@ -93,7 +93,12 @@ def test_unknown_keyword_returns_empty_report(polysemy_db):
     assert report["total_docs"] == 0
     assert report["docs_by_scope"] == {}
     assert report["top_cooccurring_keywords"] == []
-    assert report["suspected_polysemy"] is False
+    # The not-indexed branch omits ``suspected_polysemy`` / ``polysemy_hint``
+    # entirely (a term that never entered the graph cannot be polysemous;
+    # naming ironclad §1.5.1). The polysemy verdict must be inferred from
+    # field *absence*, not from a ``False`` sentinel.
+    assert "suspected_polysemy" not in report
+    assert "polysemy_hint" not in report
 
 
 def test_inspect_missing_keyword_gives_hint(polysemy_db):
@@ -103,10 +108,18 @@ def test_inspect_missing_keyword_gives_hint(polysemy_db):
     heading / structured terms), not that the corpus text lacks it. The
     hint must be non-empty and point the caller at full-text search /
     (re)indexing.
+
+    Under the P2.1 naming split, the hint lives on ``index_hint`` (a
+    factual name for an indexing-layer condition) rather than
+    ``polysemy_hint`` (a meaning-collision signal). ``polysemy_hint``
+    must not appear on the not-indexed response at all.
     """
     report = inspect_keyword("attention-not-indexed-xyz", db_path=polysemy_db["db"])
     assert report["total_docs"] == 0
-    hint = report["polysemy_hint"]
+    assert "polysemy_hint" not in report, (
+        "not-indexed responses must not carry a polysemy_hint field"
+    )
+    hint = report["index_hint"]
     assert hint, "empty-result hint must be actionable, not blank"
     assert "grga search" in hint
     assert "attention-not-indexed-xyz" in hint

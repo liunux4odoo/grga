@@ -16,6 +16,7 @@ returns a list of :class:`Related` records sorted by ``score`` desc.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -508,6 +509,20 @@ def _related_graph_impl(
     # Key on (directory, doc_path): the same relative path can exist in
     # several scopes when the query spans more than one, so collapsing on
     # doc_path alone would merge unrelated documents.
+    #
+    # Per-keyword contribution is ``ppr_score * log1p(occurrence_count)``.
+    # The ``log1p`` damping is a deliberate fix for the "PPR collapse" bug
+    # (plan-2026-07-11 P0): with a raw linear ``occurrence_count`` a single
+    # document that repeats one low-PPR stopword thousands of times (e.g.
+    # ``if`` × 980 inside ``cytoscape.min.js``) drowns out every genuinely
+    # related document. The seed ``qwenpaw`` produced clean PPR *keywords*
+    # (grga / tools / install / rga / docs) yet a noise-file top result,
+    # because the linear product amplified frequency, not relevance.
+    # ``log1p`` keeps the monotonic "more occurrences ⇒ higher weight"
+    # signal while compressing the runaway tail; it is a pure mathematical
+    # normalisation (no corpus-specific stopword list, no file-type filter),
+    # so it holds across both the code-repo and Chinese-novel scenarios in
+    # the plan's cross-scenario matrix.
     doc_score: Dict[tuple, float] = {}
     doc_keywords: Dict[tuple, set] = {}
     for row in rows:
@@ -516,7 +531,7 @@ def _related_graph_impl(
         if weight <= 0:
             continue
         key = (row["directory"], row["doc_path"])
-        contribution = weight * float(row["occurrence_count"])
+        contribution = weight * math.log1p(float(row["occurrence_count"]))
         doc_score[key] = doc_score.get(key, 0.0) + contribution
         doc_keywords.setdefault(key, set()).add(kw)
 
@@ -762,7 +777,7 @@ def _preview_from_kw_score(
         if doc_key not in seen_docs:
             seen_docs.add(doc_key)
             scope_counts.setdefault(directory, set()).add(row["doc_path"])
-        bridge_weight[kw] = bridge_weight.get(kw, 0.0) + weight * float(row["occurrence_count"])
+        bridge_weight[kw] = bridge_weight.get(kw, 0.0) + weight * math.log1p(float(row["occurrence_count"]))
 
     top_scopes = sorted(
         ((scope, len(docs)) for scope, docs in scope_counts.items()),

@@ -75,6 +75,15 @@ def inspect_keyword(
           "suspected_polysemy": bool,
           "polysemy_hint": str,
         }
+
+    The not-indexed branch (``total_docs == 0``) instead returns an
+    ``index_hint`` field and **omits** ``polysemy_hint`` /
+    ``suspected_polysemy``: a keyword that never entered the graph cannot
+    be polysemous, and the naming ironclad (design §1.5) forbids putting
+    an index-layer message under a ``polysemy_*`` name. The two hints are
+    independent fields — ``polysemy_hint`` describes a cross-scope meaning
+    collision, ``index_hint`` describes an indexing gap — so a caller keys
+    off field *presence* to tell the two situations apart.
     """
     folded = _fold(keyword)
     from grga.deep_search import DEFAULT_DB_PATH
@@ -95,13 +104,20 @@ def _inspect(
     limit: int,
     cooccur_limit: int,
 ) -> dict:
+    # Not-indexed branch: return a dedicated ``index_hint`` and omit the
+    # polysemy fields entirely (a term that never entered the graph is
+    # by definition not polysemous, and re-purposing ``polysemy_hint`` for
+    # an indexing message violates the naming ironclad — see §1.5.1).
+    # ``suspected_polysemy`` is also omitted so callers key on field
+    # *presence* to distinguish the two branches; a stray ``False`` here
+    # was previously read by SKILL.md as "checked and cleared", which is
+    # not what "keyword never seen" means.
     empty = {
         "keyword": original,
         "total_docs": 0,
         "docs_by_scope": {},
         "top_cooccurring_keywords": [],
-        "suspected_polysemy": False,
-        "polysemy_hint": (
+        "index_hint": (
             f"'{original}' is not indexed in the graph. It may still appear "
             f"in the corpus text — try `grga search \"{original}\"` for "
             f"full-text hits, or `grga index build` to (re)index a scope."

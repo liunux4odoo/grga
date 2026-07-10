@@ -34,6 +34,7 @@ fields). Shape:
   "patterns": ["安装"],               // string[] — compiled rga patterns
   "directory": "/abs/path",           // string — resolved search root
   "truncated": false,                 // bool — true when --max-total capped the result set
+  "total_files_matched": 0,           // int — distinct file paths present in `matches`
   "implicit_notice": "…",             // string? — set when adjacency was treated as implicit AND
   "warning": "…",                     // string? — non-fatal notice
   "skipped_files": [ … ],             // any[]? — records rga could not read
@@ -65,6 +66,14 @@ fields). Shape:
 - `strict_cap=True` runs a lightweight `rga --count-matches` precheck and
   returns `{"ok": false, "error": "too_many_matches", "total_hits": …}`
   instead of returning a partial result.
+- `total_files_matched` is a descriptive shape counter: the number of
+  distinct file paths that appear in `matches`. Under `truncated: true`
+  it lets a caller tell "the cap fell on one giant file" (value `1`)
+  from "the cap spread across many files" (value `> 1`) without
+  re-running the search. It counts only files with visible matches — it
+  is **not** a full "files scanned in the corpus" total, which would
+  require a second rga pass under truncation. It is a plain integer, not
+  a verdict (design §1.5.1).
 - On the CLI: `--max-total N` (default `1000`; `0` disables), plus
   `--strict-cap` for the fail-fast variant. The per-file `--max-count / -n`
   still applies unchanged.
@@ -267,6 +276,27 @@ this *before* enabling `related --cross-scope` on the keyword.
 scope and flags cases where different corpora keep entirely different
 company around the term (the classic ML-`attention` vs psychology-`attention`
 pattern).
+
+**Not-indexed branch**: when the keyword never entered `keyword_docs`
+(``total_docs == 0``) the response replaces the polysemy fields with a
+dedicated ``index_hint``:
+
+```jsonc
+{
+  "keyword": "unseen-token",
+  "total_docs": 0,
+  "docs_by_scope": {},
+  "top_cooccurring_keywords": [],
+  "index_hint": "'unseen-token' is not indexed in the graph. It may still appear in the corpus text — try `grga search \"unseen-token\"` for full-text hits, or `grga index build` to (re)index a scope."
+}
+```
+
+``suspected_polysemy`` and ``polysemy_hint`` are **absent** on the
+not-indexed branch (a term that never entered the graph cannot be
+polysemous). Callers key on field *presence* to distinguish the two
+branches; the naming rule ``event → factual name`` (design §1.5.1) is
+why the indexing-layer message no longer lives under a ``polysemy_*``
+field.
 
 ---
 

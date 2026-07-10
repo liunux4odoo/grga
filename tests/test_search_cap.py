@@ -145,3 +145,77 @@ def test_strict_cap_returns_error_when_over_threshold(tmp_path: Path):
     assert payload["error"] == "too_many_matches"
     assert payload["total_hits"] >= 300
     assert payload["matches"] == []
+
+
+def test_total_files_matched_reflects_distinct_paths(tmp_path: Path):
+    """P2.2 shape field: caller can tell "cap on one file" from "cap across many".
+
+    Under ``truncated: true`` the response shape used to hide whether the
+    cap fell on one giant file or spread across many small ones. The new
+    ``total_files_matched`` top-level integer is that missing shape signal
+    — a pure descriptive count of distinct file paths that produced at
+    least one visible match. See design §7.3 / plan-2026-07-11 P2.2 for
+    the rationale.
+    """
+    _rga_or_skip()
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    c = tmp_path / "c.txt"
+    a.write_text("\n".join(f"line {i}: token" for i in range(50)), encoding="utf-8")
+    b.write_text("\n".join(f"line {i}: token" for i in range(50)), encoding="utf-8")
+    c.write_text("\n".join(f"line {i}: token" for i in range(50)), encoding="utf-8")
+
+    # Uncapped: every file surfaces at least once.
+    payload_full = json.loads(
+        search_directory(
+            str(tmp_path),
+            "token",
+            pattern_mode="auto",
+            before_context=0,
+            after_context=0,
+            max_total=None,
+            timeout=30,
+        )
+    )
+    assert payload_full["truncated"] is False
+    assert payload_full["total_files_matched"] == 3
+
+    # Capped at 5: could truncate before every file is reached — the exact
+    # value depends on rga's visit order, but must never exceed the number
+    # of distinct paths present in ``matches``.
+    payload_capped = json.loads(
+        search_directory(
+            str(tmp_path),
+            "token",
+            pattern_mode="auto",
+            before_context=0,
+            after_context=0,
+            max_total=5,
+            timeout=30,
+        )
+    )
+    assert payload_capped["truncated"] is True
+    distinct_in_slice = len({m["path"] for m in payload_capped["matches"] if m.get("path")})
+    assert payload_capped["total_files_matched"] == distinct_in_slice
+    assert 1 <= payload_capped["total_files_matched"] <= 3
+
+
+def test_total_files_matched_zero_on_empty_matches(tmp_path: Path):
+    """Boundary: no matches ⇒ ``total_files_matched == 0`` (not missing)."""
+    _rga_or_skip()
+    (tmp_path / "empty.txt").write_text("nothing relevant here\n", encoding="utf-8")
+    payload = json.loads(
+        search_directory(
+            str(tmp_path),
+            "no-such-token",
+            pattern_mode="auto",
+            before_context=0,
+            after_context=0,
+            max_total=None,
+            timeout=30,
+        )
+    )
+    assert payload["ok"] is True
+    assert payload["truncated"] is False
+    # Missing vs 0 matters — callers should not have to guess.
+    assert payload["total_files_matched"] == 0

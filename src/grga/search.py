@@ -236,6 +236,22 @@ def search_directory(
 
     matches = _apply_query_submatches(stream["matches"], query, case_sensitive)
     truncated = bool(stream.get("truncated"))
+    # Descriptive shape counter (design §7.3 / plan-2026-07-11 P2.2):
+    # under ``truncated: true`` the caller cannot tell "cap on one giant
+    # file" from "cap across many files" — the response looks identical.
+    # ``total_files_matched`` closes that gap without evaluating anything:
+    # it is a pure count of distinct file paths that produced at least
+    # one visible **real** match, cheap to derive from the already parsed
+    # events, and safe under §1.5.1 naming (an integer, not a verdict).
+    # ``is_context`` rows are excluded so the field name matches intent:
+    # context lines only surround real matches and always share their
+    # path anyway, but the explicit filter keeps the derivation readable.
+    # We stop short of a "files scanned but no hits" total because that
+    # would need a full second rga pass under truncation.
+    matched_paths = {
+        m["path"] for m in matches if m.get("path") and not m.get("is_context")
+    }
+    total_files_matched = len(matched_paths)
     _log_debug(debug, f"解析后的匹配数量: {len(matches)}，truncated={truncated}")
 
     returncode = stream.get("returncode", 0)
@@ -259,6 +275,7 @@ def search_directory(
                 "skipped_files": skipped,
                 "matches": matches,
                 "truncated": truncated,
+                "total_files_matched": total_files_matched,
             }
             if query.get("implicit_notice"):
                 response["implicit_notice"] = query["implicit_notice"]
@@ -280,6 +297,7 @@ def search_directory(
         "directory": str(target),
         "matches": matches,
         "truncated": truncated,
+        "total_files_matched": total_files_matched,
     }
     if query.get("implicit_notice"):
         response["implicit_notice"] = query["implicit_notice"]
