@@ -1,0 +1,212 @@
+{
+  "variant": "V3",
+  "config": {
+    "tokenizer": "jieba",
+    "stopword_source": "cn_stopwords",
+    "stopword_count": 746,
+    "df_adaptive": true,
+    "df_auto_drop_top_n": 30,
+    "top_k_per_line": 8,
+    "min_pair_count": 3,
+    "npmi_threshold": 0.3
+  },
+  "corpus_stats": {
+    "total_lines": 145061,
+    "effective_lines": 138806,
+    "unique_terms": 27370,
+    "total_edges": 8815,
+    "build_time_seconds": 8.83
+  },
+  "auto_dropped_terms": [
+    "韩立",
+    "没有",
+    "一下",
+    "说道",
+    "起来",
+    "一声",
+    "一个",
+    "修士",
+    "自然",
+    "道友",
+    "化为",
+    "老者",
+    "心中",
+    "一闪",
+    "而出",
+    "知道",
+    "出现",
+    "似乎",
+    "顿时",
+    "样子",
+    "无法",
+    "已经",
+    "事情",
+    "手中",
+    "神色",
+    "现在",
+    "一丝",
+    "之色",
+    "目光",
+    "身上"
+  ],
+  "queries": [
+    {
+      "seed": "墨大夫",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "李化元",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "夫妇",
+          "weight": 0.5602,
+          "rank": 1
+        },
+        {
+          "term": "师傅",
+          "weight": 0.4701,
+          "rank": 2
+        },
+        {
+          "term": "董萱",
+          "weight": 0.433,
+          "rank": 3
+        },
+        {
+          "term": "不安",
+          "weight": 0.3971,
+          "rank": 4
+        },
+        {
+          "term": "少妇",
+          "weight": 0.3695,
+          "rank": 5
+        },
+        {
+          "term": "住处",
+          "weight": 0.3319,
+          "rank": 6
+        }
+      ]
+    },
+    {
+      "seed": "极阴祖师",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "黄枫谷",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "筑基丹",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "曲魂",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "顾家",
+          "weight": 0.4141,
+          "rank": 1
+        },
+        {
+          "term": "御器",
+          "weight": 0.3924,
+          "rank": 2
+        },
+        {
+          "term": "身侧",
+          "weight": 0.3873,
+          "rank": 3
+        },
+        {
+          "term": "魁星",
+          "weight": 0.3828,
+          "rank": 4
+        },
+        {
+          "term": "神风",
+          "weight": 0.3758,
+          "rank": 5
+        },
+        {
+          "term": "黄芒",
+          "weight": 0.3257,
+          "rank": 6
+        },
+        {
+          "term": "客栈",
+          "weight": 0.3146,
+          "rank": 7
+        },
+        {
+          "term": "绿影",
+          "weight": 0.3093,
+          "rank": 8
+        },
+        {
+          "term": "孙二狗",
+          "weight": 0.309,
+          "rank": 9
+        },
+        {
+          "term": "金青",
+          "weight": 0.3074,
+          "rank": 10
+        },
+        {
+          "term": "躯体",
+          "weight": 0.3057,
+          "rank": 11
+        }
+      ]
+    },
+    {
+      "seed": "大衍神君",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "银月",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "忘情",
+          "weight": 0.5111,
+          "rank": 1
+        },
+        {
+          "term": "祖父",
+          "weight": 0.4699,
+          "rank": 2
+        },
+        {
+          "term": "主人",
+          "weight": 0.3633,
+          "rank": 3
+        },
+        {
+          "term": "嫣然一笑",
+          "weight": 0.3445,
+          "rank": 4
+        },
+        {
+          "term": "敖啸",
+          "weight": 0.3394,
+          "rank": 5
+        },
+        {
+          "term": "小妹",
+          "weight": 0.3081,
+          "rank": 6
+        }
+      ]
+    }
+  ]
+}

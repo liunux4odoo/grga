@@ -1,0 +1,50 @@
+[
+  {
+    "entity": "墨大夫",
+    "co_with_hanli": 337,
+    "df": 576,
+    "npmi": 0.093789,
+    "npmi_rank": 615,
+    "total_neighbors": 17759
+  },
+  {
+    "entity": "李化元",
+    "co_with_hanli": 113,
+    "df": 171,
+    "npmi": 0.096497,
+    "npmi_rank": 566,
+    "total_neighbors": 17759
+  },
+  {
+    "entity": "极阴祖师",
+    "co_with_hanli": 91,
+    "df": 306,
+    "npmi": -0.015254,
+    "npmi_rank": 12612,
+    "total_neighbors": 17759
+  },
+  {
+    "entity": "黄枫谷",
+    "co_with_hanli": 137,
+    "df": 301,
+    "npmi": 0.045323,
+    "npmi_rank": 4279,
+    "total_neighbors": 17759
+  },
+  {
+    "entity": "七玄门",
+    "co_with_hanli": 48,
+    "df": 157,
+    "npmi": -0.010557,
+    "npmi_rank": 12104,
+    "total_neighbors": 17759
+  },
+  {
+    "entity": "曲魂",
+    "co_with_hanli": 341,
+    "df": 549,
+    "npmi": 0.103924,
+    "npmi_rank": 208,
+    "total_neighbors": 17759
+  }
+]

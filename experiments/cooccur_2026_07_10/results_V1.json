@@ -1,0 +1,417 @@
+{
+  "variant": "V1",
+  "config": {
+    "tokenizer": "jieba",
+    "stopword_source": "cn_stopwords",
+    "stopword_count": 746,
+    "df_adaptive": false,
+    "df_auto_drop_top_n": null,
+    "top_k_per_line": null,
+    "min_pair_count": 2,
+    "npmi_threshold": null
+  },
+  "corpus_stats": {
+    "total_lines": 145061,
+    "effective_lines": 139070,
+    "unique_terms": 76784,
+    "total_edges": 2274259,
+    "build_time_seconds": 30.29
+  },
+  "auto_dropped_terms": [],
+  "queries": [
+    {
+      "seed": "墨大夫",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "李化元",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "韩立",
+          "weight": 110.0,
+          "rank": 1
+        },
+        {
+          "term": "说道",
+          "weight": 32.0,
+          "rank": 2
+        },
+        {
+          "term": "少妇",
+          "weight": 28.0,
+          "rank": 3
+        },
+        {
+          "term": "这位",
+          "weight": 26.0,
+          "rank": 4
+        },
+        {
+          "term": "师傅",
+          "weight": 22.0,
+          "rank": 5
+        },
+        {
+          "term": "弟子",
+          "weight": 22.0,
+          "rank": 6
+        },
+        {
+          "term": "修士",
+          "weight": 21.0,
+          "rank": 7
+        },
+        {
+          "term": "夫妇",
+          "weight": 18.0,
+          "rank": 8
+        },
+        {
+          "term": "样子",
+          "weight": 16.0,
+          "rank": 9
+        },
+        {
+          "term": "修炼",
+          "weight": 15.0,
+          "rank": 10
+        },
+        {
+          "term": "知道",
+          "weight": 15.0,
+          "rank": 11
+        },
+        {
+          "term": "起来",
+          "weight": 15.0,
+          "rank": 12
+        },
+        {
+          "term": "一下",
+          "weight": 14.0,
+          "rank": 13
+        },
+        {
+          "term": "突然",
+          "weight": 14.0,
+          "rank": 14
+        },
+        {
+          "term": "自然",
+          "weight": 14.0,
+          "rank": 15
+        },
+        {
+          "term": "事情",
+          "weight": 13.0,
+          "rank": 16
+        },
+        {
+          "term": "似乎",
+          "weight": 13.0,
+          "rank": 17
+        },
+        {
+          "term": "功法",
+          "weight": 13.0,
+          "rank": 18
+        },
+        {
+          "term": "徒弟",
+          "weight": 13.0,
+          "rank": 19
+        },
+        {
+          "term": "此事",
+          "weight": 13.0,
+          "rank": 20
+        }
+      ]
+    },
+    {
+      "seed": "极阴祖师",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "黄枫谷",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "韩立",
+          "weight": 4.0,
+          "rank": 1
+        },
+        {
+          "term": "筑基",
+          "weight": 3.0,
+          "rank": 2
+        },
+        {
+          "term": "修士",
+          "weight": 2.0,
+          "rank": 3
+        },
+        {
+          "term": "初期",
+          "weight": 2.0,
+          "rank": 4
+        },
+        {
+          "term": "前辈",
+          "weight": 2.0,
+          "rank": 5
+        },
+        {
+          "term": "恐怕",
+          "weight": 2.0,
+          "rank": 6
+        },
+        {
+          "term": "晚辈",
+          "weight": 2.0,
+          "rank": 7
+        },
+        {
+          "term": "没有",
+          "weight": 2.0,
+          "rank": 8
+        },
+        {
+          "term": "说道",
+          "weight": 2.0,
+          "rank": 9
+        },
+        {
+          "term": "这位",
+          "weight": 2.0,
+          "rank": 10
+        }
+      ]
+    },
+    {
+      "seed": "筑基丹",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "曲魂",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "韩立",
+          "weight": 312.0,
+          "rank": 1
+        },
+        {
+          "term": "没有",
+          "weight": 73.0,
+          "rank": 2
+        },
+        {
+          "term": "修士",
+          "weight": 67.0,
+          "rank": 3
+        },
+        {
+          "term": "说道",
+          "weight": 42.0,
+          "rank": 4
+        },
+        {
+          "term": "起来",
+          "weight": 31.0,
+          "rank": 5
+        },
+        {
+          "term": "身上",
+          "weight": 31.0,
+          "rank": 6
+        },
+        {
+          "term": "道友",
+          "weight": 30.0,
+          "rank": 7
+        },
+        {
+          "term": "一下",
+          "weight": 29.0,
+          "rank": 8
+        },
+        {
+          "term": "一个",
+          "weight": 29.0,
+          "rank": 9
+        },
+        {
+          "term": "知道",
+          "weight": 28.0,
+          "rank": 10
+        },
+        {
+          "term": "露出",
+          "weight": 27.0,
+          "rank": 11
+        },
+        {
+          "term": "之色",
+          "weight": 24.0,
+          "rank": 12
+        },
+        {
+          "term": "马上",
+          "weight": 24.0,
+          "rank": 13
+        },
+        {
+          "term": "一眼",
+          "weight": 23.0,
+          "rank": 14
+        },
+        {
+          "term": "法器",
+          "weight": 23.0,
+          "rank": 15
+        },
+        {
+          "term": "心里",
+          "weight": 22.0,
+          "rank": 16
+        },
+        {
+          "term": "附近",
+          "weight": 22.0,
+          "rank": 17
+        },
+        {
+          "term": "修为",
+          "weight": 21.0,
+          "rank": 18
+        },
+        {
+          "term": "之极",
+          "weight": 20.0,
+          "rank": 19
+        },
+        {
+          "term": "似乎",
+          "weight": 20.0,
+          "rank": 20
+        }
+      ]
+    },
+    {
+      "seed": "大衍神君",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "银月",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "韩立",
+          "weight": 103.0,
+          "rank": 1
+        },
+        {
+          "term": "说道",
+          "weight": 60.0,
+          "rank": 2
+        },
+        {
+          "term": "主人",
+          "weight": 47.0,
+          "rank": 3
+        },
+        {
+          "term": "没有",
+          "weight": 47.0,
+          "rank": 4
+        },
+        {
+          "term": "一声",
+          "weight": 30.0,
+          "rank": 5
+        },
+        {
+          "term": "起来",
+          "weight": 27.0,
+          "rank": 6
+        },
+        {
+          "term": "一下",
+          "weight": 26.0,
+          "rank": 7
+        },
+        {
+          "term": "韩兄",
+          "weight": 25.0,
+          "rank": 8
+        },
+        {
+          "term": "事情",
+          "weight": 21.0,
+          "rank": 9
+        },
+        {
+          "term": "知道",
+          "weight": 21.0,
+          "rank": 10
+        },
+        {
+          "term": "自然",
+          "weight": 21.0,
+          "rank": 11
+        },
+        {
+          "term": "现在",
+          "weight": 20.0,
+          "rank": 12
+        },
+        {
+          "term": "一个",
+          "weight": 19.0,
+          "rank": 13
+        },
+        {
+          "term": "无法",
+          "weight": 18.0,
+          "rank": 14
+        },
+        {
+          "term": "神通",
+          "weight": 18.0,
+          "rank": 15
+        },
+        {
+          "term": "一丝",
+          "weight": 16.0,
+          "rank": 16
+        },
+        {
+          "term": "之色",
+          "weight": 15.0,
+          "rank": 17
+        },
+        {
+          "term": "修士",
+          "weight": 15.0,
+          "rank": 18
+        },
+        {
+          "term": "轻笑",
+          "weight": 15.0,
+          "rank": 19
+        },
+        {
+          "term": "化为",
+          "weight": 14.0,
+          "rank": 20
+        }
+      ]
+    }
+  ]
+}

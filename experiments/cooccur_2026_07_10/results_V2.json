@@ -1,0 +1,428 @@
+{
+  "variant": "V2",
+  "config": {
+    "tokenizer": "jieba",
+    "stopword_source": "cn_stopwords",
+    "stopword_count": 746,
+    "df_adaptive": true,
+    "df_auto_drop_top_n": 30,
+    "top_k_per_line": null,
+    "min_pair_count": 2,
+    "npmi_threshold": null
+  },
+  "corpus_stats": {
+    "total_lines": 145061,
+    "effective_lines": 138806,
+    "unique_terms": 76754,
+    "total_edges": 2012337,
+    "build_time_seconds": 26.06
+  },
+  "auto_dropped_terms": [
+    "韩立",
+    "没有",
+    "一下",
+    "说道",
+    "起来",
+    "一声",
+    "一个",
+    "修士",
+    "自然",
+    "道友",
+    "化为",
+    "老者",
+    "心中",
+    "一闪",
+    "而出",
+    "知道",
+    "出现",
+    "似乎",
+    "顿时",
+    "样子",
+    "无法",
+    "已经",
+    "事情",
+    "手中",
+    "神色",
+    "现在",
+    "一丝",
+    "之色",
+    "目光",
+    "身上"
+  ],
+  "queries": [
+    {
+      "seed": "墨大夫",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "李化元",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "少妇",
+          "weight": 28.0,
+          "rank": 1
+        },
+        {
+          "term": "这位",
+          "weight": 26.0,
+          "rank": 2
+        },
+        {
+          "term": "师傅",
+          "weight": 22.0,
+          "rank": 3
+        },
+        {
+          "term": "弟子",
+          "weight": 22.0,
+          "rank": 4
+        },
+        {
+          "term": "夫妇",
+          "weight": 18.0,
+          "rank": 5
+        },
+        {
+          "term": "修炼",
+          "weight": 15.0,
+          "rank": 6
+        },
+        {
+          "term": "突然",
+          "weight": 14.0,
+          "rank": 7
+        },
+        {
+          "term": "功法",
+          "weight": 13.0,
+          "rank": 8
+        },
+        {
+          "term": "徒弟",
+          "weight": 13.0,
+          "rank": 9
+        },
+        {
+          "term": "此事",
+          "weight": 13.0,
+          "rank": 10
+        },
+        {
+          "term": "洞府",
+          "weight": 13.0,
+          "rank": 11
+        },
+        {
+          "term": "筑基",
+          "weight": 13.0,
+          "rank": 12
+        },
+        {
+          "term": "师姐",
+          "weight": 12.0,
+          "rank": 13
+        },
+        {
+          "term": "不会",
+          "weight": 11.0,
+          "rank": 14
+        },
+        {
+          "term": "那位",
+          "weight": 11.0,
+          "rank": 15
+        },
+        {
+          "term": "夫人",
+          "weight": 10.0,
+          "rank": 16
+        },
+        {
+          "term": "实在",
+          "weight": 10.0,
+          "rank": 17
+        },
+        {
+          "term": "师娘",
+          "weight": 10.0,
+          "rank": 18
+        },
+        {
+          "term": "一句",
+          "weight": 9.0,
+          "rank": 19
+        },
+        {
+          "term": "一眼",
+          "weight": 9.0,
+          "rank": 20
+        }
+      ]
+    },
+    {
+      "seed": "极阴祖师",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "黄枫谷",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "筑基",
+          "weight": 3.0,
+          "rank": 1
+        },
+        {
+          "term": "初期",
+          "weight": 2.0,
+          "rank": 2
+        },
+        {
+          "term": "前辈",
+          "weight": 2.0,
+          "rank": 3
+        },
+        {
+          "term": "恐怕",
+          "weight": 2.0,
+          "rank": 4
+        },
+        {
+          "term": "晚辈",
+          "weight": 2.0,
+          "rank": 5
+        },
+        {
+          "term": "这位",
+          "weight": 2.0,
+          "rank": 6
+        }
+      ]
+    },
+    {
+      "seed": "筑基丹",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "曲魂",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "露出",
+          "weight": 27.0,
+          "rank": 1
+        },
+        {
+          "term": "马上",
+          "weight": 24.0,
+          "rank": 2
+        },
+        {
+          "term": "一眼",
+          "weight": 23.0,
+          "rank": 3
+        },
+        {
+          "term": "法器",
+          "weight": 23.0,
+          "rank": 4
+        },
+        {
+          "term": "心里",
+          "weight": 22.0,
+          "rank": 5
+        },
+        {
+          "term": "附近",
+          "weight": 22.0,
+          "rank": 6
+        },
+        {
+          "term": "修为",
+          "weight": 21.0,
+          "rank": 7
+        },
+        {
+          "term": "之极",
+          "weight": 20.0,
+          "rank": 8
+        },
+        {
+          "term": "身后",
+          "weight": 20.0,
+          "rank": 9
+        },
+        {
+          "term": "不会",
+          "weight": 17.0,
+          "rank": 10
+        },
+        {
+          "term": "修炼",
+          "weight": 17.0,
+          "rank": 11
+        },
+        {
+          "term": "看到",
+          "weight": 17.0,
+          "rank": 12
+        },
+        {
+          "term": "结丹",
+          "weight": 16.0,
+          "rank": 13
+        },
+        {
+          "term": "这位",
+          "weight": 16.0,
+          "rank": 14
+        },
+        {
+          "term": "一道",
+          "weight": 15.0,
+          "rank": 15
+        },
+        {
+          "term": "两人",
+          "weight": 14.0,
+          "rank": 16
+        },
+        {
+          "term": "前辈",
+          "weight": 14.0,
+          "rank": 17
+        },
+        {
+          "term": "御器",
+          "weight": 14.0,
+          "rank": 18
+        },
+        {
+          "term": "洞府",
+          "weight": 14.0,
+          "rank": 19
+        },
+        {
+          "term": "神风",
+          "weight": 14.0,
+          "rank": 20
+        }
+      ]
+    },
+    {
+      "seed": "大衍神君",
+      "seed_in_graph": false,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "银月",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "主人",
+          "weight": 47.0,
+          "rank": 1
+        },
+        {
+          "term": "韩兄",
+          "weight": 25.0,
+          "rank": 2
+        },
+        {
+          "term": "神通",
+          "weight": 18.0,
+          "rank": 3
+        },
+        {
+          "term": "轻笑",
+          "weight": 15.0,
+          "rank": 4
+        },
+        {
+          "term": "不知",
+          "weight": 13.0,
+          "rank": 5
+        },
+        {
+          "term": "应该",
+          "weight": 13.0,
+          "rank": 6
+        },
+        {
+          "term": "狼族",
+          "weight": 13.0,
+          "rank": 7
+        },
+        {
+          "term": "问道",
+          "weight": 13.0,
+          "rank": 8
+        },
+        {
+          "term": "露出",
+          "weight": 13.0,
+          "rank": 9
+        },
+        {
+          "term": "敖啸",
+          "weight": 12.0,
+          "rank": 10
+        },
+        {
+          "term": "祖父",
+          "weight": 12.0,
+          "rank": 11
+        },
+        {
+          "term": "一见",
+          "weight": 11.0,
+          "rank": 12
+        },
+        {
+          "term": "一道",
+          "weight": 11.0,
+          "rank": 13
+        },
+        {
+          "term": "修炼",
+          "weight": 11.0,
+          "rank": 14
+        },
+        {
+          "term": "前辈",
+          "weight": 11.0,
+          "rank": 15
+        },
+        {
+          "term": "声音",
+          "weight": 11.0,
+          "rank": 16
+        },
+        {
+          "term": "女子",
+          "weight": 11.0,
+          "rank": 17
+        },
+        {
+          "term": "小婢",
+          "weight": 11.0,
+          "rank": 18
+        },
+        {
+          "term": "时间",
+          "weight": 11.0,
+          "rank": 19
+        },
+        {
+          "term": "这话",
+          "weight": 11.0,
+          "rank": 20
+        }
+      ]
+    }
+  ]
+}

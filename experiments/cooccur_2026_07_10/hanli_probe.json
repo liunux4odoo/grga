@@ -1,0 +1,332 @@
+{
+  "seed": "韩立",
+  "top_k": 30,
+  "variants": {
+    "V0": {
+      "in_graph": true,
+      "auto_dropped": false,
+      "neighbors": [
+        {
+          "rank": 1,
+          "term": "没有",
+          "weight": 5148.0
+        },
+        {
+          "rank": 2,
+          "term": "说道",
+          "weight": 3723.0
+        },
+        {
+          "rank": 3,
+          "term": "有些",
+          "weight": 3374.0
+        },
+        {
+          "rank": 4,
+          "term": "起来",
+          "weight": 3309.0
+        },
+        {
+          "rank": 5,
+          "term": "心中",
+          "weight": 3250.0
+        },
+        {
+          "rank": 6,
+          "term": "自然",
+          "weight": 2876.0
+        },
+        {
+          "rank": 7,
+          "term": "修士",
+          "weight": 2514.0
+        },
+        {
+          "rank": 8,
+          "term": "道友",
+          "weight": 2481.0
+        },
+        {
+          "rank": 9,
+          "term": "目光",
+          "weight": 2387.0
+        },
+        {
+          "rank": 10,
+          "term": "一声",
+          "weight": 2251.0
+        },
+        {
+          "rank": 11,
+          "term": "神色",
+          "weight": 2174.0
+        },
+        {
+          "rank": 12,
+          "term": "知道",
+          "weight": 1991.0
+        },
+        {
+          "rank": 13,
+          "term": "对方",
+          "weight": 1847.0
+        },
+        {
+          "rank": 14,
+          "term": "一丝",
+          "weight": 1795.0
+        },
+        {
+          "rank": 15,
+          "term": "一闪",
+          "weight": 1718.0
+        },
+        {
+          "rank": 16,
+          "term": "一眼",
+          "weight": 1716.0
+        },
+        {
+          "rank": 17,
+          "term": "出现",
+          "weight": 1712.0
+        },
+        {
+          "rank": 18,
+          "term": "脸上",
+          "weight": 1699.0
+        },
+        {
+          "rank": 19,
+          "term": "手中",
+          "weight": 1635.0
+        },
+        {
+          "rank": 20,
+          "term": "事情",
+          "weight": 1607.0
+        },
+        {
+          "rank": 21,
+          "term": "之色",
+          "weight": 1602.0
+        },
+        {
+          "rank": 22,
+          "term": "露出",
+          "weight": 1590.0
+        },
+        {
+          "rank": 23,
+          "term": "化为",
+          "weight": 1584.0
+        },
+        {
+          "rank": 24,
+          "term": "身上",
+          "weight": 1573.0
+        },
+        {
+          "rank": 25,
+          "term": "似乎",
+          "weight": 1536.0
+        },
+        {
+          "rank": 26,
+          "term": "出来",
+          "weight": 1536.0
+        },
+        {
+          "rank": 27,
+          "term": "老者",
+          "weight": 1469.0
+        },
+        {
+          "rank": 28,
+          "term": "样子",
+          "weight": 1382.0
+        },
+        {
+          "rank": 29,
+          "term": "而出",
+          "weight": 1331.0
+        },
+        {
+          "rank": 30,
+          "term": "顿时",
+          "weight": 1327.0
+        }
+      ],
+      "total_edges": 2594790
+    },
+    "V1": {
+      "in_graph": true,
+      "auto_dropped": false,
+      "neighbors": [
+        {
+          "rank": 1,
+          "term": "没有",
+          "weight": 5148.0
+        },
+        {
+          "rank": 2,
+          "term": "说道",
+          "weight": 3723.0
+        },
+        {
+          "rank": 3,
+          "term": "一下",
+          "weight": 3692.0
+        },
+        {
+          "rank": 4,
+          "term": "起来",
+          "weight": 3309.0
+        },
+        {
+          "rank": 5,
+          "term": "心中",
+          "weight": 3250.0
+        },
+        {
+          "rank": 6,
+          "term": "自然",
+          "weight": 2876.0
+        },
+        {
+          "rank": 7,
+          "term": "一个",
+          "weight": 2631.0
+        },
+        {
+          "rank": 8,
+          "term": "修士",
+          "weight": 2514.0
+        },
+        {
+          "rank": 9,
+          "term": "道友",
+          "weight": 2481.0
+        },
+        {
+          "rank": 10,
+          "term": "目光",
+          "weight": 2387.0
+        },
+        {
+          "rank": 11,
+          "term": "一声",
+          "weight": 2251.0
+        },
+        {
+          "rank": 12,
+          "term": "神色",
+          "weight": 2174.0
+        },
+        {
+          "rank": 13,
+          "term": "知道",
+          "weight": 1991.0
+        },
+        {
+          "rank": 14,
+          "term": "一丝",
+          "weight": 1795.0
+        },
+        {
+          "rank": 15,
+          "term": "一闪",
+          "weight": 1718.0
+        },
+        {
+          "rank": 16,
+          "term": "一眼",
+          "weight": 1716.0
+        },
+        {
+          "rank": 17,
+          "term": "出现",
+          "weight": 1712.0
+        },
+        {
+          "rank": 18,
+          "term": "脸上",
+          "weight": 1699.0
+        },
+        {
+          "rank": 19,
+          "term": "手中",
+          "weight": 1635.0
+        },
+        {
+          "rank": 20,
+          "term": "事情",
+          "weight": 1607.0
+        },
+        {
+          "rank": 21,
+          "term": "之色",
+          "weight": 1602.0
+        },
+        {
+          "rank": 22,
+          "term": "露出",
+          "weight": 1590.0
+        },
+        {
+          "rank": 23,
+          "term": "化为",
+          "weight": 1584.0
+        },
+        {
+          "rank": 24,
+          "term": "身上",
+          "weight": 1573.0
+        },
+        {
+          "rank": 25,
+          "term": "似乎",
+          "weight": 1536.0
+        },
+        {
+          "rank": 26,
+          "term": "现在",
+          "weight": 1483.0
+        },
+        {
+          "rank": 27,
+          "term": "老者",
+          "weight": 1469.0
+        },
+        {
+          "rank": 28,
+          "term": "样子",
+          "weight": 1382.0
+        },
+        {
+          "rank": 29,
+          "term": "已经",
+          "weight": 1373.0
+        },
+        {
+          "rank": 30,
+          "term": "而出",
+          "weight": 1331.0
+        }
+      ],
+      "total_edges": 2274259
+    },
+    "V2": {
+      "in_graph": false,
+      "auto_dropped": true,
+      "neighbors": [],
+      "total_edges": 2012337
+    },
+    "V3": {
+      "in_graph": false,
+      "auto_dropped": true,
+      "neighbors": [],
+      "total_edges": 8815
+    }
+  }
+}

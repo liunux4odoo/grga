@@ -1,0 +1,6385 @@
+{
+  "variant": "V5_npmi",
+  "top_k": 100,
+  "config": {
+    "tokenizer": "jieba+user_dict",
+    "stopword_source": "cn_stopwords",
+    "stopword_count": 746,
+    "df_adaptive": false,
+    "ranking_key": "npmi",
+    "min_pair_count": 3,
+    "window": "line"
+  },
+  "corpus_stats": {
+    "total_lines": 145061,
+    "effective_lines": 139072,
+    "total_terms": 76478,
+    "total_edges": 1204783,
+    "build_time_sec": 25.73
+  },
+  "queries": [
+    {
+      "seed": "韩立",
+      "seed_in_graph": true,
+      "seed_df": 46252,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "韩某",
+          "npmi": 0.187366,
+          "w": 757,
+          "df_target": 857
+        },
+        {
+          "rank": 2,
+          "term": "心里",
+          "npmi": 0.160928,
+          "w": 1115,
+          "df_target": 1542
+        },
+        {
+          "rank": 3,
+          "term": "心中",
+          "npmi": 0.157375,
+          "w": 3333,
+          "df_target": 5571
+        },
+        {
+          "rank": 4,
+          "term": "眉梢",
+          "npmi": 0.148403,
+          "w": 226,
+          "df_target": 262
+        },
+        {
+          "rank": 5,
+          "term": "目光",
+          "npmi": 0.146896,
+          "w": 2441,
+          "df_target": 4053
+        },
+        {
+          "rank": 6,
+          "term": "摸了摸",
+          "npmi": 0.144193,
+          "w": 285,
+          "df_target": 351
+        },
+        {
+          "rank": 7,
+          "term": "打量",
+          "npmi": 0.13813,
+          "w": 724,
+          "df_target": 1053
+        },
+        {
+          "rank": 8,
+          "term": "神风",
+          "npmi": 0.135768,
+          "w": 98,
+          "df_target": 110
+        },
+        {
+          "rank": 9,
+          "term": "微微一笑",
+          "npmi": 0.134223,
+          "w": 459,
+          "df_target": 641
+        },
+        {
+          "rank": 10,
+          "term": "心念",
+          "npmi": 0.134092,
+          "w": 267,
+          "df_target": 347
+        },
+        {
+          "rank": 11,
+          "term": "一眯",
+          "npmi": 0.129332,
+          "w": 268,
+          "df_target": 359
+        },
+        {
+          "rank": 12,
+          "term": "下巴",
+          "npmi": 0.12882,
+          "w": 256,
+          "df_target": 342
+        },
+        {
+          "rank": 13,
+          "term": "递给",
+          "npmi": 0.128258,
+          "w": 82,
+          "df_target": 95
+        },
+        {
+          "rank": 14,
+          "term": "思量",
+          "npmi": 0.126877,
+          "w": 822,
+          "df_target": 1289
+        },
+        {
+          "rank": 15,
+          "term": "引魂钟",
+          "npmi": 0.125791,
+          "w": 22,
+          "df_target": 22
+        },
+        {
+          "rank": 16,
+          "term": "微眯",
+          "npmi": 0.124486,
+          "w": 181,
+          "df_target": 238
+        },
+        {
+          "rank": 17,
+          "term": "姑娘",
+          "npmi": 0.123591,
+          "w": 176,
+          "df_target": 232
+        },
+        {
+          "rank": 18,
+          "term": "不动声色",
+          "npmi": 0.122591,
+          "w": 300,
+          "df_target": 425
+        },
+        {
+          "rank": 19,
+          "term": "一挑",
+          "npmi": 0.122331,
+          "w": 151,
+          "df_target": 197
+        },
+        {
+          "rank": 20,
+          "term": "蓝芒",
+          "npmi": 0.119557,
+          "w": 277,
+          "df_target": 396
+        },
+        {
+          "rank": 21,
+          "term": "眉头",
+          "npmi": 0.118385,
+          "w": 458,
+          "df_target": 700
+        },
+        {
+          "rank": 22,
+          "term": "感动",
+          "npmi": 0.115847,
+          "w": 17,
+          "df_target": 18
+        },
+        {
+          "rank": 23,
+          "term": "想着",
+          "npmi": 0.114953,
+          "w": 180,
+          "df_target": 252
+        },
+        {
+          "rank": 24,
+          "term": "冲蟹",
+          "npmi": 0.114691,
+          "w": 16,
+          "df_target": 17
+        },
+        {
+          "rank": 25,
+          "term": "计定",
+          "npmi": 0.114646,
+          "w": 29,
+          "df_target": 33
+        },
+        {
+          "rank": 26,
+          "term": "和厉",
+          "npmi": 0.114135,
+          "w": 9,
+          "df_target": 9
+        },
+        {
+          "rank": 27,
+          "term": "床边",
+          "npmi": 0.114135,
+          "w": 9,
+          "df_target": 9
+        },
+        {
+          "rank": 28,
+          "term": "鱼游",
+          "npmi": 0.114135,
+          "w": 9,
+          "df_target": 9
+        },
+        {
+          "rank": 29,
+          "term": "不置可否",
+          "npmi": 0.11398,
+          "w": 129,
+          "df_target": 175
+        },
+        {
+          "rank": 30,
+          "term": "袋中",
+          "npmi": 0.11363,
+          "w": 331,
+          "df_target": 501
+        },
+        {
+          "rank": 31,
+          "term": "马师伯",
+          "npmi": 0.113461,
+          "w": 24,
+          "df_target": 27
+        },
+        {
+          "rank": 32,
+          "term": "一眼",
+          "npmi": 0.113081,
+          "w": 1790,
+          "df_target": 3290
+        },
+        {
+          "rank": 33,
+          "term": "主和王",
+          "npmi": 0.112758,
+          "w": 8,
+          "df_target": 8
+        },
+        {
+          "rank": 34,
+          "term": "扔给",
+          "npmi": 0.112449,
+          "w": 51,
+          "df_target": 63
+        },
+        {
+          "rank": 35,
+          "term": "神色",
+          "npmi": 0.112377,
+          "w": 2229,
+          "df_target": 4212
+        },
+        {
+          "rank": 36,
+          "term": "暗叹",
+          "npmi": 0.111872,
+          "w": 42,
+          "df_target": 51
+        },
+        {
+          "rank": 37,
+          "term": "丑汉",
+          "npmi": 0.111784,
+          "w": 39,
+          "df_target": 47
+        },
+        {
+          "rank": 38,
+          "term": "再多加",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 39,
+          "term": "听得懂",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 40,
+          "term": "微感",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 41,
+          "term": "楼前",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 42,
+          "term": "点化",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 43,
+          "term": "玉灵道",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 44,
+          "term": "竹屋",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 45,
+          "term": "记在",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 46,
+          "term": "贵岛",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 47,
+          "term": "那雪云狐",
+          "npmi": 0.111236,
+          "w": 7,
+          "df_target": 7
+        },
+        {
+          "rank": 48,
+          "term": "脑中",
+          "npmi": 0.110713,
+          "w": 161,
+          "df_target": 229
+        },
+        {
+          "rank": 49,
+          "term": "贵阁",
+          "npmi": 0.110671,
+          "w": 13,
+          "df_target": 14
+        },
+        {
+          "rank": 50,
+          "term": "不变",
+          "npmi": 0.11029,
+          "w": 254,
+          "df_target": 381
+        },
+        {
+          "rank": 51,
+          "term": "一动",
+          "npmi": 0.110165,
+          "w": 1224,
+          "df_target": 2185
+        },
+        {
+          "rank": 52,
+          "term": "一语",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 53,
+          "term": "一递",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 54,
+          "term": "中学",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 55,
+          "term": "却大感",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 56,
+          "term": "发愣",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 57,
+          "term": "哨声",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 58,
+          "term": "大叹",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 59,
+          "term": "微跳",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 60,
+          "term": "推敲",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 61,
+          "term": "推给",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 62,
+          "term": "永驻",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 63,
+          "term": "溜出",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 64,
+          "term": "许下",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 65,
+          "term": "顺便去",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 66,
+          "term": "齐家",
+          "npmi": 0.10953,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 67,
+          "term": "婉儿",
+          "npmi": 0.109476,
+          "w": 42,
+          "df_target": 52
+        },
+        {
+          "rank": 68,
+          "term": "默默",
+          "npmi": 0.109196,
+          "w": 138,
+          "df_target": 195
+        },
+        {
+          "rank": 69,
+          "term": "嘴角",
+          "npmi": 0.10888,
+          "w": 468,
+          "df_target": 757
+        },
+        {
+          "rank": 70,
+          "term": "暗自",
+          "npmi": 0.108366,
+          "w": 317,
+          "df_target": 493
+        },
+        {
+          "rank": 71,
+          "term": "看着",
+          "npmi": 0.108186,
+          "w": 416,
+          "df_target": 667
+        },
+        {
+          "rank": 72,
+          "term": "微然",
+          "npmi": 0.108177,
+          "w": 116,
+          "df_target": 162
+        },
+        {
+          "rank": 73,
+          "term": "若有所思",
+          "npmi": 0.107829,
+          "w": 186,
+          "df_target": 274
+        },
+        {
+          "rank": 74,
+          "term": "解惑",
+          "npmi": 0.107703,
+          "w": 29,
+          "df_target": 35
+        },
+        {
+          "rank": 75,
+          "term": "储物",
+          "npmi": 0.107686,
+          "w": 233,
+          "df_target": 352
+        },
+        {
+          "rank": 76,
+          "term": "三番五次",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 77,
+          "term": "不冷",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 78,
+          "term": "不太熟悉",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 79,
+          "term": "但袖",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 80,
+          "term": "催剑阵",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 81,
+          "term": "副手",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 82,
+          "term": "可刚",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 83,
+          "term": "后堂",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 84,
+          "term": "太南",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 85,
+          "term": "宗坊",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 86,
+          "term": "寥寥数语",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 87,
+          "term": "往膝",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 88,
+          "term": "悄悄地",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 89,
+          "term": "打回",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 90,
+          "term": "扔回",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 91,
+          "term": "抛掷",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 92,
+          "term": "拿在手上",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 93,
+          "term": "擦洗",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 94,
+          "term": "无用功",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 95,
+          "term": "此待",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 96,
+          "term": "猜得出",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 97,
+          "term": "画册",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 98,
+          "term": "皮靴",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 99,
+          "term": "端起",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 100,
+          "term": "紫灵二女",
+          "npmi": 0.107579,
+          "w": 5,
+          "df_target": 5
+        }
+      ]
+    },
+    {
+      "seed": "墨大夫",
+      "seed_in_graph": true,
+      "seed_df": 576,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "余子童",
+          "npmi": 0.555627,
+          "w": 31,
+          "df_target": 70
+        },
+        {
+          "rank": 2,
+          "term": "医术",
+          "npmi": 0.54215,
+          "w": 21,
+          "df_target": 43
+        },
+        {
+          "rank": 3,
+          "term": "妻室",
+          "npmi": 0.524713,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 4,
+          "term": "把脉",
+          "npmi": 0.518338,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 5,
+          "term": "妻女",
+          "npmi": 0.510664,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 6,
+          "term": "空掌",
+          "npmi": 0.510664,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 7,
+          "term": "信中",
+          "npmi": 0.508713,
+          "w": 7,
+          "df_target": 11
+        },
+        {
+          "rank": 8,
+          "term": "黄纸",
+          "npmi": 0.50554,
+          "w": 6,
+          "df_target": 9
+        },
+        {
+          "rank": 9,
+          "term": "象甲功",
+          "npmi": 0.504647,
+          "w": 8,
+          "df_target": 14
+        },
+        {
+          "rank": 10,
+          "term": "张铁",
+          "npmi": 0.497889,
+          "w": 20,
+          "df_target": 59
+        },
+        {
+          "rank": 11,
+          "term": "长春",
+          "npmi": 0.4884,
+          "w": 21,
+          "df_target": 69
+        },
+        {
+          "rank": 12,
+          "term": "七鬼噬",
+          "npmi": 0.485937,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 13,
+          "term": "取信于",
+          "npmi": 0.485937,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 14,
+          "term": "受害者",
+          "npmi": 0.483888,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 15,
+          "term": "铁筒",
+          "npmi": 0.483888,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 16,
+          "term": "神手",
+          "npmi": 0.483343,
+          "w": 10,
+          "df_target": 24
+        },
+        {
+          "rank": 17,
+          "term": "房内",
+          "npmi": 0.478906,
+          "w": 8,
+          "df_target": 18
+        },
+        {
+          "rank": 18,
+          "term": "铁奴",
+          "npmi": 0.471195,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 19,
+          "term": "进度",
+          "npmi": 0.465987,
+          "w": 12,
+          "df_target": 37
+        },
+        {
+          "rank": 20,
+          "term": "漏出",
+          "npmi": 0.463119,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 21,
+          "term": "药物",
+          "npmi": 0.460361,
+          "w": 12,
+          "df_target": 39
+        },
+        {
+          "rank": 22,
+          "term": "看病",
+          "npmi": 0.458424,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 23,
+          "term": "毒药",
+          "npmi": 0.454716,
+          "w": 6,
+          "df_target": 15
+        },
+        {
+          "rank": 24,
+          "term": "太师椅",
+          "npmi": 0.448307,
+          "w": 7,
+          "df_target": 20
+        },
+        {
+          "rank": 25,
+          "term": "余子",
+          "npmi": 0.44615,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 26,
+          "term": "详详细细",
+          "npmi": 0.44615,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 27,
+          "term": "穴道",
+          "npmi": 0.437084,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 28,
+          "term": "缠香丝",
+          "npmi": 0.437084,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 29,
+          "term": "银刃",
+          "npmi": 0.437084,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 30,
+          "term": "之死",
+          "npmi": 0.431802,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 31,
+          "term": "触角",
+          "npmi": 0.431802,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 32,
+          "term": "毒辣",
+          "npmi": 0.419648,
+          "w": 4,
+          "df_target": 12
+        },
+        {
+          "rank": 33,
+          "term": "督促",
+          "npmi": 0.419648,
+          "w": 4,
+          "df_target": 12
+        },
+        {
+          "rank": 34,
+          "term": "财富",
+          "npmi": 0.419374,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 35,
+          "term": "近半年",
+          "npmi": 0.419374,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 36,
+          "term": "书信",
+          "npmi": 0.416823,
+          "w": 8,
+          "df_target": 33
+        },
+        {
+          "rank": 37,
+          "term": "口诀",
+          "npmi": 0.412497,
+          "w": 28,
+          "df_target": 202
+        },
+        {
+          "rank": 38,
+          "term": "您老",
+          "npmi": 0.408411,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 39,
+          "term": "师徒",
+          "npmi": 0.407954,
+          "w": 6,
+          "df_target": 24
+        },
+        {
+          "rank": 40,
+          "term": "把柄",
+          "npmi": 0.404906,
+          "w": 4,
+          "df_target": 14
+        },
+        {
+          "rank": 41,
+          "term": "功力",
+          "npmi": 0.404299,
+          "w": 9,
+          "df_target": 44
+        },
+        {
+          "rank": 42,
+          "term": "下山",
+          "npmi": 0.404024,
+          "w": 7,
+          "df_target": 31
+        },
+        {
+          "rank": 43,
+          "term": "短剑",
+          "npmi": 0.399547,
+          "w": 11,
+          "df_target": 61
+        },
+        {
+          "rank": 44,
+          "term": "衰老",
+          "npmi": 0.398605,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 45,
+          "term": "配制",
+          "npmi": 0.397707,
+          "w": 7,
+          "df_target": 33
+        },
+        {
+          "rank": 46,
+          "term": "药材",
+          "npmi": 0.394182,
+          "w": 13,
+          "df_target": 81
+        },
+        {
+          "rank": 47,
+          "term": "小聪明",
+          "npmi": 0.389734,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 48,
+          "term": "尸虫",
+          "npmi": 0.389734,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 49,
+          "term": "此功",
+          "npmi": 0.389734,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 50,
+          "term": "秘制",
+          "npmi": 0.389734,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 51,
+          "term": "进步",
+          "npmi": 0.389734,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 52,
+          "term": "七玄门",
+          "npmi": 0.387263,
+          "w": 20,
+          "df_target": 157
+        },
+        {
+          "rank": 53,
+          "term": "宝玉",
+          "npmi": 0.387029,
+          "w": 5,
+          "df_target": 23
+        },
+        {
+          "rank": 54,
+          "term": "遗书",
+          "npmi": 0.386338,
+          "w": 4,
+          "df_target": 17
+        },
+        {
+          "rank": 55,
+          "term": "咳嗽",
+          "npmi": 0.38287,
+          "w": 5,
+          "df_target": 24
+        },
+        {
+          "rank": 56,
+          "term": "现实",
+          "npmi": 0.381636,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 57,
+          "term": "各类",
+          "npmi": 0.380871,
+          "w": 4,
+          "df_target": 18
+        },
+        {
+          "rank": 58,
+          "term": "嘲笑",
+          "npmi": 0.380871,
+          "w": 4,
+          "df_target": 18
+        },
+        {
+          "rank": 59,
+          "term": "江湖",
+          "npmi": 0.380532,
+          "w": 10,
+          "df_target": 64
+        },
+        {
+          "rank": 60,
+          "term": "企图",
+          "npmi": 0.378881,
+          "w": 5,
+          "df_target": 25
+        },
+        {
+          "rank": 61,
+          "term": "怪刃",
+          "npmi": 0.37136,
+          "w": 5,
+          "df_target": 27
+        },
+        {
+          "rank": 62,
+          "term": "墨老",
+          "npmi": 0.370795,
+          "w": 4,
+          "df_target": 20
+        },
+        {
+          "rank": 63,
+          "term": "书籍",
+          "npmi": 0.367806,
+          "w": 5,
+          "df_target": 28
+        },
+        {
+          "rank": 64,
+          "term": "放声",
+          "npmi": 0.367288,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 65,
+          "term": "第四层",
+          "npmi": 0.365453,
+          "w": 9,
+          "df_target": 64
+        },
+        {
+          "rank": 66,
+          "term": "内心",
+          "npmi": 0.364888,
+          "w": 6,
+          "df_target": 37
+        },
+        {
+          "rank": 67,
+          "term": "本书",
+          "npmi": 0.364377,
+          "w": 5,
+          "df_target": 29
+        },
+        {
+          "rank": 68,
+          "term": "武功",
+          "npmi": 0.363181,
+          "w": 11,
+          "df_target": 86
+        },
+        {
+          "rank": 69,
+          "term": "甩手",
+          "npmi": 0.360867,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 70,
+          "term": "美男子",
+          "npmi": 0.360867,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 71,
+          "term": "采药",
+          "npmi": 0.360867,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 72,
+          "term": "使出",
+          "npmi": 0.357131,
+          "w": 6,
+          "df_target": 40
+        },
+        {
+          "rank": 73,
+          "term": "学到",
+          "npmi": 0.35486,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 74,
+          "term": "尸首",
+          "npmi": 0.35486,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 75,
+          "term": "左手",
+          "npmi": 0.353359,
+          "w": 4,
+          "df_target": 24
+        },
+        {
+          "rank": 76,
+          "term": "平时",
+          "npmi": 0.351759,
+          "w": 7,
+          "df_target": 52
+        },
+        {
+          "rank": 77,
+          "term": "回家",
+          "npmi": 0.349217,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 78,
+          "term": "烟雾",
+          "npmi": 0.349217,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 79,
+          "term": "制作",
+          "npmi": 0.346092,
+          "w": 7,
+          "df_target": 55
+        },
+        {
+          "rank": 80,
+          "term": "信任",
+          "npmi": 0.345704,
+          "w": 4,
+          "df_target": 26
+        },
+        {
+          "rank": 81,
+          "term": "一封",
+          "npmi": 0.343897,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 82,
+          "term": "巨变",
+          "npmi": 0.343897,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 83,
+          "term": "银子",
+          "npmi": 0.341086,
+          "w": 6,
+          "df_target": 47
+        },
+        {
+          "rank": 84,
+          "term": "右手",
+          "npmi": 0.338998,
+          "w": 7,
+          "df_target": 59
+        },
+        {
+          "rank": 85,
+          "term": "阴毒",
+          "npmi": 0.338617,
+          "w": 4,
+          "df_target": 28
+        },
+        {
+          "rank": 86,
+          "term": "练功",
+          "npmi": 0.33694,
+          "w": 6,
+          "df_target": 49
+        },
+        {
+          "rank": 87,
+          "term": "一下子",
+          "npmi": 0.33563,
+          "w": 7,
+          "df_target": 61
+        },
+        {
+          "rank": 88,
+          "term": "窗外",
+          "npmi": 0.334091,
+          "w": 3,
+          "df_target": 20
+        },
+        {
+          "rank": 89,
+          "term": "墨府",
+          "npmi": 0.333622,
+          "w": 9,
+          "df_target": 87
+        },
+        {
+          "rank": 90,
+          "term": "妨碍",
+          "npmi": 0.32955,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 91,
+          "term": "热切",
+          "npmi": 0.32955,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 92,
+          "term": "解药",
+          "npmi": 0.32955,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 93,
+          "term": "调配",
+          "npmi": 0.32955,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 94,
+          "term": "双肩",
+          "npmi": 0.328883,
+          "w": 4,
+          "df_target": 31
+        },
+        {
+          "rank": 95,
+          "term": "转向",
+          "npmi": 0.328883,
+          "w": 4,
+          "df_target": 31
+        },
+        {
+          "rank": 96,
+          "term": "夺舍",
+          "npmi": 0.328718,
+          "w": 8,
+          "df_target": 78
+        },
+        {
+          "rank": 97,
+          "term": "有意思",
+          "npmi": 0.32522,
+          "w": 3,
+          "df_target": 22
+        },
+        {
+          "rank": 98,
+          "term": "屋内",
+          "npmi": 0.321315,
+          "w": 17,
+          "df_target": 227
+        },
+        {
+          "rank": 99,
+          "term": "亲人",
+          "npmi": 0.321083,
+          "w": 3,
+          "df_target": 23
+        },
+        {
+          "rank": 100,
+          "term": "每天",
+          "npmi": 0.321083,
+          "w": 3,
+          "df_target": 23
+        }
+      ]
+    },
+    {
+      "seed": "李化元",
+      "seed_in_graph": true,
+      "seed_df": 171,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "仙姑",
+          "npmi": 0.566087,
+          "w": 7,
+          "df_target": 21
+        },
+        {
+          "rank": 2,
+          "term": "师娘",
+          "npmi": 0.55975,
+          "w": 10,
+          "df_target": 39
+        },
+        {
+          "rank": 3,
+          "term": "夫妇",
+          "npmi": 0.527672,
+          "w": 18,
+          "df_target": 130
+        },
+        {
+          "rank": 4,
+          "term": "徒弟",
+          "npmi": 0.52508,
+          "w": 13,
+          "df_target": 81
+        },
+        {
+          "rank": 5,
+          "term": "为师",
+          "npmi": 0.509955,
+          "w": 6,
+          "df_target": 29
+        },
+        {
+          "rank": 6,
+          "term": "柔声",
+          "npmi": 0.494669,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 7,
+          "term": "选修",
+          "npmi": 0.494669,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 8,
+          "term": "武炫",
+          "npmi": 0.493723,
+          "w": 5,
+          "df_target": 26
+        },
+        {
+          "rank": 9,
+          "term": "师傅",
+          "npmi": 0.459774,
+          "w": 22,
+          "df_target": 320
+        },
+        {
+          "rank": 10,
+          "term": "保护",
+          "npmi": 0.457124,
+          "w": 8,
+          "df_target": 75
+        },
+        {
+          "rank": 11,
+          "term": "一类",
+          "npmi": 0.442583,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 12,
+          "term": "这家",
+          "npmi": 0.430155,
+          "w": 3,
+          "df_target": 24
+        },
+        {
+          "rank": 13,
+          "term": "扶持",
+          "npmi": 0.426355,
+          "w": 3,
+          "df_target": 25
+        },
+        {
+          "rank": 14,
+          "term": "少妇",
+          "npmi": 0.42248,
+          "w": 28,
+          "df_target": 625
+        },
+        {
+          "rank": 15,
+          "term": "师姐",
+          "npmi": 0.412287,
+          "w": 12,
+          "df_target": 206
+        },
+        {
+          "rank": 16,
+          "term": "董萱",
+          "npmi": 0.394669,
+          "w": 8,
+          "df_target": 138
+        },
+        {
+          "rank": 17,
+          "term": "秦宅",
+          "npmi": 0.386778,
+          "w": 4,
+          "df_target": 57
+        },
+        {
+          "rank": 18,
+          "term": "宋蒙",
+          "npmi": 0.36713,
+          "w": 4,
+          "df_target": 70
+        },
+        {
+          "rank": 19,
+          "term": "红衣",
+          "npmi": 0.365641,
+          "w": 3,
+          "df_target": 48
+        },
+        {
+          "rank": 20,
+          "term": "平时",
+          "npmi": 0.358191,
+          "w": 3,
+          "df_target": 52
+        },
+        {
+          "rank": 21,
+          "term": "书页",
+          "npmi": 0.356418,
+          "w": 3,
+          "df_target": 53
+        },
+        {
+          "rank": 22,
+          "term": "记名",
+          "npmi": 0.35436,
+          "w": 4,
+          "df_target": 80
+        },
+        {
+          "rank": 23,
+          "term": "师伯",
+          "npmi": 0.343334,
+          "w": 3,
+          "df_target": 61
+        },
+        {
+          "rank": 24,
+          "term": "筑基",
+          "npmi": 0.343165,
+          "w": 13,
+          "df_target": 438
+        },
+        {
+          "rank": 25,
+          "term": "秦家",
+          "npmi": 0.34182,
+          "w": 3,
+          "df_target": 62
+        },
+        {
+          "rank": 26,
+          "term": "双修",
+          "npmi": 0.337576,
+          "w": 6,
+          "df_target": 164
+        },
+        {
+          "rank": 27,
+          "term": "反悔",
+          "npmi": 0.333223,
+          "w": 3,
+          "df_target": 68
+        },
+        {
+          "rank": 28,
+          "term": "石室",
+          "npmi": 0.331126,
+          "w": 4,
+          "df_target": 102
+        },
+        {
+          "rank": 29,
+          "term": "态度",
+          "npmi": 0.320453,
+          "w": 3,
+          "df_target": 78
+        },
+        {
+          "rank": 30,
+          "term": "伴侣",
+          "npmi": 0.313555,
+          "w": 3,
+          "df_target": 84
+        },
+        {
+          "rank": 31,
+          "term": "名声",
+          "npmi": 0.305747,
+          "w": 4,
+          "df_target": 133
+        },
+        {
+          "rank": 32,
+          "term": "精进",
+          "npmi": 0.303086,
+          "w": 3,
+          "df_target": 94
+        },
+        {
+          "rank": 33,
+          "term": "结成",
+          "npmi": 0.302101,
+          "w": 3,
+          "df_target": 95
+        },
+        {
+          "rank": 34,
+          "term": "世俗",
+          "npmi": 0.301127,
+          "w": 3,
+          "df_target": 96
+        },
+        {
+          "rank": 35,
+          "term": "门下",
+          "npmi": 0.300818,
+          "w": 8,
+          "df_target": 345
+        },
+        {
+          "rank": 36,
+          "term": "资质",
+          "npmi": 0.299087,
+          "w": 7,
+          "df_target": 295
+        },
+        {
+          "rank": 37,
+          "term": "手法",
+          "npmi": 0.289306,
+          "w": 3,
+          "df_target": 109
+        },
+        {
+          "rank": 38,
+          "term": "立即",
+          "npmi": 0.27521,
+          "w": 8,
+          "df_target": 443
+        },
+        {
+          "rank": 39,
+          "term": "头痛",
+          "npmi": 0.275081,
+          "w": 3,
+          "df_target": 127
+        },
+        {
+          "rank": 40,
+          "term": "说起",
+          "npmi": 0.275081,
+          "w": 3,
+          "df_target": 127
+        },
+        {
+          "rank": 41,
+          "term": "要求",
+          "npmi": 0.274521,
+          "w": 5,
+          "df_target": 245
+        },
+        {
+          "rank": 42,
+          "term": "尴尬",
+          "npmi": 0.272908,
+          "w": 3,
+          "df_target": 130
+        },
+        {
+          "rank": 43,
+          "term": "印象",
+          "npmi": 0.270785,
+          "w": 3,
+          "df_target": 133
+        },
+        {
+          "rank": 44,
+          "term": "拜见",
+          "npmi": 0.268709,
+          "w": 3,
+          "df_target": 136
+        },
+        {
+          "rank": 45,
+          "term": "好事",
+          "npmi": 0.268027,
+          "w": 3,
+          "df_target": 137
+        },
+        {
+          "rank": 46,
+          "term": "派出",
+          "npmi": 0.26735,
+          "w": 3,
+          "df_target": 138
+        },
+        {
+          "rank": 47,
+          "term": "洞府",
+          "npmi": 0.266625,
+          "w": 13,
+          "df_target": 891
+        },
+        {
+          "rank": 48,
+          "term": "夫人",
+          "npmi": 0.257983,
+          "w": 10,
+          "df_target": 694
+        },
+        {
+          "rank": 49,
+          "term": "安全",
+          "npmi": 0.256537,
+          "w": 3,
+          "df_target": 155
+        },
+        {
+          "rank": 50,
+          "term": "弟子",
+          "npmi": 0.25516,
+          "w": 22,
+          "df_target": 1918
+        },
+        {
+          "rank": 51,
+          "term": "灵根",
+          "npmi": 0.251284,
+          "w": 3,
+          "df_target": 164
+        },
+        {
+          "rank": 52,
+          "term": "成功",
+          "npmi": 0.251032,
+          "w": 9,
+          "df_target": 650
+        },
+        {
+          "rank": 53,
+          "term": "住处",
+          "npmi": 0.24164,
+          "w": 4,
+          "df_target": 260
+        },
+        {
+          "rank": 54,
+          "term": "不安",
+          "npmi": 0.239568,
+          "w": 3,
+          "df_target": 186
+        },
+        {
+          "rank": 55,
+          "term": "后来",
+          "npmi": 0.238385,
+          "w": 4,
+          "df_target": 269
+        },
+        {
+          "rank": 56,
+          "term": "大感",
+          "npmi": 0.238262,
+          "w": 6,
+          "df_target": 445
+        },
+        {
+          "rank": 57,
+          "term": "数年",
+          "npmi": 0.237587,
+          "w": 3,
+          "df_target": 190
+        },
+        {
+          "rank": 58,
+          "term": "任务",
+          "npmi": 0.237099,
+          "w": 3,
+          "df_target": 191
+        },
+        {
+          "rank": 59,
+          "term": "郁闷",
+          "npmi": 0.235929,
+          "w": 4,
+          "df_target": 276
+        },
+        {
+          "rank": 60,
+          "term": "那位",
+          "npmi": 0.234357,
+          "w": 11,
+          "df_target": 978
+        },
+        {
+          "rank": 61,
+          "term": "日子",
+          "npmi": 0.23422,
+          "w": 3,
+          "df_target": 197
+        },
+        {
+          "rank": 62,
+          "term": "结丹期",
+          "npmi": 0.233246,
+          "w": 7,
+          "df_target": 566
+        },
+        {
+          "rank": 63,
+          "term": "正式",
+          "npmi": 0.232349,
+          "w": 3,
+          "df_target": 201
+        },
+        {
+          "rank": 64,
+          "term": "当时",
+          "npmi": 0.230212,
+          "w": 4,
+          "df_target": 293
+        },
+        {
+          "rank": 65,
+          "term": "暗中",
+          "npmi": 0.229612,
+          "w": 3,
+          "df_target": 207
+        },
+        {
+          "rank": 66,
+          "term": "当日",
+          "npmi": 0.228095,
+          "w": 5,
+          "df_target": 394
+        },
+        {
+          "rank": 67,
+          "term": "说明",
+          "npmi": 0.226952,
+          "w": 3,
+          "df_target": 213
+        },
+        {
+          "rank": 68,
+          "term": "告辞",
+          "npmi": 0.225438,
+          "w": 4,
+          "df_target": 308
+        },
+        {
+          "rank": 69,
+          "term": "高兴",
+          "npmi": 0.22522,
+          "w": 3,
+          "df_target": 217
+        },
+        {
+          "rank": 70,
+          "term": "今日",
+          "npmi": 0.224792,
+          "w": 3,
+          "df_target": 218
+        },
+        {
+          "rank": 71,
+          "term": "这位",
+          "npmi": 0.223133,
+          "w": 26,
+          "df_target": 3114
+        },
+        {
+          "rank": 72,
+          "term": "功法",
+          "npmi": 0.222158,
+          "w": 13,
+          "df_target": 1346
+        },
+        {
+          "rank": 73,
+          "term": "心思",
+          "npmi": 0.221618,
+          "w": 5,
+          "df_target": 421
+        },
+        {
+          "rank": 74,
+          "term": "屋内",
+          "npmi": 0.221027,
+          "w": 3,
+          "df_target": 227
+        },
+        {
+          "rank": 75,
+          "term": "微笑",
+          "npmi": 0.22089,
+          "w": 4,
+          "df_target": 323
+        },
+        {
+          "rank": 76,
+          "term": "偶尔",
+          "npmi": 0.220618,
+          "w": 3,
+          "df_target": 228
+        },
+        {
+          "rank": 77,
+          "term": "最近",
+          "npmi": 0.219713,
+          "w": 4,
+          "df_target": 327
+        },
+        {
+          "rank": 78,
+          "term": "十有八九",
+          "npmi": 0.216233,
+          "w": 3,
+          "df_target": 239
+        },
+        {
+          "rank": 79,
+          "term": "一趟",
+          "npmi": 0.214036,
+          "w": 4,
+          "df_target": 347
+        },
+        {
+          "rank": 80,
+          "term": "含笑",
+          "npmi": 0.207326,
+          "w": 3,
+          "df_target": 263
+        },
+        {
+          "rank": 81,
+          "term": "曾经",
+          "npmi": 0.206987,
+          "w": 5,
+          "df_target": 489
+        },
+        {
+          "rank": 82,
+          "term": "只好",
+          "npmi": 0.206973,
+          "w": 3,
+          "df_target": 264
+        },
+        {
+          "rank": 83,
+          "term": "基期",
+          "npmi": 0.205748,
+          "w": 6,
+          "df_target": 617
+        },
+        {
+          "rank": 84,
+          "term": "总算",
+          "npmi": 0.204228,
+          "w": 5,
+          "df_target": 503
+        },
+        {
+          "rank": 85,
+          "term": "听说",
+          "npmi": 0.20254,
+          "w": 7,
+          "df_target": 767
+        },
+        {
+          "rank": 86,
+          "term": "满意",
+          "npmi": 0.198145,
+          "w": 6,
+          "df_target": 666
+        },
+        {
+          "rank": 87,
+          "term": "站立",
+          "npmi": 0.19791,
+          "w": 3,
+          "df_target": 291
+        },
+        {
+          "rank": 88,
+          "term": "黄枫谷",
+          "npmi": 0.194765,
+          "w": 3,
+          "df_target": 301
+        },
+        {
+          "rank": 89,
+          "term": "离去",
+          "npmi": 0.193972,
+          "w": 4,
+          "df_target": 428
+        },
+        {
+          "rank": 90,
+          "term": "大会",
+          "npmi": 0.189068,
+          "w": 3,
+          "df_target": 320
+        },
+        {
+          "rank": 91,
+          "term": "回去",
+          "npmi": 0.188121,
+          "w": 4,
+          "df_target": 455
+        },
+        {
+          "rank": 92,
+          "term": "愕然",
+          "npmi": 0.186204,
+          "w": 3,
+          "df_target": 330
+        },
+        {
+          "rank": 93,
+          "term": "答应",
+          "npmi": 0.185271,
+          "w": 8,
+          "df_target": 1066
+        },
+        {
+          "rank": 94,
+          "term": "没什么",
+          "npmi": 0.18395,
+          "w": 5,
+          "df_target": 619
+        },
+        {
+          "rank": 95,
+          "term": "此事",
+          "npmi": 0.181378,
+          "w": 13,
+          "df_target": 1965
+        },
+        {
+          "rank": 96,
+          "term": "进来",
+          "npmi": 0.180197,
+          "w": 3,
+          "df_target": 352
+        },
+        {
+          "rank": 97,
+          "term": "一番",
+          "npmi": 0.180118,
+          "w": 8,
+          "df_target": 1121
+        },
+        {
+          "rank": 98,
+          "term": "之事",
+          "npmi": 0.179407,
+          "w": 3,
+          "df_target": 355
+        },
+        {
+          "rank": 99,
+          "term": "渐渐",
+          "npmi": 0.177239,
+          "w": 5,
+          "df_target": 663
+        },
+        {
+          "rank": 100,
+          "term": "南宫",
+          "npmi": 0.174436,
+          "w": 4,
+          "df_target": 525
+        }
+      ]
+    },
+    {
+      "seed": "极阴祖师",
+      "seed_in_graph": true,
+      "seed_df": 306,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "乌某",
+          "npmi": 0.637435,
+          "w": 12,
+          "df_target": 14
+        },
+        {
+          "rank": 2,
+          "term": "蛮兄",
+          "npmi": 0.595908,
+          "w": 17,
+          "df_target": 36
+        },
+        {
+          "rank": 3,
+          "term": "乌丑",
+          "npmi": 0.534172,
+          "w": 28,
+          "df_target": 135
+        },
+        {
+          "rank": 4,
+          "term": "齐兄",
+          "npmi": 0.521991,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 5,
+          "term": "青兄",
+          "npmi": 0.518915,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 6,
+          "term": "手链",
+          "npmi": 0.505021,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 7,
+          "term": "青易",
+          "npmi": 0.501476,
+          "w": 10,
+          "df_target": 38
+        },
+        {
+          "rank": 8,
+          "term": "胡子",
+          "npmi": 0.492339,
+          "w": 38,
+          "df_target": 304
+        },
+        {
+          "rank": 9,
+          "term": "火蟒",
+          "npmi": 0.491371,
+          "w": 8,
+          "df_target": 30
+        },
+        {
+          "rank": 10,
+          "term": "祖师",
+          "npmi": 0.482495,
+          "w": 14,
+          "df_target": 75
+        },
+        {
+          "rank": 11,
+          "term": "极阴岛",
+          "npmi": 0.478378,
+          "w": 5,
+          "df_target": 17
+        },
+        {
+          "rank": 12,
+          "term": "儒装",
+          "npmi": 0.467283,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 13,
+          "term": "取宝后",
+          "npmi": 0.467283,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 14,
+          "term": "居士",
+          "npmi": 0.466517,
+          "w": 11,
+          "df_target": 61
+        },
+        {
+          "rank": 15,
+          "term": "血玉",
+          "npmi": 0.460031,
+          "w": 15,
+          "df_target": 102
+        },
+        {
+          "rank": 16,
+          "term": "儒衫",
+          "npmi": 0.43741,
+          "w": 12,
+          "df_target": 91
+        },
+        {
+          "rank": 17,
+          "term": "妖尸",
+          "npmi": 0.436192,
+          "w": 4,
+          "df_target": 19
+        },
+        {
+          "rank": 18,
+          "term": "天明",
+          "npmi": 0.42954,
+          "w": 21,
+          "df_target": 218
+        },
+        {
+          "rank": 19,
+          "term": "内殿",
+          "npmi": 0.421675,
+          "w": 7,
+          "df_target": 49
+        },
+        {
+          "rank": 20,
+          "term": "尸火",
+          "npmi": 0.41967,
+          "w": 5,
+          "df_target": 31
+        },
+        {
+          "rank": 21,
+          "term": "逆徒",
+          "npmi": 0.402769,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 22,
+          "term": "小徒",
+          "npmi": 0.40238,
+          "w": 5,
+          "df_target": 37
+        },
+        {
+          "rank": 23,
+          "term": "异种",
+          "npmi": 0.397737,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 24,
+          "term": "取宝",
+          "npmi": 0.394939,
+          "w": 10,
+          "df_target": 105
+        },
+        {
+          "rank": 25,
+          "term": "玄阴",
+          "npmi": 0.39251,
+          "w": 4,
+          "df_target": 30
+        },
+        {
+          "rank": 26,
+          "term": "蜘蛛",
+          "npmi": 0.386736,
+          "w": 17,
+          "df_target": 237
+        },
+        {
+          "rank": 27,
+          "term": "赤火",
+          "npmi": 0.378077,
+          "w": 6,
+          "df_target": 61
+        },
+        {
+          "rank": 28,
+          "term": "暗骂",
+          "npmi": 0.375993,
+          "w": 3,
+          "df_target": 24
+        },
+        {
+          "rank": 29,
+          "term": "极阴",
+          "npmi": 0.375574,
+          "w": 11,
+          "df_target": 144
+        },
+        {
+          "rank": 30,
+          "term": "阴魔",
+          "npmi": 0.369903,
+          "w": 4,
+          "df_target": 38
+        },
+        {
+          "rank": 31,
+          "term": "正道",
+          "npmi": 0.369084,
+          "w": 8,
+          "df_target": 99
+        },
+        {
+          "rank": 32,
+          "term": "四颗",
+          "npmi": 0.368543,
+          "w": 3,
+          "df_target": 26
+        },
+        {
+          "rank": 33,
+          "term": "传声",
+          "npmi": 0.361582,
+          "w": 6,
+          "df_target": 72
+        },
+        {
+          "rank": 34,
+          "term": "过关",
+          "npmi": 0.349217,
+          "w": 3,
+          "df_target": 32
+        },
+        {
+          "rank": 35,
+          "term": "虚天殿",
+          "npmi": 0.335387,
+          "w": 9,
+          "df_target": 161
+        },
+        {
+          "rank": 36,
+          "term": "懊恼",
+          "npmi": 0.334542,
+          "w": 4,
+          "df_target": 55
+        },
+        {
+          "rank": 37,
+          "term": "转脸",
+          "npmi": 0.329502,
+          "w": 5,
+          "df_target": 78
+        },
+        {
+          "rank": 38,
+          "term": "法门",
+          "npmi": 0.326221,
+          "w": 4,
+          "df_target": 60
+        },
+        {
+          "rank": 39,
+          "term": "玄骨",
+          "npmi": 0.320859,
+          "w": 14,
+          "df_target": 332
+        },
+        {
+          "rank": 40,
+          "term": "采摘",
+          "npmi": 0.31544,
+          "w": 3,
+          "df_target": 46
+        },
+        {
+          "rank": 41,
+          "term": "天鼎",
+          "npmi": 0.313322,
+          "w": 18,
+          "df_target": 495
+        },
+        {
+          "rank": 42,
+          "term": "补天丹",
+          "npmi": 0.30768,
+          "w": 3,
+          "df_target": 50
+        },
+        {
+          "rank": 43,
+          "term": "天魔",
+          "npmi": 0.307196,
+          "w": 5,
+          "df_target": 98
+        },
+        {
+          "rank": 44,
+          "term": "退让",
+          "npmi": 0.300517,
+          "w": 3,
+          "df_target": 54
+        },
+        {
+          "rank": 45,
+          "term": "诱惑",
+          "npmi": 0.298809,
+          "w": 3,
+          "df_target": 55
+        },
+        {
+          "rank": 46,
+          "term": "徒弟",
+          "npmi": 0.29752,
+          "w": 4,
+          "df_target": 81
+        },
+        {
+          "rank": 47,
+          "term": "乌云",
+          "npmi": 0.289089,
+          "w": 7,
+          "df_target": 182
+        },
+        {
+          "rank": 48,
+          "term": "那小子",
+          "npmi": 0.286169,
+          "w": 3,
+          "df_target": 63
+        },
+        {
+          "rank": 49,
+          "term": "中人",
+          "npmi": 0.28326,
+          "w": 3,
+          "df_target": 65
+        },
+        {
+          "rank": 50,
+          "term": "称赞",
+          "npmi": 0.281839,
+          "w": 3,
+          "df_target": 66
+        },
+        {
+          "rank": 51,
+          "term": "耳边",
+          "npmi": 0.279584,
+          "w": 5,
+          "df_target": 130
+        },
+        {
+          "rank": 52,
+          "term": "身侧",
+          "npmi": 0.279061,
+          "w": 3,
+          "df_target": 68
+        },
+        {
+          "rank": 53,
+          "term": "男修",
+          "npmi": 0.275043,
+          "w": 3,
+          "df_target": 71
+        },
+        {
+          "rank": 54,
+          "term": "老怪",
+          "npmi": 0.27331,
+          "w": 9,
+          "df_target": 293
+        },
+        {
+          "rank": 55,
+          "term": "放在心上",
+          "npmi": 0.268709,
+          "w": 3,
+          "df_target": 76
+        },
+        {
+          "rank": 56,
+          "term": "阴厉",
+          "npmi": 0.266291,
+          "w": 3,
+          "df_target": 78
+        },
+        {
+          "rank": 57,
+          "term": "跑掉",
+          "npmi": 0.265105,
+          "w": 3,
+          "df_target": 79
+        },
+        {
+          "rank": 58,
+          "term": "一份",
+          "npmi": 0.26495,
+          "w": 5,
+          "df_target": 151
+        },
+        {
+          "rank": 59,
+          "term": "魔道",
+          "npmi": 0.264837,
+          "w": 4,
+          "df_target": 114
+        },
+        {
+          "rank": 60,
+          "term": "冰封",
+          "npmi": 0.260732,
+          "w": 4,
+          "df_target": 119
+        },
+        {
+          "rank": 61,
+          "term": "动怒",
+          "npmi": 0.255064,
+          "w": 3,
+          "df_target": 88
+        },
+        {
+          "rank": 62,
+          "term": "蓝冰焰",
+          "npmi": 0.255064,
+          "w": 3,
+          "df_target": 88
+        },
+        {
+          "rank": 63,
+          "term": "一寒",
+          "npmi": 0.247261,
+          "w": 4,
+          "df_target": 137
+        },
+        {
+          "rank": 64,
+          "term": "婴期",
+          "npmi": 0.244577,
+          "w": 12,
+          "df_target": 553
+        },
+        {
+          "rank": 65,
+          "term": "附身",
+          "npmi": 0.242239,
+          "w": 3,
+          "df_target": 101
+        },
+        {
+          "rank": 66,
+          "term": "黑云",
+          "npmi": 0.242239,
+          "w": 3,
+          "df_target": 101
+        },
+        {
+          "rank": 67,
+          "term": "这下",
+          "npmi": 0.240414,
+          "w": 3,
+          "df_target": 103
+        },
+        {
+          "rank": 68,
+          "term": "古宝",
+          "npmi": 0.240151,
+          "w": 6,
+          "df_target": 244
+        },
+        {
+          "rank": 69,
+          "term": "转过",
+          "npmi": 0.239515,
+          "w": 3,
+          "df_target": 104
+        },
+        {
+          "rank": 70,
+          "term": "一臂之力",
+          "npmi": 0.23179,
+          "w": 3,
+          "df_target": 113
+        },
+        {
+          "rank": 71,
+          "term": "天上",
+          "npmi": 0.228324,
+          "w": 4,
+          "df_target": 167
+        },
+        {
+          "rank": 72,
+          "term": "不善",
+          "npmi": 0.227761,
+          "w": 3,
+          "df_target": 118
+        },
+        {
+          "rank": 73,
+          "term": "轮回",
+          "npmi": 0.226196,
+          "w": 3,
+          "df_target": 120
+        },
+        {
+          "rank": 74,
+          "term": "神情",
+          "npmi": 0.223336,
+          "w": 13,
+          "df_target": 744
+        },
+        {
+          "rank": 75,
+          "term": "隐瞒",
+          "npmi": 0.222984,
+          "w": 5,
+          "df_target": 232
+        },
+        {
+          "rank": 76,
+          "term": "这话",
+          "npmi": 0.218957,
+          "w": 20,
+          "df_target": 1310
+        },
+        {
+          "rank": 77,
+          "term": "秘密",
+          "npmi": 0.218019,
+          "w": 4,
+          "df_target": 186
+        },
+        {
+          "rank": 78,
+          "term": "恼怒",
+          "npmi": 0.217325,
+          "w": 3,
+          "df_target": 132
+        },
+        {
+          "rank": 79,
+          "term": "不妙",
+          "npmi": 0.215985,
+          "w": 4,
+          "df_target": 190
+        },
+        {
+          "rank": 80,
+          "term": "大法",
+          "npmi": 0.215483,
+          "w": 4,
+          "df_target": 191
+        },
+        {
+          "rank": 81,
+          "term": "这番",
+          "npmi": 0.213865,
+          "w": 3,
+          "df_target": 137
+        },
+        {
+          "rank": 82,
+          "term": "两条",
+          "npmi": 0.2135,
+          "w": 4,
+          "df_target": 195
+        },
+        {
+          "rank": 83,
+          "term": "眼中",
+          "npmi": 0.213016,
+          "w": 12,
+          "df_target": 743
+        },
+        {
+          "rank": 84,
+          "term": "妙音",
+          "npmi": 0.212516,
+          "w": 3,
+          "df_target": 139
+        },
+        {
+          "rank": 85,
+          "term": "玉佩",
+          "npmi": 0.211186,
+          "w": 3,
+          "df_target": 141
+        },
+        {
+          "rank": 86,
+          "term": "洞口",
+          "npmi": 0.207943,
+          "w": 3,
+          "df_target": 146
+        },
+        {
+          "rank": 87,
+          "term": "商量",
+          "npmi": 0.206724,
+          "w": 5,
+          "df_target": 274
+        },
+        {
+          "rank": 88,
+          "term": "告诉",
+          "npmi": 0.205317,
+          "w": 7,
+          "df_target": 417
+        },
+        {
+          "rank": 89,
+          "term": "提出",
+          "npmi": 0.204809,
+          "w": 3,
+          "df_target": 151
+        },
+        {
+          "rank": 90,
+          "term": "高人",
+          "npmi": 0.204809,
+          "w": 3,
+          "df_target": 151
+        },
+        {
+          "rank": 91,
+          "term": "情景",
+          "npmi": 0.203277,
+          "w": 4,
+          "df_target": 217
+        },
+        {
+          "rank": 92,
+          "term": "条件",
+          "npmi": 0.199434,
+          "w": 7,
+          "df_target": 442
+        },
+        {
+          "rank": 93,
+          "term": "自动",
+          "npmi": 0.19942,
+          "w": 3,
+          "df_target": 160
+        },
+        {
+          "rank": 94,
+          "term": "逃走",
+          "npmi": 0.19942,
+          "w": 3,
+          "df_target": 160
+        },
+        {
+          "rank": 95,
+          "term": "人人",
+          "npmi": 0.194879,
+          "w": 3,
+          "df_target": 168
+        },
+        {
+          "rank": 96,
+          "term": "威胁",
+          "npmi": 0.191671,
+          "w": 4,
+          "df_target": 245
+        },
+        {
+          "rank": 97,
+          "term": "师傅",
+          "npmi": 0.191559,
+          "w": 5,
+          "df_target": 320
+        },
+        {
+          "rank": 98,
+          "term": "乱星海",
+          "npmi": 0.191281,
+          "w": 4,
+          "df_target": 246
+        },
+        {
+          "rank": 99,
+          "term": "抽搐",
+          "npmi": 0.19055,
+          "w": 3,
+          "df_target": 176
+        },
+        {
+          "rank": 100,
+          "term": "遁走",
+          "npmi": 0.190022,
+          "w": 3,
+          "df_target": 177
+        }
+      ]
+    },
+    {
+      "seed": "黄枫谷",
+      "seed_in_graph": true,
+      "seed_df": 301,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "清虚",
+          "npmi": 0.557751,
+          "w": 12,
+          "df_target": 30
+        },
+        {
+          "rank": 2,
+          "term": "五派",
+          "npmi": 0.544293,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 3,
+          "term": "令狐",
+          "npmi": 0.514523,
+          "w": 26,
+          "df_target": 145
+        },
+        {
+          "rank": 4,
+          "term": "化刀",
+          "npmi": 0.513883,
+          "w": 7,
+          "df_target": 20
+        },
+        {
+          "rank": 5,
+          "term": "太岳山",
+          "npmi": 0.507891,
+          "w": 9,
+          "df_target": 31
+        },
+        {
+          "rank": 6,
+          "term": "钟大",
+          "npmi": 0.492207,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 7,
+          "term": "本谷",
+          "npmi": 0.479779,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 8,
+          "term": "聂盈",
+          "npmi": 0.469119,
+          "w": 5,
+          "df_target": 19
+        },
+        {
+          "rank": 9,
+          "term": "正派",
+          "npmi": 0.468816,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 10,
+          "term": "老滑头",
+          "npmi": 0.468816,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 11,
+          "term": "两批",
+          "npmi": 0.45901,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 12,
+          "term": "六派",
+          "npmi": 0.458331,
+          "w": 9,
+          "df_target": 50
+        },
+        {
+          "rank": 13,
+          "term": "李师",
+          "npmi": 0.448404,
+          "w": 4,
+          "df_target": 17
+        },
+        {
+          "rank": 14,
+          "term": "大仙",
+          "npmi": 0.434591,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 15,
+          "term": "越国",
+          "npmi": 0.425612,
+          "w": 20,
+          "df_target": 214
+        },
+        {
+          "rank": 16,
+          "term": "掌门",
+          "npmi": 0.416031,
+          "w": 12,
+          "df_target": 113
+        },
+        {
+          "rank": 17,
+          "term": "雷万鹤",
+          "npmi": 0.415453,
+          "w": 8,
+          "df_target": 64
+        },
+        {
+          "rank": 18,
+          "term": "两派",
+          "npmi": 0.415426,
+          "w": 4,
+          "df_target": 24
+        },
+        {
+          "rank": 19,
+          "term": "接引",
+          "npmi": 0.415265,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 20,
+          "term": "掩月宗",
+          "npmi": 0.408763,
+          "w": 11,
+          "df_target": 107
+        },
+        {
+          "rank": 21,
+          "term": "王师弟",
+          "npmi": 0.404302,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 22,
+          "term": "萧翠儿",
+          "npmi": 0.404161,
+          "w": 4,
+          "df_target": 27
+        },
+        {
+          "rank": 23,
+          "term": "昔日",
+          "npmi": 0.403318,
+          "w": 9,
+          "df_target": 85
+        },
+        {
+          "rank": 24,
+          "term": "坐化",
+          "npmi": 0.400583,
+          "w": 8,
+          "df_target": 74
+        },
+        {
+          "rank": 25,
+          "term": "老鬼",
+          "npmi": 0.39927,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 26,
+          "term": "撤退",
+          "npmi": 0.394496,
+          "w": 3,
+          "df_target": 20
+        },
+        {
+          "rank": 27,
+          "term": "管事",
+          "npmi": 0.391727,
+          "w": 7,
+          "df_target": 67
+        },
+        {
+          "rank": 28,
+          "term": "钟灵道",
+          "npmi": 0.391604,
+          "w": 5,
+          "df_target": 42
+        },
+        {
+          "rank": 29,
+          "term": "七派",
+          "npmi": 0.388148,
+          "w": 11,
+          "df_target": 130
+        },
+        {
+          "rank": 30,
+          "term": "弟子",
+          "npmi": 0.387024,
+          "w": 76,
+          "df_target": 1918
+        },
+        {
+          "rank": 31,
+          "term": "门派",
+          "npmi": 0.38021,
+          "w": 12,
+          "df_target": 158
+        },
+        {
+          "rank": 32,
+          "term": "升仙",
+          "npmi": 0.368908,
+          "w": 6,
+          "df_target": 68
+        },
+        {
+          "rank": 33,
+          "term": "李师祖",
+          "npmi": 0.367683,
+          "w": 7,
+          "df_target": 85
+        },
+        {
+          "rank": 34,
+          "term": "人员",
+          "npmi": 0.359913,
+          "w": 3,
+          "df_target": 29
+        },
+        {
+          "rank": 35,
+          "term": "马师兄",
+          "npmi": 0.353706,
+          "w": 3,
+          "df_target": 31
+        },
+        {
+          "rank": 36,
+          "term": "撤离",
+          "npmi": 0.348928,
+          "w": 5,
+          "df_target": 65
+        },
+        {
+          "rank": 37,
+          "term": "援手",
+          "npmi": 0.347165,
+          "w": 4,
+          "df_target": 49
+        },
+        {
+          "rank": 38,
+          "term": "七大派",
+          "npmi": 0.34241,
+          "w": 3,
+          "df_target": 35
+        },
+        {
+          "rank": 39,
+          "term": "千竹教",
+          "npmi": 0.33966,
+          "w": 4,
+          "df_target": 53
+        },
+        {
+          "rank": 40,
+          "term": "谷内",
+          "npmi": 0.33966,
+          "w": 4,
+          "df_target": 53
+        },
+        {
+          "rank": 41,
+          "term": "师兄弟",
+          "npmi": 0.332702,
+          "w": 4,
+          "df_target": 57
+        },
+        {
+          "rank": 42,
+          "term": "巨剑门",
+          "npmi": 0.332338,
+          "w": 3,
+          "df_target": 39
+        },
+        {
+          "rank": 43,
+          "term": "低级",
+          "npmi": 0.329982,
+          "w": 3,
+          "df_target": 40
+        },
+        {
+          "rank": 44,
+          "term": "十层",
+          "npmi": 0.329982,
+          "w": 3,
+          "df_target": 40
+        },
+        {
+          "rank": 45,
+          "term": "山门",
+          "npmi": 0.329982,
+          "w": 3,
+          "df_target": 40
+        },
+        {
+          "rank": 46,
+          "term": "门内",
+          "npmi": 0.321021,
+          "w": 9,
+          "df_target": 188
+        },
+        {
+          "rank": 47,
+          "term": "配方",
+          "npmi": 0.320141,
+          "w": 4,
+          "df_target": 65
+        },
+        {
+          "rank": 48,
+          "term": "大派",
+          "npmi": 0.319019,
+          "w": 3,
+          "df_target": 45
+        },
+        {
+          "rank": 49,
+          "term": "董萱",
+          "npmi": 0.318717,
+          "w": 7,
+          "df_target": 138
+        },
+        {
+          "rank": 50,
+          "term": "女弟子",
+          "npmi": 0.318681,
+          "w": 4,
+          "df_target": 66
+        },
+        {
+          "rank": 51,
+          "term": "出身",
+          "npmi": 0.315121,
+          "w": 7,
+          "df_target": 143
+        },
+        {
+          "rank": 52,
+          "term": "吕姓",
+          "npmi": 0.314972,
+          "w": 3,
+          "df_target": 47
+        },
+        {
+          "rank": 53,
+          "term": "王师叔",
+          "npmi": 0.314972,
+          "w": 3,
+          "df_target": 47
+        },
+        {
+          "rank": 54,
+          "term": "禁地",
+          "npmi": 0.30284,
+          "w": 10,
+          "df_target": 257
+        },
+        {
+          "rank": 55,
+          "term": "懊恼",
+          "npmi": 0.300342,
+          "w": 3,
+          "df_target": 55
+        },
+        {
+          "rank": 56,
+          "term": "天色",
+          "npmi": 0.299096,
+          "w": 4,
+          "df_target": 81
+        },
+        {
+          "rank": 57,
+          "term": "本门",
+          "npmi": 0.298236,
+          "w": 8,
+          "df_target": 201
+        },
+        {
+          "rank": 58,
+          "term": "坐镇",
+          "npmi": 0.296634,
+          "w": 5,
+          "df_target": 111
+        },
+        {
+          "rank": 59,
+          "term": "高手",
+          "npmi": 0.290658,
+          "w": 5,
+          "df_target": 118
+        },
+        {
+          "rank": 60,
+          "term": "寥寥",
+          "npmi": 0.286602,
+          "w": 5,
+          "df_target": 123
+        },
+        {
+          "rank": 61,
+          "term": "结成",
+          "npmi": 0.283849,
+          "w": 4,
+          "df_target": 95
+        },
+        {
+          "rank": 62,
+          "term": "核心",
+          "npmi": 0.283373,
+          "w": 3,
+          "df_target": 66
+        },
+        {
+          "rank": 63,
+          "term": "落云宗",
+          "npmi": 0.28151,
+          "w": 10,
+          "df_target": 315
+        },
+        {
+          "rank": 64,
+          "term": "堪称",
+          "npmi": 0.279235,
+          "w": 3,
+          "df_target": 69
+        },
+        {
+          "rank": 65,
+          "term": "局面",
+          "npmi": 0.279235,
+          "w": 3,
+          "df_target": 69
+        },
+        {
+          "rank": 66,
+          "term": "九国盟",
+          "npmi": 0.277992,
+          "w": 4,
+          "df_target": 101
+        },
+        {
+          "rank": 67,
+          "term": "寿元",
+          "npmi": 0.277506,
+          "w": 5,
+          "df_target": 135
+        },
+        {
+          "rank": 68,
+          "term": "带来",
+          "npmi": 0.275358,
+          "w": 5,
+          "df_target": 138
+        },
+        {
+          "rank": 69,
+          "term": "武国",
+          "npmi": 0.275274,
+          "w": 3,
+          "df_target": 72
+        },
+        {
+          "rank": 70,
+          "term": "同门",
+          "npmi": 0.275193,
+          "w": 4,
+          "df_target": 104
+        },
+        {
+          "rank": 71,
+          "term": "精锐",
+          "npmi": 0.274278,
+          "w": 4,
+          "df_target": 105
+        },
+        {
+          "rank": 72,
+          "term": "修仙",
+          "npmi": 0.274218,
+          "w": 28,
+          "df_target": 1254
+        },
+        {
+          "rank": 73,
+          "term": "教主",
+          "npmi": 0.27399,
+          "w": 3,
+          "df_target": 73
+        },
+        {
+          "rank": 74,
+          "term": "明日",
+          "npmi": 0.27399,
+          "w": 3,
+          "df_target": 73
+        },
+        {
+          "rank": 75,
+          "term": "千年",
+          "npmi": 0.272057,
+          "w": 6,
+          "df_target": 180
+        },
+        {
+          "rank": 76,
+          "term": "门下",
+          "npmi": 0.271974,
+          "w": 10,
+          "df_target": 345
+        },
+        {
+          "rank": 77,
+          "term": "小老头",
+          "npmi": 0.271583,
+          "w": 4,
+          "df_target": 108
+        },
+        {
+          "rank": 78,
+          "term": "渊源",
+          "npmi": 0.271583,
+          "w": 4,
+          "df_target": 108
+        },
+        {
+          "rank": 79,
+          "term": "各派",
+          "npmi": 0.271475,
+          "w": 3,
+          "df_target": 75
+        },
+        {
+          "rank": 80,
+          "term": "筑基",
+          "npmi": 0.271251,
+          "w": 12,
+          "df_target": 438
+        },
+        {
+          "rank": 81,
+          "term": "告知",
+          "npmi": 0.270242,
+          "w": 3,
+          "df_target": 76
+        },
+        {
+          "rank": 82,
+          "term": "金丹",
+          "npmi": 0.266639,
+          "w": 3,
+          "df_target": 79
+        },
+        {
+          "rank": 83,
+          "term": "殿内",
+          "npmi": 0.260927,
+          "w": 3,
+          "df_target": 84
+        },
+        {
+          "rank": 84,
+          "term": "服饰",
+          "npmi": 0.260294,
+          "w": 5,
+          "df_target": 161
+        },
+        {
+          "rank": 85,
+          "term": "一位",
+          "npmi": 0.251733,
+          "w": 24,
+          "df_target": 1252
+        },
+        {
+          "rank": 86,
+          "term": "两年",
+          "npmi": 0.251453,
+          "w": 3,
+          "df_target": 93
+        },
+        {
+          "rank": 87,
+          "term": "耗尽",
+          "npmi": 0.245634,
+          "w": 3,
+          "df_target": 99
+        },
+        {
+          "rank": 88,
+          "term": "长辈",
+          "npmi": 0.245634,
+          "w": 3,
+          "df_target": 99
+        },
+        {
+          "rank": 89,
+          "term": "基期",
+          "npmi": 0.245286,
+          "w": 13,
+          "df_target": 617
+        },
+        {
+          "rank": 90,
+          "term": "师兄",
+          "npmi": 0.244098,
+          "w": 17,
+          "df_target": 871
+        },
+        {
+          "rank": 91,
+          "term": "结丹期",
+          "npmi": 0.243854,
+          "w": 12,
+          "df_target": 566
+        },
+        {
+          "rank": 92,
+          "term": "地位",
+          "npmi": 0.240158,
+          "w": 3,
+          "df_target": 105
+        },
+        {
+          "rank": 93,
+          "term": "陆师兄",
+          "npmi": 0.239276,
+          "w": 3,
+          "df_target": 106
+        },
+        {
+          "rank": 94,
+          "term": "接受",
+          "npmi": 0.236678,
+          "w": 3,
+          "df_target": 109
+        },
+        {
+          "rank": 95,
+          "term": "魔道",
+          "npmi": 0.232504,
+          "w": 3,
+          "df_target": 114
+        },
+        {
+          "rank": 96,
+          "term": "立即",
+          "npmi": 0.232159,
+          "w": 9,
+          "df_target": 443
+        },
+        {
+          "rank": 97,
+          "term": "当成",
+          "npmi": 0.230885,
+          "w": 3,
+          "df_target": 116
+        },
+        {
+          "rank": 98,
+          "term": "打听",
+          "npmi": 0.223188,
+          "w": 3,
+          "df_target": 126
+        },
+        {
+          "rank": 99,
+          "term": "那位",
+          "npmi": 0.223008,
+          "w": 16,
+          "df_target": 978
+        },
+        {
+          "rank": 100,
+          "term": "资质",
+          "npmi": 0.222906,
+          "w": 6,
+          "df_target": 295
+        }
+      ]
+    },
+    {
+      "seed": "筑基丹",
+      "seed_in_graph": true,
+      "seed_df": 192,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "服用",
+          "npmi": 0.608695,
+          "w": 50,
+          "df_target": 290
+        },
+        {
+          "rank": 2,
+          "term": "洗髓易",
+          "npmi": 0.58614,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 3,
+          "term": "这粒",
+          "npmi": 0.58614,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 4,
+          "term": "主药",
+          "npmi": 0.58186,
+          "w": 7,
+          "df_target": 16
+        },
+        {
+          "rank": 5,
+          "term": "冲关",
+          "npmi": 0.570885,
+          "w": 6,
+          "df_target": 14
+        },
+        {
+          "rank": 6,
+          "term": "侄孙",
+          "npmi": 0.561419,
+          "w": 9,
+          "df_target": 29
+        },
+        {
+          "rank": 7,
+          "term": "两粒",
+          "npmi": 0.557599,
+          "w": 6,
+          "df_target": 16
+        },
+        {
+          "rank": 8,
+          "term": "奖赏",
+          "npmi": 0.554383,
+          "w": 7,
+          "df_target": 21
+        },
+        {
+          "rank": 9,
+          "term": "一粒",
+          "npmi": 0.540618,
+          "w": 16,
+          "df_target": 86
+        },
+        {
+          "rank": 10,
+          "term": "那粒",
+          "npmi": 0.534055,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 11,
+          "term": "三粒",
+          "npmi": 0.521626,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 12,
+          "term": "升仙",
+          "npmi": 0.518352,
+          "w": 12,
+          "df_target": 68
+        },
+        {
+          "rank": 13,
+          "term": "叶师",
+          "npmi": 0.517058,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 14,
+          "term": "筑基",
+          "npmi": 0.514101,
+          "w": 40,
+          "df_target": 438
+        },
+        {
+          "rank": 15,
+          "term": "开炉",
+          "npmi": 0.500857,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 16,
+          "term": "赐予",
+          "npmi": 0.500857,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 17,
+          "term": "到筑",
+          "npmi": 0.491986,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 18,
+          "term": "大仙",
+          "npmi": 0.476438,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 19,
+          "term": "玉筒",
+          "npmi": 0.471195,
+          "w": 4,
+          "df_target": 21
+        },
+        {
+          "rank": 20,
+          "term": "基础",
+          "npmi": 0.466422,
+          "w": 8,
+          "df_target": 61
+        },
+        {
+          "rank": 21,
+          "term": "服下",
+          "npmi": 0.457102,
+          "w": 14,
+          "df_target": 151
+        },
+        {
+          "rank": 22,
+          "term": "大派",
+          "npmi": 0.454716,
+          "w": 6,
+          "df_target": 45
+        },
+        {
+          "rank": 23,
+          "term": "药力",
+          "npmi": 0.4538,
+          "w": 8,
+          "df_target": 69
+        },
+        {
+          "rank": 24,
+          "term": "掌门",
+          "npmi": 0.45059,
+          "w": 11,
+          "df_target": 113
+        },
+        {
+          "rank": 25,
+          "term": "两枚",
+          "npmi": 0.441242,
+          "w": 8,
+          "df_target": 78
+        },
+        {
+          "rank": 26,
+          "term": "吴风",
+          "npmi": 0.441117,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 27,
+          "term": "资质",
+          "npmi": 0.440149,
+          "w": 20,
+          "df_target": 295
+        },
+        {
+          "rank": 28,
+          "term": "让给",
+          "npmi": 0.431802,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 29,
+          "term": "这枚",
+          "npmi": 0.429884,
+          "w": 7,
+          "df_target": 72
+        },
+        {
+          "rank": 30,
+          "term": "入门",
+          "npmi": 0.428491,
+          "w": 7,
+          "df_target": 73
+        },
+        {
+          "rank": 31,
+          "term": "成功",
+          "npmi": 0.426646,
+          "w": 32,
+          "df_target": 650
+        },
+        {
+          "rank": 32,
+          "term": "书生",
+          "npmi": 0.423335,
+          "w": 3,
+          "df_target": 23
+        },
+        {
+          "rank": 33,
+          "term": "选拔",
+          "npmi": 0.423335,
+          "w": 3,
+          "df_target": 23
+        },
+        {
+          "rank": 34,
+          "term": "天真",
+          "npmi": 0.415574,
+          "w": 3,
+          "df_target": 25
+        },
+        {
+          "rank": 35,
+          "term": "买下",
+          "npmi": 0.414477,
+          "w": 4,
+          "df_target": 38
+        },
+        {
+          "rank": 36,
+          "term": "让出",
+          "npmi": 0.409572,
+          "w": 4,
+          "df_target": 40
+        },
+        {
+          "rank": 37,
+          "term": "叶姓",
+          "npmi": 0.408411,
+          "w": 3,
+          "df_target": 27
+        },
+        {
+          "rank": 38,
+          "term": "断绝",
+          "npmi": 0.405027,
+          "w": 3,
+          "df_target": 28
+        },
+        {
+          "rank": 39,
+          "term": "钟灵道",
+          "npmi": 0.404906,
+          "w": 4,
+          "df_target": 42
+        },
+        {
+          "rank": 40,
+          "term": "师侄",
+          "npmi": 0.400951,
+          "w": 12,
+          "df_target": 204
+        },
+        {
+          "rank": 41,
+          "term": "禁地",
+          "npmi": 0.399322,
+          "w": 14,
+          "df_target": 257
+        },
+        {
+          "rank": 42,
+          "term": "七层",
+          "npmi": 0.398605,
+          "w": 3,
+          "df_target": 30
+        },
+        {
+          "rank": 43,
+          "term": "师门",
+          "npmi": 0.394149,
+          "w": 4,
+          "df_target": 47
+        },
+        {
+          "rank": 44,
+          "term": "分给",
+          "npmi": 0.392598,
+          "w": 3,
+          "df_target": 32
+        },
+        {
+          "rank": 45,
+          "term": "师叔",
+          "npmi": 0.388137,
+          "w": 8,
+          "df_target": 131
+        },
+        {
+          "rank": 46,
+          "term": "试炼",
+          "npmi": 0.386585,
+          "w": 8,
+          "df_target": 133
+        },
+        {
+          "rank": 47,
+          "term": "分配",
+          "npmi": 0.381636,
+          "w": 3,
+          "df_target": 36
+        },
+        {
+          "rank": 48,
+          "term": "渺茫",
+          "npmi": 0.381636,
+          "w": 3,
+          "df_target": 36
+        },
+        {
+          "rank": 49,
+          "term": "立下",
+          "npmi": 0.380871,
+          "w": 4,
+          "df_target": 54
+        },
+        {
+          "rank": 50,
+          "term": "丹药",
+          "npmi": 0.37639,
+          "w": 28,
+          "df_target": 824
+        },
+        {
+          "rank": 51,
+          "term": "陆师兄",
+          "npmi": 0.369473,
+          "w": 6,
+          "df_target": 106
+        },
+        {
+          "rank": 52,
+          "term": "赠送",
+          "npmi": 0.367288,
+          "w": 3,
+          "df_target": 42
+        },
+        {
+          "rank": 53,
+          "term": "配方",
+          "npmi": 0.36314,
+          "w": 4,
+          "df_target": 65
+        },
+        {
+          "rank": 54,
+          "term": "谷内",
+          "npmi": 0.345637,
+          "w": 3,
+          "df_target": 53
+        },
+        {
+          "rank": 55,
+          "term": "顶峰",
+          "npmi": 0.344486,
+          "w": 4,
+          "df_target": 79
+        },
+        {
+          "rank": 56,
+          "term": "小老头",
+          "npmi": 0.343248,
+          "w": 5,
+          "df_target": 108
+        },
+        {
+          "rank": 57,
+          "term": "获得",
+          "npmi": 0.340513,
+          "w": 3,
+          "df_target": 56
+        },
+        {
+          "rank": 58,
+          "term": "修仙",
+          "npmi": 0.337895,
+          "w": 30,
+          "df_target": 1254
+        },
+        {
+          "rank": 59,
+          "term": "越国",
+          "npmi": 0.337869,
+          "w": 8,
+          "df_target": 214
+        },
+        {
+          "rank": 60,
+          "term": "奇险",
+          "npmi": 0.332553,
+          "w": 3,
+          "df_target": 61
+        },
+        {
+          "rank": 61,
+          "term": "师伯",
+          "npmi": 0.332553,
+          "w": 3,
+          "df_target": 61
+        },
+        {
+          "rank": 62,
+          "term": "基期",
+          "npmi": 0.33227,
+          "w": 17,
+          "df_target": 617
+        },
+        {
+          "rank": 63,
+          "term": "基本上",
+          "npmi": 0.330962,
+          "w": 4,
+          "df_target": 91
+        },
+        {
+          "rank": 64,
+          "term": "放弃",
+          "npmi": 0.328638,
+          "w": 10,
+          "df_target": 315
+        },
+        {
+          "rank": 65,
+          "term": "管事",
+          "npmi": 0.323821,
+          "w": 3,
+          "df_target": 67
+        },
+        {
+          "rank": 66,
+          "term": "小友",
+          "npmi": 0.322904,
+          "w": 4,
+          "df_target": 99
+        },
+        {
+          "rank": 67,
+          "term": "炼丹",
+          "npmi": 0.321313,
+          "w": 6,
+          "df_target": 172
+        },
+        {
+          "rank": 68,
+          "term": "原料",
+          "npmi": 0.319294,
+          "w": 5,
+          "df_target": 138
+        },
+        {
+          "rank": 69,
+          "term": "各派",
+          "npmi": 0.313322,
+          "w": 3,
+          "df_target": 75
+        },
+        {
+          "rank": 70,
+          "term": "缺少",
+          "npmi": 0.309672,
+          "w": 3,
+          "df_target": 78
+        },
+        {
+          "rank": 71,
+          "term": "以下",
+          "npmi": 0.306159,
+          "w": 3,
+          "df_target": 81
+        },
+        {
+          "rank": 72,
+          "term": "门派",
+          "npmi": 0.306069,
+          "w": 5,
+          "df_target": 158
+        },
+        {
+          "rank": 73,
+          "term": "一枚",
+          "npmi": 0.305227,
+          "w": 11,
+          "df_target": 446
+        },
+        {
+          "rank": 74,
+          "term": "资格",
+          "npmi": 0.302426,
+          "w": 5,
+          "df_target": 164
+        },
+        {
+          "rank": 75,
+          "term": "后人",
+          "npmi": 0.30137,
+          "w": 4,
+          "df_target": 124
+        },
+        {
+          "rank": 76,
+          "term": "打听",
+          "npmi": 0.29984,
+          "w": 4,
+          "df_target": 126
+        },
+        {
+          "rank": 77,
+          "term": "家族",
+          "npmi": 0.297839,
+          "w": 7,
+          "df_target": 266
+        },
+        {
+          "rank": 78,
+          "term": "精进",
+          "npmi": 0.292305,
+          "w": 3,
+          "df_target": 94
+        },
+        {
+          "rank": 79,
+          "term": "散修",
+          "npmi": 0.288763,
+          "w": 7,
+          "df_target": 291
+        },
+        {
+          "rank": 80,
+          "term": "挑选",
+          "npmi": 0.288427,
+          "w": 3,
+          "df_target": 98
+        },
+        {
+          "rank": 81,
+          "term": "外界",
+          "npmi": 0.288407,
+          "w": 4,
+          "df_target": 142
+        },
+        {
+          "rank": 82,
+          "term": "换取",
+          "npmi": 0.288168,
+          "w": 6,
+          "df_target": 240
+        },
+        {
+          "rank": 83,
+          "term": "最佳",
+          "npmi": 0.286546,
+          "w": 3,
+          "df_target": 100
+        },
+        {
+          "rank": 84,
+          "term": "炼气",
+          "npmi": 0.284795,
+          "w": 9,
+          "df_target": 418
+        },
+        {
+          "rank": 85,
+          "term": "一批",
+          "npmi": 0.283806,
+          "w": 4,
+          "df_target": 149
+        },
+        {
+          "rank": 86,
+          "term": "地位",
+          "npmi": 0.282005,
+          "w": 3,
+          "df_target": 105
+        },
+        {
+          "rank": 87,
+          "term": "灵药",
+          "npmi": 0.27946,
+          "w": 15,
+          "df_target": 846
+        },
+        {
+          "rank": 88,
+          "term": "残余",
+          "npmi": 0.276994,
+          "w": 4,
+          "df_target": 160
+        },
+        {
+          "rank": 89,
+          "term": "这样一来",
+          "npmi": 0.272328,
+          "w": 4,
+          "df_target": 168
+        },
+        {
+          "rank": 90,
+          "term": "信心",
+          "npmi": 0.271196,
+          "w": 4,
+          "df_target": 170
+        },
+        {
+          "rank": 91,
+          "term": "侥幸",
+          "npmi": 0.270722,
+          "w": 6,
+          "df_target": 286
+        },
+        {
+          "rank": 92,
+          "term": "珍贵",
+          "npmi": 0.268805,
+          "w": 3,
+          "df_target": 121
+        },
+        {
+          "rank": 93,
+          "term": "进行",
+          "npmi": 0.267977,
+          "w": 6,
+          "df_target": 294
+        },
+        {
+          "rank": 94,
+          "term": "一问",
+          "npmi": 0.2643,
+          "w": 3,
+          "df_target": 127
+        },
+        {
+          "rank": 95,
+          "term": "共同",
+          "npmi": 0.260706,
+          "w": 3,
+          "df_target": 132
+        },
+        {
+          "rank": 96,
+          "term": "即可",
+          "npmi": 0.260057,
+          "w": 4,
+          "df_target": 191
+        },
+        {
+          "rank": 97,
+          "term": "闭关",
+          "npmi": 0.255362,
+          "w": 7,
+          "df_target": 405
+        },
+        {
+          "rank": 98,
+          "term": "本门",
+          "npmi": 0.255177,
+          "w": 4,
+          "df_target": 201
+        },
+        {
+          "rank": 99,
+          "term": "炼制",
+          "npmi": 0.254908,
+          "w": 20,
+          "df_target": 1519
+        },
+        {
+          "rank": 100,
+          "term": "弟子",
+          "npmi": 0.254396,
+          "w": 24,
+          "df_target": 1918
+        }
+      ]
+    },
+    {
+      "seed": "曲魂",
+      "seed_in_graph": true,
+      "seed_df": 549,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "曹禄",
+          "npmi": 0.534265,
+          "w": 8,
+          "df_target": 11
+        },
+        {
+          "rank": 2,
+          "term": "混元",
+          "npmi": 0.507486,
+          "w": 10,
+          "df_target": 20
+        },
+        {
+          "rank": 3,
+          "term": "煞丹",
+          "npmi": 0.502372,
+          "w": 10,
+          "df_target": 21
+        },
+        {
+          "rank": 4,
+          "term": "血炼",
+          "npmi": 0.473112,
+          "w": 5,
+          "df_target": 10
+        },
+        {
+          "rank": 5,
+          "term": "引魂钟",
+          "npmi": 0.46327,
+          "w": 8,
+          "df_target": 22
+        },
+        {
+          "rank": 6,
+          "term": "曲某",
+          "npmi": 0.447474,
+          "w": 5,
+          "df_target": 13
+        },
+        {
+          "rank": 7,
+          "term": "绿煌",
+          "npmi": 0.441353,
+          "w": 6,
+          "df_target": 18
+        },
+        {
+          "rank": 8,
+          "term": "降尘",
+          "npmi": 0.43349,
+          "w": 5,
+          "df_target": 15
+        },
+        {
+          "rank": 9,
+          "term": "炼魂术",
+          "npmi": 0.416584,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 10,
+          "term": "珊瑚岛",
+          "npmi": 0.409497,
+          "w": 4,
+          "df_target": 14
+        },
+        {
+          "rank": 11,
+          "term": "假丹",
+          "npmi": 0.405378,
+          "w": 5,
+          "df_target": 20
+        },
+        {
+          "rank": 12,
+          "term": "神风",
+          "npmi": 0.397651,
+          "w": 16,
+          "df_target": 110
+        },
+        {
+          "rank": 13,
+          "term": "雪灵水",
+          "npmi": 0.394203,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 14,
+          "term": "地段",
+          "npmi": 0.386104,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 15,
+          "term": "魁星",
+          "npmi": 0.37921,
+          "w": 10,
+          "df_target": 68
+        },
+        {
+          "rank": 16,
+          "term": "此钟",
+          "npmi": 0.375386,
+          "w": 4,
+          "df_target": 20
+        },
+        {
+          "rank": 17,
+          "term": "笑容满面",
+          "npmi": 0.353686,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 18,
+          "term": "千目",
+          "npmi": 0.348366,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 19,
+          "term": "逆徒",
+          "npmi": 0.348366,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 20,
+          "term": "僵尸",
+          "npmi": 0.343334,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 21,
+          "term": "顾家",
+          "npmi": 0.343208,
+          "w": 4,
+          "df_target": 28
+        },
+        {
+          "rank": 22,
+          "term": "御器",
+          "npmi": 0.341416,
+          "w": 15,
+          "df_target": 168
+        },
+        {
+          "rank": 23,
+          "term": "冯三娘",
+          "npmi": 0.340117,
+          "w": 5,
+          "df_target": 39
+        },
+        {
+          "rank": 24,
+          "term": "孙二狗",
+          "npmi": 0.335087,
+          "w": 15,
+          "df_target": 178
+        },
+        {
+          "rank": 25,
+          "term": "山丘",
+          "npmi": 0.333474,
+          "w": 4,
+          "df_target": 31
+        },
+        {
+          "rank": 26,
+          "term": "定神",
+          "npmi": 0.319174,
+          "w": 4,
+          "df_target": 36
+        },
+        {
+          "rank": 27,
+          "term": "舟上",
+          "npmi": 0.319174,
+          "w": 4,
+          "df_target": 36
+        },
+        {
+          "rank": 28,
+          "term": "四平",
+          "npmi": 0.316553,
+          "w": 4,
+          "df_target": 37
+        },
+        {
+          "rank": 29,
+          "term": "捕杀",
+          "npmi": 0.311519,
+          "w": 4,
+          "df_target": 39
+        },
+        {
+          "rank": 30,
+          "term": "寰岛",
+          "npmi": 0.310628,
+          "w": 3,
+          "df_target": 27
+        },
+        {
+          "rank": 31,
+          "term": "未闻",
+          "npmi": 0.310628,
+          "w": 3,
+          "df_target": 27
+        },
+        {
+          "rank": 32,
+          "term": "衣服",
+          "npmi": 0.310628,
+          "w": 3,
+          "df_target": 27
+        },
+        {
+          "rank": 33,
+          "term": "身侧",
+          "npmi": 0.309114,
+          "w": 6,
+          "df_target": 68
+        },
+        {
+          "rank": 34,
+          "term": "分身",
+          "npmi": 0.307462,
+          "w": 13,
+          "df_target": 190
+        },
+        {
+          "rank": 35,
+          "term": "默不作声",
+          "npmi": 0.302181,
+          "w": 4,
+          "df_target": 43
+        },
+        {
+          "rank": 36,
+          "term": "石蝶",
+          "npmi": 0.299983,
+          "w": 4,
+          "df_target": 44
+        },
+        {
+          "rank": 37,
+          "term": "月牙",
+          "npmi": 0.294814,
+          "w": 3,
+          "df_target": 32
+        },
+        {
+          "rank": 38,
+          "term": "衣袖",
+          "npmi": 0.293675,
+          "w": 4,
+          "df_target": 47
+        },
+        {
+          "rank": 39,
+          "term": "隔壁",
+          "npmi": 0.29195,
+          "w": 3,
+          "df_target": 33
+        },
+        {
+          "rank": 40,
+          "term": "金青",
+          "npmi": 0.290536,
+          "w": 7,
+          "df_target": 100
+        },
+        {
+          "rank": 41,
+          "term": "疾驰",
+          "npmi": 0.287757,
+          "w": 4,
+          "df_target": 50
+        },
+        {
+          "rank": 42,
+          "term": "伙计",
+          "npmi": 0.286474,
+          "w": 3,
+          "df_target": 35
+        },
+        {
+          "rank": 43,
+          "term": "虬须",
+          "npmi": 0.28579,
+          "w": 5,
+          "df_target": 68
+        },
+        {
+          "rank": 44,
+          "term": "长青",
+          "npmi": 0.282185,
+          "w": 4,
+          "df_target": 53
+        },
+        {
+          "rank": 45,
+          "term": "长虹",
+          "npmi": 0.279085,
+          "w": 7,
+          "df_target": 112
+        },
+        {
+          "rank": 46,
+          "term": "帮主",
+          "npmi": 0.278642,
+          "w": 4,
+          "df_target": 55
+        },
+        {
+          "rank": 47,
+          "term": "五行阵",
+          "npmi": 0.276402,
+          "w": 3,
+          "df_target": 39
+        },
+        {
+          "rank": 48,
+          "term": "遮住",
+          "npmi": 0.276402,
+          "w": 3,
+          "df_target": 39
+        },
+        {
+          "rank": 49,
+          "term": "绿影",
+          "npmi": 0.274805,
+          "w": 6,
+          "df_target": 96
+        },
+        {
+          "rank": 50,
+          "term": "五级",
+          "npmi": 0.271747,
+          "w": 3,
+          "df_target": 41
+        },
+        {
+          "rank": 51,
+          "term": "金丹",
+          "npmi": 0.271138,
+          "w": 5,
+          "df_target": 79
+        },
+        {
+          "rank": 52,
+          "term": "指环",
+          "npmi": 0.270321,
+          "w": 4,
+          "df_target": 60
+        },
+        {
+          "rank": 53,
+          "term": "一拉",
+          "npmi": 0.269504,
+          "w": 3,
+          "df_target": 42
+        },
+        {
+          "rank": 54,
+          "term": "沙哑",
+          "npmi": 0.265175,
+          "w": 3,
+          "df_target": 44
+        },
+        {
+          "rank": 55,
+          "term": "命令",
+          "npmi": 0.261942,
+          "w": 12,
+          "df_target": 262
+        },
+        {
+          "rank": 56,
+          "term": "钵盂",
+          "npmi": 0.261206,
+          "w": 4,
+          "df_target": 66
+        },
+        {
+          "rank": 57,
+          "term": "修习",
+          "npmi": 0.261037,
+          "w": 3,
+          "df_target": 46
+        },
+        {
+          "rank": 58,
+          "term": "炼尸",
+          "npmi": 0.256955,
+          "w": 4,
+          "df_target": 69
+        },
+        {
+          "rank": 59,
+          "term": "黄芒",
+          "npmi": 0.252298,
+          "w": 7,
+          "df_target": 146
+        },
+        {
+          "rank": 60,
+          "term": "霓裳",
+          "npmi": 0.25108,
+          "w": 5,
+          "df_target": 97
+        },
+        {
+          "rank": 61,
+          "term": "天星",
+          "npmi": 0.249672,
+          "w": 10,
+          "df_target": 234
+        },
+        {
+          "rank": 62,
+          "term": "冲进",
+          "npmi": 0.249626,
+          "w": 3,
+          "df_target": 52
+        },
+        {
+          "rank": 63,
+          "term": "灵宗",
+          "npmi": 0.249626,
+          "w": 3,
+          "df_target": 52
+        },
+        {
+          "rank": 64,
+          "term": "颠倒",
+          "npmi": 0.247853,
+          "w": 3,
+          "df_target": 53
+        },
+        {
+          "rank": 65,
+          "term": "血灵",
+          "npmi": 0.246464,
+          "w": 4,
+          "df_target": 77
+        },
+        {
+          "rank": 66,
+          "term": "其后",
+          "npmi": 0.246168,
+          "w": 5,
+          "df_target": 102
+        },
+        {
+          "rank": 67,
+          "term": "飞去",
+          "npmi": 0.24499,
+          "w": 14,
+          "df_target": 372
+        },
+        {
+          "rank": 68,
+          "term": "跑掉",
+          "npmi": 0.244012,
+          "w": 4,
+          "df_target": 79
+        },
+        {
+          "rank": 69,
+          "term": "奇虫",
+          "npmi": 0.234769,
+          "w": 3,
+          "df_target": 61
+        },
+        {
+          "rank": 70,
+          "term": "巨汉",
+          "npmi": 0.233415,
+          "w": 7,
+          "df_target": 176
+        },
+        {
+          "rank": 71,
+          "term": "犹若",
+          "npmi": 0.233255,
+          "w": 3,
+          "df_target": 62
+        },
+        {
+          "rank": 72,
+          "term": "想着",
+          "npmi": 0.228338,
+          "w": 9,
+          "df_target": 252
+        },
+        {
+          "rank": 73,
+          "term": "客栈",
+          "npmi": 0.227874,
+          "w": 5,
+          "df_target": 123
+        },
+        {
+          "rank": 74,
+          "term": "结成",
+          "npmi": 0.226374,
+          "w": 4,
+          "df_target": 95
+        },
+        {
+          "rank": 75,
+          "term": "推开",
+          "npmi": 0.224658,
+          "w": 3,
+          "df_target": 68
+        },
+        {
+          "rank": 76,
+          "term": "一齐",
+          "npmi": 0.223908,
+          "w": 12,
+          "df_target": 374
+        },
+        {
+          "rank": 77,
+          "term": "结丹",
+          "npmi": 0.222216,
+          "w": 21,
+          "df_target": 753
+        },
+        {
+          "rank": 78,
+          "term": "一圈",
+          "npmi": 0.220674,
+          "w": 8,
+          "df_target": 235
+        },
+        {
+          "rank": 79,
+          "term": "望了望",
+          "npmi": 0.220421,
+          "w": 9,
+          "df_target": 272
+        },
+        {
+          "rank": 80,
+          "term": "血玉",
+          "npmi": 0.219574,
+          "w": 4,
+          "df_target": 102
+        },
+        {
+          "rank": 81,
+          "term": "身边",
+          "npmi": 0.219428,
+          "w": 13,
+          "df_target": 430
+        },
+        {
+          "rank": 82,
+          "term": "跟前",
+          "npmi": 0.216536,
+          "w": 7,
+          "df_target": 208
+        },
+        {
+          "rank": 83,
+          "term": "贴身",
+          "npmi": 0.215538,
+          "w": 3,
+          "df_target": 75
+        },
+        {
+          "rank": 84,
+          "term": "张嘴",
+          "npmi": 0.214306,
+          "w": 3,
+          "df_target": 76
+        },
+        {
+          "rank": 85,
+          "term": "夺舍",
+          "npmi": 0.211888,
+          "w": 3,
+          "df_target": 78
+        },
+        {
+          "rank": 86,
+          "term": "热情",
+          "npmi": 0.211888,
+          "w": 3,
+          "df_target": 78
+        },
+        {
+          "rank": 87,
+          "term": "顶峰",
+          "npmi": 0.210702,
+          "w": 3,
+          "df_target": 79
+        },
+        {
+          "rank": 88,
+          "term": "不舍",
+          "npmi": 0.209531,
+          "w": 3,
+          "df_target": 80
+        },
+        {
+          "rank": 89,
+          "term": "招呼",
+          "npmi": 0.209144,
+          "w": 8,
+          "df_target": 263
+        },
+        {
+          "rank": 90,
+          "term": "带走",
+          "npmi": 0.206105,
+          "w": 3,
+          "df_target": 83
+        },
+        {
+          "rank": 91,
+          "term": "躯体",
+          "npmi": 0.205322,
+          "w": 8,
+          "df_target": 273
+        },
+        {
+          "rank": 92,
+          "term": "无名",
+          "npmi": 0.204832,
+          "w": 4,
+          "df_target": 119
+        },
+        {
+          "rank": 93,
+          "term": "小岛",
+          "npmi": 0.204811,
+          "w": 6,
+          "df_target": 194
+        },
+        {
+          "rank": 94,
+          "term": "从小",
+          "npmi": 0.203889,
+          "w": 3,
+          "df_target": 85
+        },
+        {
+          "rank": 95,
+          "term": "掌柜",
+          "npmi": 0.203284,
+          "w": 6,
+          "df_target": 197
+        },
+        {
+          "rank": 96,
+          "term": "炼气",
+          "npmi": 0.200857,
+          "w": 11,
+          "df_target": 418
+        },
+        {
+          "rank": 97,
+          "term": "冒出",
+          "npmi": 0.200661,
+          "w": 3,
+          "df_target": 88
+        },
+        {
+          "rank": 98,
+          "term": "承认",
+          "npmi": 0.200128,
+          "w": 4,
+          "df_target": 125
+        },
+        {
+          "rank": 99,
+          "term": "边上",
+          "npmi": 0.196523,
+          "w": 3,
+          "df_target": 92
+        },
+        {
+          "rank": 100,
+          "term": "七派",
+          "npmi": 0.196377,
+          "w": 4,
+          "df_target": 130
+        }
+      ]
+    },
+    {
+      "seed": "大衍神君",
+      "seed_in_graph": true,
+      "seed_df": 334,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "真水",
+          "npmi": 0.561386,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 2,
+          "term": "研制",
+          "npmi": 0.539411,
+          "w": 7,
+          "df_target": 14
+        },
+        {
+          "rank": 3,
+          "term": "洞福天",
+          "npmi": 0.53461,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 4,
+          "term": "回阳",
+          "npmi": 0.513841,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 5,
+          "term": "宝经",
+          "npmi": 0.513841,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 6,
+          "term": "这明",
+          "npmi": 0.510542,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 7,
+          "term": "大衍",
+          "npmi": 0.503858,
+          "w": 5,
+          "df_target": 12
+        },
+        {
+          "rank": 8,
+          "term": "尸焰",
+          "npmi": 0.503858,
+          "w": 5,
+          "df_target": 12
+        },
+        {
+          "rank": 9,
+          "term": "王诀",
+          "npmi": 0.502515,
+          "w": 6,
+          "df_target": 16
+        },
+        {
+          "rank": 10,
+          "term": "本神君",
+          "npmi": 0.499278,
+          "w": 4,
+          "df_target": 9
+        },
+        {
+          "rank": 11,
+          "term": "寒髓",
+          "npmi": 0.487529,
+          "w": 9,
+          "df_target": 34
+        },
+        {
+          "rank": 12,
+          "term": "神君",
+          "npmi": 0.482524,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 13,
+          "term": "极西",
+          "npmi": 0.478762,
+          "w": 9,
+          "df_target": 37
+        },
+        {
+          "rank": 14,
+          "term": "这一界",
+          "npmi": 0.475997,
+          "w": 9,
+          "df_target": 38
+        },
+        {
+          "rank": 15,
+          "term": "佛门",
+          "npmi": 0.471777,
+          "w": 13,
+          "df_target": 68
+        },
+        {
+          "rank": 16,
+          "term": "舍利子",
+          "npmi": 0.471766,
+          "w": 4,
+          "df_target": 12
+        },
+        {
+          "rank": 17,
+          "term": "北夜",
+          "npmi": 0.464111,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 18,
+          "term": "七焰",
+          "npmi": 0.458953,
+          "w": 5,
+          "df_target": 19
+        },
+        {
+          "rank": 19,
+          "term": "竹筒",
+          "npmi": 0.45396,
+          "w": 9,
+          "df_target": 47
+        },
+        {
+          "rank": 20,
+          "term": "密窟",
+          "npmi": 0.436124,
+          "w": 5,
+          "df_target": 24
+        },
+        {
+          "rank": 21,
+          "term": "感概",
+          "npmi": 0.432358,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 22,
+          "term": "石坚",
+          "npmi": 0.432358,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 23,
+          "term": "银沙",
+          "npmi": 0.427818,
+          "w": 4,
+          "df_target": 19
+        },
+        {
+          "rank": 24,
+          "term": "明王",
+          "npmi": 0.427521,
+          "w": 6,
+          "df_target": 34
+        },
+        {
+          "rank": 25,
+          "term": "老夫",
+          "npmi": 0.422891,
+          "w": 68,
+          "df_target": 1127
+        },
+        {
+          "rank": 26,
+          "term": "小子",
+          "npmi": 0.422076,
+          "w": 35,
+          "df_target": 441
+        },
+        {
+          "rank": 27,
+          "term": "沉寂",
+          "npmi": 0.421834,
+          "w": 6,
+          "df_target": 36
+        },
+        {
+          "rank": 28,
+          "term": "冯家",
+          "npmi": 0.42032,
+          "w": 8,
+          "df_target": 55
+        },
+        {
+          "rank": 29,
+          "term": "尸珠",
+          "npmi": 0.41801,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 30,
+          "term": "才智",
+          "npmi": 0.411589,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 31,
+          "term": "岳阳宫",
+          "npmi": 0.411114,
+          "w": 5,
+          "df_target": 31
+        },
+        {
+          "rank": 32,
+          "term": "懒洋洋",
+          "npmi": 0.404912,
+          "w": 11,
+          "df_target": 100
+        },
+        {
+          "rank": 33,
+          "term": "哼哼",
+          "npmi": 0.381,
+          "w": 4,
+          "df_target": 31
+        },
+        {
+          "rank": 34,
+          "term": "转世",
+          "npmi": 0.381,
+          "w": 4,
+          "df_target": 31
+        },
+        {
+          "rank": 35,
+          "term": "防御能力",
+          "npmi": 0.380272,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 36,
+          "term": "尸王",
+          "npmi": 0.375942,
+          "w": 3,
+          "df_target": 22
+        },
+        {
+          "rank": 37,
+          "term": "回阳水",
+          "npmi": 0.371805,
+          "w": 3,
+          "df_target": 23
+        },
+        {
+          "rank": 38,
+          "term": "分裂",
+          "npmi": 0.37101,
+          "w": 6,
+          "df_target": 60
+        },
+        {
+          "rank": 39,
+          "term": "大衍诀",
+          "npmi": 0.370508,
+          "w": 13,
+          "df_target": 174
+        },
+        {
+          "rank": 40,
+          "term": "研究",
+          "npmi": 0.366275,
+          "w": 20,
+          "df_target": 326
+        },
+        {
+          "rank": 41,
+          "term": "舍利",
+          "npmi": 0.36408,
+          "w": 4,
+          "df_target": 37
+        },
+        {
+          "rank": 42,
+          "term": "传给",
+          "npmi": 0.360394,
+          "w": 3,
+          "df_target": 26
+        },
+        {
+          "rank": 43,
+          "term": "地宝",
+          "npmi": 0.360394,
+          "w": 3,
+          "df_target": 26
+        },
+        {
+          "rank": 44,
+          "term": "解封",
+          "npmi": 0.360394,
+          "w": 3,
+          "df_target": 26
+        },
+        {
+          "rank": 45,
+          "term": "通灵之",
+          "npmi": 0.359045,
+          "w": 4,
+          "df_target": 39
+        },
+        {
+          "rank": 46,
+          "term": "炼制",
+          "npmi": 0.358437,
+          "w": 59,
+          "df_target": 1519
+        },
+        {
+          "rank": 47,
+          "term": "传授给",
+          "npmi": 0.356624,
+          "w": 4,
+          "df_target": 40
+        },
+        {
+          "rank": 48,
+          "term": "大限",
+          "npmi": 0.354262,
+          "w": 4,
+          "df_target": 41
+        },
+        {
+          "rank": 49,
+          "term": "这有",
+          "npmi": 0.351958,
+          "w": 4,
+          "df_target": 42
+        },
+        {
+          "rank": 50,
+          "term": "土甲龙",
+          "npmi": 0.35023,
+          "w": 3,
+          "df_target": 29
+        },
+        {
+          "rank": 51,
+          "term": "改动",
+          "npmi": 0.347075,
+          "w": 3,
+          "df_target": 30
+        },
+        {
+          "rank": 52,
+          "term": "化神期",
+          "npmi": 0.345058,
+          "w": 11,
+          "df_target": 176
+        },
+        {
+          "rank": 53,
+          "term": "精魂",
+          "npmi": 0.342313,
+          "w": 12,
+          "df_target": 203
+        },
+        {
+          "rank": 54,
+          "term": "答案",
+          "npmi": 0.341068,
+          "w": 3,
+          "df_target": 32
+        },
+        {
+          "rank": 55,
+          "term": "晋京",
+          "npmi": 0.339188,
+          "w": 4,
+          "df_target": 48
+        },
+        {
+          "rank": 56,
+          "term": "佛宗",
+          "npmi": 0.335426,
+          "w": 3,
+          "df_target": 34
+        },
+        {
+          "rank": 57,
+          "term": "铜片",
+          "npmi": 0.335426,
+          "w": 3,
+          "df_target": 34
+        },
+        {
+          "rank": 58,
+          "term": "继承",
+          "npmi": 0.335193,
+          "w": 6,
+          "df_target": 86
+        },
+        {
+          "rank": 59,
+          "term": "上界",
+          "npmi": 0.332728,
+          "w": 3,
+          "df_target": 35
+        },
+        {
+          "rank": 60,
+          "term": "人能",
+          "npmi": 0.330106,
+          "w": 3,
+          "df_target": 36
+        },
+        {
+          "rank": 61,
+          "term": "千竹教",
+          "npmi": 0.329711,
+          "w": 4,
+          "df_target": 53
+        },
+        {
+          "rank": 62,
+          "term": "精火",
+          "npmi": 0.327923,
+          "w": 4,
+          "df_target": 54
+        },
+        {
+          "rank": 63,
+          "term": "翻手",
+          "npmi": 0.327556,
+          "w": 3,
+          "df_target": 37
+        },
+        {
+          "rank": 64,
+          "term": "留给",
+          "npmi": 0.326169,
+          "w": 4,
+          "df_target": 55
+        },
+        {
+          "rank": 65,
+          "term": "衣钵",
+          "npmi": 0.325073,
+          "w": 3,
+          "df_target": 38
+        },
+        {
+          "rank": 66,
+          "term": "魔髓",
+          "npmi": 0.322753,
+          "w": 4,
+          "df_target": 57
+        },
+        {
+          "rank": 67,
+          "term": "神期",
+          "npmi": 0.322656,
+          "w": 3,
+          "df_target": 39
+        },
+        {
+          "rank": 68,
+          "term": "古魔",
+          "npmi": 0.320562,
+          "w": 14,
+          "df_target": 305
+        },
+        {
+          "rank": 69,
+          "term": "傀儡",
+          "npmi": 0.319705,
+          "w": 59,
+          "df_target": 2052
+        },
+        {
+          "rank": 70,
+          "term": "煞气",
+          "npmi": 0.318096,
+          "w": 14,
+          "df_target": 312
+        },
+        {
+          "rank": 71,
+          "term": "法门",
+          "npmi": 0.317847,
+          "w": 4,
+          "df_target": 60
+        },
+        {
+          "rank": 72,
+          "term": "之法",
+          "npmi": 0.314862,
+          "w": 8,
+          "df_target": 154
+        },
+        {
+          "rank": 73,
+          "term": "天下",
+          "npmi": 0.313704,
+          "w": 5,
+          "df_target": 84
+        },
+        {
+          "rank": 74,
+          "term": "宗师",
+          "npmi": 0.313568,
+          "w": 3,
+          "df_target": 43
+        },
+        {
+          "rank": 75,
+          "term": "配方",
+          "npmi": 0.310192,
+          "w": 4,
+          "df_target": 65
+        },
+        {
+          "rank": 76,
+          "term": "材料",
+          "npmi": 0.308162,
+          "w": 37,
+          "df_target": 1219
+        },
+        {
+          "rank": 77,
+          "term": "霸道",
+          "npmi": 0.303105,
+          "w": 4,
+          "df_target": 70
+        },
+        {
+          "rank": 78,
+          "term": "魂飞魄散",
+          "npmi": 0.303105,
+          "w": 4,
+          "df_target": 70
+        },
+        {
+          "rank": 79,
+          "term": "传声",
+          "npmi": 0.300411,
+          "w": 4,
+          "df_target": 72
+        },
+        {
+          "rank": 80,
+          "term": "炼体",
+          "npmi": 0.29953,
+          "w": 3,
+          "df_target": 50
+        },
+        {
+          "rank": 81,
+          "term": "可用",
+          "npmi": 0.297687,
+          "w": 3,
+          "df_target": 51
+        },
+        {
+          "rank": 82,
+          "term": "掺入",
+          "npmi": 0.297687,
+          "w": 3,
+          "df_target": 51
+        },
+        {
+          "rank": 83,
+          "term": "三焰",
+          "npmi": 0.297648,
+          "w": 5,
+          "df_target": 99
+        },
+        {
+          "rank": 84,
+          "term": "金刚",
+          "npmi": 0.29719,
+          "w": 8,
+          "df_target": 183
+        },
+        {
+          "rank": 85,
+          "term": "大晋",
+          "npmi": 0.297038,
+          "w": 11,
+          "df_target": 277
+        },
+        {
+          "rank": 86,
+          "term": "游历",
+          "npmi": 0.296507,
+          "w": 4,
+          "df_target": 75
+        },
+        {
+          "rank": 87,
+          "term": "不以为然",
+          "npmi": 0.29399,
+          "w": 4,
+          "df_target": 77
+        },
+        {
+          "rank": 88,
+          "term": "仿制",
+          "npmi": 0.291538,
+          "w": 4,
+          "df_target": 79
+        },
+        {
+          "rank": 89,
+          "term": "脑中",
+          "npmi": 0.289783,
+          "w": 9,
+          "df_target": 229
+        },
+        {
+          "rank": 90,
+          "term": "口诀",
+          "npmi": 0.287073,
+          "w": 8,
+          "df_target": 202
+        },
+        {
+          "rank": 91,
+          "term": "简中",
+          "npmi": 0.285299,
+          "w": 6,
+          "df_target": 142
+        },
+        {
+          "rank": 92,
+          "term": "昔年",
+          "npmi": 0.284723,
+          "w": 5,
+          "df_target": 113
+        },
+        {
+          "rank": 93,
+          "term": "稀罕",
+          "npmi": 0.282561,
+          "w": 3,
+          "df_target": 60
+        },
+        {
+          "rank": 94,
+          "term": "小极宫",
+          "npmi": 0.281921,
+          "w": 7,
+          "df_target": 179
+        },
+        {
+          "rank": 95,
+          "term": "万年",
+          "npmi": 0.281687,
+          "w": 12,
+          "df_target": 358
+        },
+        {
+          "rank": 96,
+          "term": "基础",
+          "npmi": 0.281023,
+          "w": 3,
+          "df_target": 61
+        },
+        {
+          "rank": 97,
+          "term": "苦竹",
+          "npmi": 0.281023,
+          "w": 3,
+          "df_target": 61
+        },
+        {
+          "rank": 98,
+          "term": "凑齐",
+          "npmi": 0.276969,
+          "w": 4,
+          "df_target": 92
+        },
+        {
+          "rank": 99,
+          "term": "创立",
+          "npmi": 0.275111,
+          "w": 3,
+          "df_target": 65
+        },
+        {
+          "rank": 100,
+          "term": "佩服",
+          "npmi": 0.27369,
+          "w": 3,
+          "df_target": 66
+        }
+      ]
+    },
+    {
+      "seed": "银月",
+      "seed_in_graph": true,
+      "seed_df": 1006,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "狼族",
+          "npmi": 0.518471,
+          "w": 17,
+          "df_target": 22
+        },
+        {
+          "rank": 2,
+          "term": "祖父",
+          "npmi": 0.516483,
+          "w": 30,
+          "df_target": 53
+        },
+        {
+          "rank": 3,
+          "term": "小婢",
+          "npmi": 0.500534,
+          "w": 20,
+          "df_target": 33
+        },
+        {
+          "rank": 4,
+          "term": "忘情",
+          "npmi": 0.493777,
+          "w": 24,
+          "df_target": 46
+        },
+        {
+          "rank": 5,
+          "term": "主人",
+          "npmi": 0.474619,
+          "w": 136,
+          "df_target": 701
+        },
+        {
+          "rank": 6,
+          "term": "七龙桩",
+          "npmi": 0.471384,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 7,
+          "term": "以器",
+          "npmi": 0.463847,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 8,
+          "term": "月儿",
+          "npmi": 0.463847,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 9,
+          "term": "公主",
+          "npmi": 0.458763,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 10,
+          "term": "我和珑",
+          "npmi": 0.458763,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 11,
+          "term": "紫铖",
+          "npmi": 0.452654,
+          "w": 12,
+          "df_target": 24
+        },
+        {
+          "rank": 12,
+          "term": "灵魂",
+          "npmi": 0.43549,
+          "w": 7,
+          "df_target": 13
+        },
+        {
+          "rank": 13,
+          "term": "妖狐",
+          "npmi": 0.43536,
+          "w": 21,
+          "df_target": 63
+        },
+        {
+          "rank": 14,
+          "term": "之器",
+          "npmi": 0.432608,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 15,
+          "term": "器灵",
+          "npmi": 0.432595,
+          "w": 22,
+          "df_target": 69
+        },
+        {
+          "rank": 16,
+          "term": "玉阳",
+          "npmi": 0.431987,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 17,
+          "term": "奴婢",
+          "npmi": 0.424225,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 18,
+          "term": "灵之身",
+          "npmi": 0.411218,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 19,
+          "term": "师姑",
+          "npmi": 0.411,
+          "w": 8,
+          "df_target": 20
+        },
+        {
+          "rank": 20,
+          "term": "寄身",
+          "npmi": 0.408384,
+          "w": 7,
+          "df_target": 17
+        },
+        {
+          "rank": 21,
+          "term": "雪玲",
+          "npmi": 0.405096,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 22,
+          "term": "三大真",
+          "npmi": 0.394249,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 23,
+          "term": "灵之火",
+          "npmi": 0.394249,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 24,
+          "term": "四瞳",
+          "npmi": 0.393831,
+          "w": 4,
+          "df_target": 9
+        },
+        {
+          "rank": 25,
+          "term": "小狐",
+          "npmi": 0.392852,
+          "w": 12,
+          "df_target": 42
+        },
+        {
+          "rank": 26,
+          "term": "香雾",
+          "npmi": 0.392815,
+          "w": 6,
+          "df_target": 16
+        },
+        {
+          "rank": 27,
+          "term": "灵狐",
+          "npmi": 0.383755,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 28,
+          "term": "粉雾",
+          "npmi": 0.379901,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 29,
+          "term": "关切",
+          "npmi": 0.375717,
+          "w": 6,
+          "df_target": 19
+        },
+        {
+          "rank": 30,
+          "term": "紫网",
+          "npmi": 0.37464,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 31,
+          "term": "獠影",
+          "npmi": 0.374307,
+          "w": 5,
+          "df_target": 15
+        },
+        {
+          "rank": 32,
+          "term": "玲儿",
+          "npmi": 0.367473,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 33,
+          "term": "刹圣祖",
+          "npmi": 0.358664,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 34,
+          "term": "玲珑",
+          "npmi": 0.355387,
+          "w": 27,
+          "df_target": 179
+        },
+        {
+          "rank": 35,
+          "term": "敖啸",
+          "npmi": 0.354551,
+          "w": 42,
+          "df_target": 328
+        },
+        {
+          "rank": 36,
+          "term": "银狼",
+          "npmi": 0.350075,
+          "w": 10,
+          "df_target": 49
+        },
+        {
+          "rank": 37,
+          "term": "李蓉",
+          "npmi": 0.348413,
+          "w": 6,
+          "df_target": 25
+        },
+        {
+          "rank": 38,
+          "term": "妖妃",
+          "npmi": 0.346704,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 39,
+          "term": "笑盈盈",
+          "npmi": 0.346195,
+          "w": 5,
+          "df_target": 20
+        },
+        {
+          "rank": 40,
+          "term": "一别",
+          "npmi": 0.337833,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 41,
+          "term": "轻移",
+          "npmi": 0.329735,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 42,
+          "term": "邪莲圣祖",
+          "npmi": 0.329735,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 43,
+          "term": "后落",
+          "npmi": 0.315387,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 44,
+          "term": "小嘴",
+          "npmi": 0.315387,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 45,
+          "term": "泣灵",
+          "npmi": 0.315387,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 46,
+          "term": "莲步",
+          "npmi": 0.308966,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 47,
+          "term": "附体",
+          "npmi": 0.308966,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 48,
+          "term": "亲近",
+          "npmi": 0.3041,
+          "w": 4,
+          "df_target": 23
+        },
+        {
+          "rank": 49,
+          "term": "樱口",
+          "npmi": 0.302959,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 50,
+          "term": "虫室",
+          "npmi": 0.302959,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 51,
+          "term": "红唇",
+          "npmi": 0.302891,
+          "w": 9,
+          "df_target": 67
+        },
+        {
+          "rank": 52,
+          "term": "天奎",
+          "npmi": 0.300266,
+          "w": 5,
+          "df_target": 32
+        },
+        {
+          "rank": 53,
+          "term": "秘藏",
+          "npmi": 0.30003,
+          "w": 4,
+          "df_target": 24
+        },
+        {
+          "rank": 54,
+          "term": "一抿",
+          "npmi": 0.297317,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 55,
+          "term": "抿嘴",
+          "npmi": 0.296782,
+          "w": 8,
+          "df_target": 61
+        },
+        {
+          "rank": 56,
+          "term": "家祖",
+          "npmi": 0.296126,
+          "w": 4,
+          "df_target": 25
+        },
+        {
+          "rank": 57,
+          "term": "花天奇",
+          "npmi": 0.294722,
+          "w": 11,
+          "df_target": 94
+        },
+        {
+          "rank": 58,
+          "term": "记忆",
+          "npmi": 0.294257,
+          "w": 14,
+          "df_target": 129
+        },
+        {
+          "rank": 59,
+          "term": "聪慧",
+          "npmi": 0.291997,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 60,
+          "term": "此火",
+          "npmi": 0.291865,
+          "w": 8,
+          "df_target": 64
+        },
+        {
+          "rank": 61,
+          "term": "道人",
+          "npmi": 0.290961,
+          "w": 35,
+          "df_target": 434
+        },
+        {
+          "rank": 62,
+          "term": "粉红色",
+          "npmi": 0.282654,
+          "w": 7,
+          "df_target": 59
+        },
+        {
+          "rank": 63,
+          "term": "担忧",
+          "npmi": 0.28219,
+          "w": 3,
+          "df_target": 20
+        },
+        {
+          "rank": 64,
+          "term": "静室",
+          "npmi": 0.281946,
+          "w": 9,
+          "df_target": 82
+        },
+        {
+          "rank": 65,
+          "term": "问些",
+          "npmi": 0.280934,
+          "w": 5,
+          "df_target": 39
+        },
+        {
+          "rank": 66,
+          "term": "白狐",
+          "npmi": 0.280689,
+          "w": 9,
+          "df_target": 83
+        },
+        {
+          "rank": 67,
+          "term": "低呼",
+          "npmi": 0.27846,
+          "w": 5,
+          "df_target": 40
+        },
+        {
+          "rank": 68,
+          "term": "笑吟吟",
+          "npmi": 0.278027,
+          "w": 12,
+          "df_target": 123
+        },
+        {
+          "rank": 69,
+          "term": "度劫",
+          "npmi": 0.276047,
+          "w": 5,
+          "df_target": 41
+        },
+        {
+          "rank": 70,
+          "term": "脑中",
+          "npmi": 0.274179,
+          "w": 19,
+          "df_target": 229
+        },
+        {
+          "rank": 71,
+          "term": "果儿",
+          "npmi": 0.273581,
+          "w": 24,
+          "df_target": 310
+        },
+        {
+          "rank": 72,
+          "term": "轻盈",
+          "npmi": 0.273319,
+          "w": 3,
+          "df_target": 22
+        },
+        {
+          "rank": 73,
+          "term": "青元宫",
+          "npmi": 0.273319,
+          "w": 3,
+          "df_target": 22
+        },
+        {
+          "rank": 74,
+          "term": "七星",
+          "npmi": 0.265221,
+          "w": 3,
+          "df_target": 24
+        },
+        {
+          "rank": 75,
+          "term": "早日",
+          "npmi": 0.265221,
+          "w": 3,
+          "df_target": 24
+        },
+        {
+          "rank": 76,
+          "term": "娇笑",
+          "npmi": 0.261421,
+          "w": 3,
+          "df_target": 25
+        },
+        {
+          "rank": 77,
+          "term": "所问",
+          "npmi": 0.254258,
+          "w": 3,
+          "df_target": 27
+        },
+        {
+          "rank": 78,
+          "term": "灵通",
+          "npmi": 0.254258,
+          "w": 3,
+          "df_target": 27
+        },
+        {
+          "rank": 79,
+          "term": "娇容",
+          "npmi": 0.251177,
+          "w": 4,
+          "df_target": 40
+        },
+        {
+          "rank": 80,
+          "term": "孙女",
+          "npmi": 0.251177,
+          "w": 4,
+          "df_target": 40
+        },
+        {
+          "rank": 81,
+          "term": "韩兄",
+          "npmi": 0.251024,
+          "w": 68,
+          "df_target": 1387
+        },
+        {
+          "rank": 82,
+          "term": "唤出",
+          "npmi": 0.250873,
+          "w": 3,
+          "df_target": 28
+        },
+        {
+          "rank": 83,
+          "term": "阴罗幡",
+          "npmi": 0.250873,
+          "w": 3,
+          "df_target": 28
+        },
+        {
+          "rank": 84,
+          "term": "花篮",
+          "npmi": 0.249134,
+          "w": 5,
+          "df_target": 54
+        },
+        {
+          "rank": 85,
+          "term": "紫云",
+          "npmi": 0.248816,
+          "w": 4,
+          "df_target": 41
+        },
+        {
+          "rank": 86,
+          "term": "小妹",
+          "npmi": 0.246607,
+          "w": 20,
+          "df_target": 312
+        },
+        {
+          "rank": 87,
+          "term": "乖巧",
+          "npmi": 0.245973,
+          "w": 6,
+          "df_target": 70
+        },
+        {
+          "rank": 88,
+          "term": "螓首",
+          "npmi": 0.244452,
+          "w": 3,
+          "df_target": 30
+        },
+        {
+          "rank": 89,
+          "term": "船舱",
+          "npmi": 0.244261,
+          "w": 4,
+          "df_target": 43
+        },
+        {
+          "rank": 90,
+          "term": "秋波",
+          "npmi": 0.242062,
+          "w": 4,
+          "df_target": 44
+        },
+        {
+          "rank": 91,
+          "term": "一肃",
+          "npmi": 0.2414,
+          "w": 3,
+          "df_target": 31
+        },
+        {
+          "rank": 92,
+          "term": "嫣然一笑",
+          "npmi": 0.241205,
+          "w": 15,
+          "df_target": 229
+        },
+        {
+          "rank": 93,
+          "term": "出关",
+          "npmi": 0.240186,
+          "w": 8,
+          "df_target": 106
+        },
+        {
+          "rank": 94,
+          "term": "眸光",
+          "npmi": 0.240186,
+          "w": 8,
+          "df_target": 106
+        },
+        {
+          "rank": 95,
+          "term": "诱人",
+          "npmi": 0.239913,
+          "w": 4,
+          "df_target": 45
+        },
+        {
+          "rank": 96,
+          "term": "沾染",
+          "npmi": 0.238445,
+          "w": 3,
+          "df_target": 32
+        },
+        {
+          "rank": 97,
+          "term": "许芊羽",
+          "npmi": 0.237791,
+          "w": 6,
+          "df_target": 76
+        },
+        {
+          "rank": 98,
+          "term": "幽幽",
+          "npmi": 0.235755,
+          "w": 4,
+          "df_target": 47
+        },
+        {
+          "rank": 99,
+          "term": "为兄",
+          "npmi": 0.235581,
+          "w": 3,
+          "df_target": 33
+        },
+        {
+          "rank": 100,
+          "term": "发怔",
+          "npmi": 0.235581,
+          "w": 3,
+          "df_target": 33
+        }
+      ]
+    }
+  ]
+}

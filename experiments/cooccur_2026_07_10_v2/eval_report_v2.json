@@ -1,0 +1,141 @@
+{
+  "golden_set_size": 9,
+  "k_metrics": [
+    5,
+    10
+  ],
+  "variants": {
+    "V2_retok": {
+      "per_seed": {
+        "韩立": {
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": [],
+          "in_graph": false
+        },
+        "墨大夫": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "李化元": {
+          "in_graph": true,
+          "p_at_5": 0.2,
+          "p_at_10": 0.1,
+          "hit_terms": [
+            "弟子"
+          ]
+        },
+        "极阴祖师": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "黄枫谷": {
+          "in_graph": true,
+          "p_at_5": 0.4,
+          "p_at_10": 0.2,
+          "hit_terms": [
+            "弟子",
+            "修仙"
+          ]
+        },
+        "筑基丹": {
+          "in_graph": true,
+          "p_at_5": 0.4,
+          "p_at_10": 0.2,
+          "hit_terms": [
+            "服用",
+            "修仙"
+          ]
+        },
+        "曲魂": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "大衍神君": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "银月": {
+          "in_graph": true,
+          "p_at_5": 0.2,
+          "p_at_10": 0.1,
+          "hit_terms": [
+            "主人"
+          ]
+        }
+      },
+      "mean_p_at_5": 0.15,
+      "mean_p_at_10": 0.075,
+      "seed_coverage": 0.8889
+    },
+    "V4": {
+      "per_seed": {
+        "韩立": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "墨大夫": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "李化元": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "极阴祖师": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "黄枫谷": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "筑基丹": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "曲魂": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "大衍神君": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        },
+        "银月": {
+          "in_graph": true,
+          "p_at_5": 0.0,
+          "p_at_10": 0.0,
+          "hit_terms": []
+        }
+      },
+      "mean_p_at_5": 0.0,
+      "mean_p_at_10": 0.0,
+      "seed_coverage": 1.0
+    }
+  }
+}

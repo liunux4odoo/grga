@@ -1,0 +1,1434 @@
+{
+  "variant": "V4",
+  "config": {
+    "tokenizer": "jieba+user_dict",
+    "stopword_source": "cn_stopwords",
+    "stopword_count": 746,
+    "df_adaptive": false,
+    "df_auto_drop_top_n": null,
+    "top_k_per_line": null,
+    "min_pair_count": 3,
+    "npmi_threshold": null,
+    "window": "chapter"
+  },
+  "corpus_stats": {
+    "total_lines": 145061,
+    "effective_lines": 139125,
+    "total_chapters": 2005,
+    "effective_chapters": 2005,
+    "unique_terms": 69160,
+    "total_edges": 17886095,
+    "build_time_seconds": 56.23
+  },
+  "auto_dropped_terms": [],
+  "notes": {
+    "chapter_truncations": 1,
+    "graph_sparse_warning": null
+  },
+  "queries": [
+    {
+      "seed": "韩立",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "没有",
+          "weight": 1924.0,
+          "rank": 1
+        },
+        {
+          "term": "起来",
+          "weight": 1876.0,
+          "rank": 2
+        },
+        {
+          "term": "一下",
+          "weight": 1858.0,
+          "rank": 3
+        },
+        {
+          "term": "一个",
+          "weight": 1833.0,
+          "rank": 4
+        },
+        {
+          "term": "自然",
+          "weight": 1702.0,
+          "rank": 5
+        },
+        {
+          "term": "似乎",
+          "weight": 1634.0,
+          "rank": 6
+        },
+        {
+          "term": "知道",
+          "weight": 1625.0,
+          "rank": 7
+        },
+        {
+          "term": "一声",
+          "weight": 1622.0,
+          "rank": 8
+        },
+        {
+          "term": "说道",
+          "weight": 1579.0,
+          "rank": 9
+        },
+        {
+          "term": "出现",
+          "weight": 1560.0,
+          "rank": 10
+        },
+        {
+          "term": "样子",
+          "weight": 1541.0,
+          "rank": 11
+        },
+        {
+          "term": "心中",
+          "weight": 1540.0,
+          "rank": 12
+        },
+        {
+          "term": "无法",
+          "weight": 1497.0,
+          "rank": 13
+        },
+        {
+          "term": "现在",
+          "weight": 1487.0,
+          "rank": 14
+        },
+        {
+          "term": "之色",
+          "weight": 1465.0,
+          "rank": 15
+        },
+        {
+          "term": "已经",
+          "weight": 1453.0,
+          "rank": 16
+        },
+        {
+          "term": "同样",
+          "weight": 1450.0,
+          "rank": 17
+        },
+        {
+          "term": "神色",
+          "weight": 1429.0,
+          "rank": 18
+        },
+        {
+          "term": "不知",
+          "weight": 1426.0,
+          "rank": 19
+        },
+        {
+          "term": "身上",
+          "weight": 1417.0,
+          "rank": 20
+        },
+        {
+          "term": "一丝",
+          "weight": 1414.0,
+          "rank": 21
+        },
+        {
+          "term": "露出",
+          "weight": 1408.0,
+          "rank": 22
+        },
+        {
+          "term": "脸上",
+          "weight": 1401.0,
+          "rank": 23
+        },
+        {
+          "term": "不会",
+          "weight": 1400.0,
+          "rank": 24
+        },
+        {
+          "term": "目光",
+          "weight": 1388.0,
+          "rank": 25
+        },
+        {
+          "term": "顿时",
+          "weight": 1370.0,
+          "rank": 26
+        },
+        {
+          "term": "一眼",
+          "weight": 1367.0,
+          "rank": 27
+        },
+        {
+          "term": "突然",
+          "weight": 1367.0,
+          "rank": 28
+        },
+        {
+          "term": "马上",
+          "weight": 1367.0,
+          "rank": 29
+        },
+        {
+          "term": "竟然",
+          "weight": 1355.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "墨大夫",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "韩立",
+          "weight": 88.0,
+          "rank": 1
+        },
+        {
+          "term": "没有",
+          "weight": 87.0,
+          "rank": 2
+        },
+        {
+          "term": "知道",
+          "weight": 81.0,
+          "rank": 3
+        },
+        {
+          "term": "一下",
+          "weight": 76.0,
+          "rank": 4
+        },
+        {
+          "term": "一个",
+          "weight": 76.0,
+          "rank": 5
+        },
+        {
+          "term": "起来",
+          "weight": 72.0,
+          "rank": 6
+        },
+        {
+          "term": "现在",
+          "weight": 69.0,
+          "rank": 7
+        },
+        {
+          "term": "不会",
+          "weight": 65.0,
+          "rank": 8
+        },
+        {
+          "term": "似乎",
+          "weight": 63.0,
+          "rank": 9
+        },
+        {
+          "term": "这种",
+          "weight": 59.0,
+          "rank": 10
+        },
+        {
+          "term": "看来",
+          "weight": 58.0,
+          "rank": 11
+        },
+        {
+          "term": "脸上",
+          "weight": 57.0,
+          "rank": 12
+        },
+        {
+          "term": "觉得",
+          "weight": 57.0,
+          "rank": 13
+        },
+        {
+          "term": "下来",
+          "weight": 56.0,
+          "rank": 14
+        },
+        {
+          "term": "突然",
+          "weight": 55.0,
+          "rank": 15
+        },
+        {
+          "term": "不知",
+          "weight": 54.0,
+          "rank": 16
+        },
+        {
+          "term": "身上",
+          "weight": 54.0,
+          "rank": 17
+        },
+        {
+          "term": "心中",
+          "weight": 53.0,
+          "rank": 18
+        },
+        {
+          "term": "不禁",
+          "weight": 52.0,
+          "rank": 19
+        },
+        {
+          "term": "心里",
+          "weight": 50.0,
+          "rank": 20
+        },
+        {
+          "term": "事情",
+          "weight": 49.0,
+          "rank": 21
+        },
+        {
+          "term": "最后",
+          "weight": 49.0,
+          "rank": 22
+        },
+        {
+          "term": "一点",
+          "weight": 47.0,
+          "rank": 23
+        },
+        {
+          "term": "以后",
+          "weight": 47.0,
+          "rank": 24
+        },
+        {
+          "term": "时间",
+          "weight": 47.0,
+          "rank": 25
+        },
+        {
+          "term": "说道",
+          "weight": 47.0,
+          "rank": 26
+        },
+        {
+          "term": "无法",
+          "weight": 46.0,
+          "rank": 27
+        },
+        {
+          "term": "竟然",
+          "weight": 46.0,
+          "rank": 28
+        },
+        {
+          "term": "丝毫",
+          "weight": 45.0,
+          "rank": 29
+        },
+        {
+          "term": "可能",
+          "weight": 45.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "李化元",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "没有",
+          "weight": 37.0,
+          "rank": 1
+        },
+        {
+          "term": "韩立",
+          "weight": 37.0,
+          "rank": 2
+        },
+        {
+          "term": "知道",
+          "weight": 36.0,
+          "rank": 3
+        },
+        {
+          "term": "起来",
+          "weight": 35.0,
+          "rank": 4
+        },
+        {
+          "term": "一下",
+          "weight": 34.0,
+          "rank": 5
+        },
+        {
+          "term": "不会",
+          "weight": 34.0,
+          "rank": 6
+        },
+        {
+          "term": "修士",
+          "weight": 34.0,
+          "rank": 7
+        },
+        {
+          "term": "一个",
+          "weight": 33.0,
+          "rank": 8
+        },
+        {
+          "term": "自然",
+          "weight": 33.0,
+          "rank": 9
+        },
+        {
+          "term": "似乎",
+          "weight": 32.0,
+          "rank": 10
+        },
+        {
+          "term": "竟然",
+          "weight": 32.0,
+          "rank": 11
+        },
+        {
+          "term": "毕竟",
+          "weight": 31.0,
+          "rank": 12
+        },
+        {
+          "term": "突然",
+          "weight": 31.0,
+          "rank": 13
+        },
+        {
+          "term": "说道",
+          "weight": 31.0,
+          "rank": 14
+        },
+        {
+          "term": "这位",
+          "weight": 31.0,
+          "rank": 15
+        },
+        {
+          "term": "不知",
+          "weight": 30.0,
+          "rank": 16
+        },
+        {
+          "term": "基期",
+          "weight": 30.0,
+          "rank": 17
+        },
+        {
+          "term": "实在",
+          "weight": 30.0,
+          "rank": 18
+        },
+        {
+          "term": "现在",
+          "weight": 30.0,
+          "rank": 19
+        },
+        {
+          "term": "事情",
+          "weight": 29.0,
+          "rank": 20
+        },
+        {
+          "term": "修炼",
+          "weight": 29.0,
+          "rank": 21
+        },
+        {
+          "term": "心里",
+          "weight": 29.0,
+          "rank": 22
+        },
+        {
+          "term": "下来",
+          "weight": 28.0,
+          "rank": 23
+        },
+        {
+          "term": "样子",
+          "weight": 28.0,
+          "rank": 24
+        },
+        {
+          "term": "神色",
+          "weight": 28.0,
+          "rank": 25
+        },
+        {
+          "term": "之极",
+          "weight": 27.0,
+          "rank": 26
+        },
+        {
+          "term": "修仙",
+          "weight": 27.0,
+          "rank": 27
+        },
+        {
+          "term": "已经",
+          "weight": 27.0,
+          "rank": 28
+        },
+        {
+          "term": "脸上",
+          "weight": 27.0,
+          "rank": 29
+        },
+        {
+          "term": "这种",
+          "weight": 27.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "极阴祖师",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "没有",
+          "weight": 58.0,
+          "rank": 1
+        },
+        {
+          "term": "起来",
+          "weight": 58.0,
+          "rank": 2
+        },
+        {
+          "term": "韩立",
+          "weight": 58.0,
+          "rank": 3
+        },
+        {
+          "term": "一下",
+          "weight": 56.0,
+          "rank": 4
+        },
+        {
+          "term": "之色",
+          "weight": 55.0,
+          "rank": 5
+        },
+        {
+          "term": "修士",
+          "weight": 54.0,
+          "rank": 6
+        },
+        {
+          "term": "露出",
+          "weight": 54.0,
+          "rank": 7
+        },
+        {
+          "term": "样子",
+          "weight": 53.0,
+          "rank": 8
+        },
+        {
+          "term": "脸上",
+          "weight": 51.0,
+          "rank": 9
+        },
+        {
+          "term": "马上",
+          "weight": 51.0,
+          "rank": 10
+        },
+        {
+          "term": "不知",
+          "weight": 50.0,
+          "rank": 11
+        },
+        {
+          "term": "现在",
+          "weight": 50.0,
+          "rank": 12
+        },
+        {
+          "term": "神色",
+          "weight": 50.0,
+          "rank": 13
+        },
+        {
+          "term": "自然",
+          "weight": 50.0,
+          "rank": 14
+        },
+        {
+          "term": "一丝",
+          "weight": 49.0,
+          "rank": 15
+        },
+        {
+          "term": "一声",
+          "weight": 49.0,
+          "rank": 16
+        },
+        {
+          "term": "出现",
+          "weight": 49.0,
+          "rank": 17
+        },
+        {
+          "term": "知道",
+          "weight": 49.0,
+          "rank": 18
+        },
+        {
+          "term": "说道",
+          "weight": 49.0,
+          "rank": 19
+        },
+        {
+          "term": "一个",
+          "weight": 48.0,
+          "rank": 20
+        },
+        {
+          "term": "一眼",
+          "weight": 48.0,
+          "rank": 21
+        },
+        {
+          "term": "似乎",
+          "weight": 48.0,
+          "rank": 22
+        },
+        {
+          "term": "同样",
+          "weight": 48.0,
+          "rank": 23
+        },
+        {
+          "term": "身上",
+          "weight": 48.0,
+          "rank": 24
+        },
+        {
+          "term": "心里",
+          "weight": 46.0,
+          "rank": 25
+        },
+        {
+          "term": "目光",
+          "weight": 46.0,
+          "rank": 26
+        },
+        {
+          "term": "不会",
+          "weight": 45.0,
+          "rank": 27
+        },
+        {
+          "term": "之极",
+          "weight": 45.0,
+          "rank": 28
+        },
+        {
+          "term": "事情",
+          "weight": 44.0,
+          "rank": 29
+        },
+        {
+          "term": "极阴",
+          "weight": 44.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "黄枫谷",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "韩立",
+          "weight": 126.0,
+          "rank": 1
+        },
+        {
+          "term": "没有",
+          "weight": 124.0,
+          "rank": 2
+        },
+        {
+          "term": "起来",
+          "weight": 122.0,
+          "rank": 3
+        },
+        {
+          "term": "一个",
+          "weight": 114.0,
+          "rank": 4
+        },
+        {
+          "term": "一下",
+          "weight": 113.0,
+          "rank": 5
+        },
+        {
+          "term": "知道",
+          "weight": 113.0,
+          "rank": 6
+        },
+        {
+          "term": "说道",
+          "weight": 111.0,
+          "rank": 7
+        },
+        {
+          "term": "似乎",
+          "weight": 110.0,
+          "rank": 8
+        },
+        {
+          "term": "自然",
+          "weight": 104.0,
+          "rank": 9
+        },
+        {
+          "term": "修士",
+          "weight": 99.0,
+          "rank": 10
+        },
+        {
+          "term": "这位",
+          "weight": 98.0,
+          "rank": 11
+        },
+        {
+          "term": "不知",
+          "weight": 97.0,
+          "rank": 12
+        },
+        {
+          "term": "出现",
+          "weight": 97.0,
+          "rank": 13
+        },
+        {
+          "term": "不会",
+          "weight": 94.0,
+          "rank": 14
+        },
+        {
+          "term": "毕竟",
+          "weight": 91.0,
+          "rank": 15
+        },
+        {
+          "term": "不禁",
+          "weight": 90.0,
+          "rank": 16
+        },
+        {
+          "term": "弟子",
+          "weight": 89.0,
+          "rank": 17
+        },
+        {
+          "term": "神色",
+          "weight": 89.0,
+          "rank": 18
+        },
+        {
+          "term": "突然",
+          "weight": 89.0,
+          "rank": 19
+        },
+        {
+          "term": "下来",
+          "weight": 88.0,
+          "rank": 20
+        },
+        {
+          "term": "事情",
+          "weight": 88.0,
+          "rank": 21
+        },
+        {
+          "term": "样子",
+          "weight": 88.0,
+          "rank": 22
+        },
+        {
+          "term": "现在",
+          "weight": 88.0,
+          "rank": 23
+        },
+        {
+          "term": "脸上",
+          "weight": 88.0,
+          "rank": 24
+        },
+        {
+          "term": "之后",
+          "weight": 87.0,
+          "rank": 25
+        },
+        {
+          "term": "心里",
+          "weight": 87.0,
+          "rank": 26
+        },
+        {
+          "term": "竟然",
+          "weight": 86.0,
+          "rank": 27
+        },
+        {
+          "term": "之色",
+          "weight": 84.0,
+          "rank": 28
+        },
+        {
+          "term": "看来",
+          "weight": 83.0,
+          "rank": 29
+        },
+        {
+          "term": "露出",
+          "weight": 83.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "筑基丹",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "没有",
+          "weight": 55.0,
+          "rank": 1
+        },
+        {
+          "term": "起来",
+          "weight": 55.0,
+          "rank": 2
+        },
+        {
+          "term": "韩立",
+          "weight": 55.0,
+          "rank": 3
+        },
+        {
+          "term": "一个",
+          "weight": 52.0,
+          "rank": 4
+        },
+        {
+          "term": "一下",
+          "weight": 50.0,
+          "rank": 5
+        },
+        {
+          "term": "知道",
+          "weight": 48.0,
+          "rank": 6
+        },
+        {
+          "term": "似乎",
+          "weight": 45.0,
+          "rank": 7
+        },
+        {
+          "term": "说道",
+          "weight": 45.0,
+          "rank": 8
+        },
+        {
+          "term": "这位",
+          "weight": 45.0,
+          "rank": 9
+        },
+        {
+          "term": "毕竟",
+          "weight": 43.0,
+          "rank": 10
+        },
+        {
+          "term": "不会",
+          "weight": 42.0,
+          "rank": 11
+        },
+        {
+          "term": "修仙",
+          "weight": 42.0,
+          "rank": 12
+        },
+        {
+          "term": "弟子",
+          "weight": 42.0,
+          "rank": 13
+        },
+        {
+          "term": "看来",
+          "weight": 39.0,
+          "rank": 14
+        },
+        {
+          "term": "自然",
+          "weight": 39.0,
+          "rank": 15
+        },
+        {
+          "term": "一位",
+          "weight": 38.0,
+          "rank": 16
+        },
+        {
+          "term": "如今",
+          "weight": 38.0,
+          "rank": 17
+        },
+        {
+          "term": "实在",
+          "weight": 38.0,
+          "rank": 18
+        },
+        {
+          "term": "现在",
+          "weight": 37.0,
+          "rank": 19
+        },
+        {
+          "term": "筑基",
+          "weight": 37.0,
+          "rank": 20
+        },
+        {
+          "term": "时间",
+          "weight": 36.0,
+          "rank": 21
+        },
+        {
+          "term": "一点",
+          "weight": 35.0,
+          "rank": 22
+        },
+        {
+          "term": "事情",
+          "weight": 35.0,
+          "rank": 23
+        },
+        {
+          "term": "出现",
+          "weight": 35.0,
+          "rank": 24
+        },
+        {
+          "term": "心里",
+          "weight": 35.0,
+          "rank": 25
+        },
+        {
+          "term": "成功",
+          "weight": 35.0,
+          "rank": 26
+        },
+        {
+          "term": "这种",
+          "weight": 35.0,
+          "rank": 27
+        },
+        {
+          "term": "可能",
+          "weight": 34.0,
+          "rank": 28
+        },
+        {
+          "term": "基期",
+          "weight": 34.0,
+          "rank": 29
+        },
+        {
+          "term": "样子",
+          "weight": 34.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "曲魂",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "韩立",
+          "weight": 91.0,
+          "rank": 1
+        },
+        {
+          "term": "没有",
+          "weight": 89.0,
+          "rank": 2
+        },
+        {
+          "term": "起来",
+          "weight": 88.0,
+          "rank": 3
+        },
+        {
+          "term": "一个",
+          "weight": 87.0,
+          "rank": 4
+        },
+        {
+          "term": "一下",
+          "weight": 81.0,
+          "rank": 5
+        },
+        {
+          "term": "知道",
+          "weight": 79.0,
+          "rank": 6
+        },
+        {
+          "term": "修士",
+          "weight": 76.0,
+          "rank": 7
+        },
+        {
+          "term": "心里",
+          "weight": 75.0,
+          "rank": 8
+        },
+        {
+          "term": "之极",
+          "weight": 72.0,
+          "rank": 9
+        },
+        {
+          "term": "露出",
+          "weight": 72.0,
+          "rank": 10
+        },
+        {
+          "term": "神色",
+          "weight": 70.0,
+          "rank": 11
+        },
+        {
+          "term": "似乎",
+          "weight": 68.0,
+          "rank": 12
+        },
+        {
+          "term": "不会",
+          "weight": 67.0,
+          "rank": 13
+        },
+        {
+          "term": "忽然",
+          "weight": 67.0,
+          "rank": 14
+        },
+        {
+          "term": "样子",
+          "weight": 67.0,
+          "rank": 15
+        },
+        {
+          "term": "马上",
+          "weight": 67.0,
+          "rank": 16
+        },
+        {
+          "term": "之色",
+          "weight": 66.0,
+          "rank": 17
+        },
+        {
+          "term": "说道",
+          "weight": 66.0,
+          "rank": 18
+        },
+        {
+          "term": "身上",
+          "weight": 66.0,
+          "rank": 19
+        },
+        {
+          "term": "现在",
+          "weight": 65.0,
+          "rank": 20
+        },
+        {
+          "term": "一声",
+          "weight": 64.0,
+          "rank": 21
+        },
+        {
+          "term": "一眼",
+          "weight": 64.0,
+          "rank": 22
+        },
+        {
+          "term": "自然",
+          "weight": 63.0,
+          "rank": 23
+        },
+        {
+          "term": "下来",
+          "weight": 62.0,
+          "rank": 24
+        },
+        {
+          "term": "看到",
+          "weight": 61.0,
+          "rank": 25
+        },
+        {
+          "term": "不知",
+          "weight": 60.0,
+          "rank": 26
+        },
+        {
+          "term": "出现",
+          "weight": 60.0,
+          "rank": 27
+        },
+        {
+          "term": "这位",
+          "weight": 60.0,
+          "rank": 28
+        },
+        {
+          "term": "附近",
+          "weight": 60.0,
+          "rank": 29
+        },
+        {
+          "term": "事情",
+          "weight": 59.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "大衍神君",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "没有",
+          "weight": 76.0,
+          "rank": 1
+        },
+        {
+          "term": "韩立",
+          "weight": 76.0,
+          "rank": 2
+        },
+        {
+          "term": "起来",
+          "weight": 75.0,
+          "rank": 3
+        },
+        {
+          "term": "一下",
+          "weight": 74.0,
+          "rank": 4
+        },
+        {
+          "term": "一个",
+          "weight": 74.0,
+          "rank": 5
+        },
+        {
+          "term": "心中",
+          "weight": 73.0,
+          "rank": 6
+        },
+        {
+          "term": "说道",
+          "weight": 72.0,
+          "rank": 7
+        },
+        {
+          "term": "自然",
+          "weight": 71.0,
+          "rank": 8
+        },
+        {
+          "term": "似乎",
+          "weight": 67.0,
+          "rank": 9
+        },
+        {
+          "term": "修士",
+          "weight": 66.0,
+          "rank": 10
+        },
+        {
+          "term": "样子",
+          "weight": 66.0,
+          "rank": 11
+        },
+        {
+          "term": "一声",
+          "weight": 65.0,
+          "rank": 12
+        },
+        {
+          "term": "无法",
+          "weight": 65.0,
+          "rank": 13
+        },
+        {
+          "term": "现在",
+          "weight": 65.0,
+          "rank": 14
+        },
+        {
+          "term": "已经",
+          "weight": 64.0,
+          "rank": 15
+        },
+        {
+          "term": "知道",
+          "weight": 64.0,
+          "rank": 16
+        },
+        {
+          "term": "出现",
+          "weight": 63.0,
+          "rank": 17
+        },
+        {
+          "term": "同样",
+          "weight": 62.0,
+          "rank": 18
+        },
+        {
+          "term": "神识",
+          "weight": 62.0,
+          "rank": 19
+        },
+        {
+          "term": "事情",
+          "weight": 61.0,
+          "rank": 20
+        },
+        {
+          "term": "立刻",
+          "weight": 61.0,
+          "rank": 21
+        },
+        {
+          "term": "修为",
+          "weight": 60.0,
+          "rank": 22
+        },
+        {
+          "term": "手中",
+          "weight": 60.0,
+          "rank": 23
+        },
+        {
+          "term": "脸上",
+          "weight": 60.0,
+          "rank": 24
+        },
+        {
+          "term": "不知",
+          "weight": 59.0,
+          "rank": 25
+        },
+        {
+          "term": "东西",
+          "weight": 59.0,
+          "rank": 26
+        },
+        {
+          "term": "突然",
+          "weight": 59.0,
+          "rank": 27
+        },
+        {
+          "term": "露出",
+          "weight": 59.0,
+          "rank": 28
+        },
+        {
+          "term": "不会",
+          "weight": 58.0,
+          "rank": 29
+        },
+        {
+          "term": "看来",
+          "weight": 58.0,
+          "rank": 30
+        }
+      ]
+    },
+    {
+      "seed": "银月",
+      "seed_in_graph": true,
+      "returned_neighbors": [
+        {
+          "term": "没有",
+          "weight": 133.0,
+          "rank": 1
+        },
+        {
+          "term": "韩立",
+          "weight": 131.0,
+          "rank": 2
+        },
+        {
+          "term": "起来",
+          "weight": 130.0,
+          "rank": 3
+        },
+        {
+          "term": "一下",
+          "weight": 128.0,
+          "rank": 4
+        },
+        {
+          "term": "自然",
+          "weight": 128.0,
+          "rank": 5
+        },
+        {
+          "term": "一个",
+          "weight": 126.0,
+          "rank": 6
+        },
+        {
+          "term": "说道",
+          "weight": 125.0,
+          "rank": 7
+        },
+        {
+          "term": "知道",
+          "weight": 122.0,
+          "rank": 8
+        },
+        {
+          "term": "似乎",
+          "weight": 121.0,
+          "rank": 9
+        },
+        {
+          "term": "一声",
+          "weight": 120.0,
+          "rank": 10
+        },
+        {
+          "term": "修士",
+          "weight": 116.0,
+          "rank": 11
+        },
+        {
+          "term": "心中",
+          "weight": 116.0,
+          "rank": 12
+        },
+        {
+          "term": "现在",
+          "weight": 116.0,
+          "rank": 13
+        },
+        {
+          "term": "无法",
+          "weight": 112.0,
+          "rank": 14
+        },
+        {
+          "term": "样子",
+          "weight": 110.0,
+          "rank": 15
+        },
+        {
+          "term": "之色",
+          "weight": 108.0,
+          "rank": 16
+        },
+        {
+          "term": "神色",
+          "weight": 108.0,
+          "rank": 17
+        },
+        {
+          "term": "一丝",
+          "weight": 107.0,
+          "rank": 18
+        },
+        {
+          "term": "一眼",
+          "weight": 107.0,
+          "rank": 19
+        },
+        {
+          "term": "不知",
+          "weight": 107.0,
+          "rank": 20
+        },
+        {
+          "term": "同样",
+          "weight": 107.0,
+          "rank": 21
+        },
+        {
+          "term": "目光",
+          "weight": 107.0,
+          "rank": 22
+        },
+        {
+          "term": "已经",
+          "weight": 105.0,
+          "rank": 23
+        },
+        {
+          "term": "化为",
+          "weight": 101.0,
+          "rank": 24
+        },
+        {
+          "term": "忽然",
+          "weight": 101.0,
+          "rank": 25
+        },
+        {
+          "term": "脸上",
+          "weight": 101.0,
+          "rank": 26
+        },
+        {
+          "term": "露出",
+          "weight": 101.0,
+          "rank": 27
+        },
+        {
+          "term": "事情",
+          "weight": 99.0,
+          "rank": 28
+        },
+        {
+          "term": "手中",
+          "weight": 99.0,
+          "rank": 29
+        },
+        {
+          "term": "一闪",
+          "weight": 97.0,
+          "rank": 30
+        }
+      ]
+    }
+  ]
+}
