@@ -95,15 +95,55 @@ Decide:
 - Coverage okay but need prioritisation → **T3** `intent=rerank` on the
   current hits.
 
-### `related` vs `graph inspect`: verb-choice reminder
+### T2 is `related`, not `graph inspect`
 
-SKILL.md covers the rule in full ("T2 is `related`, not `graph inspect`");
-the one-line reminder here: **T2 exploration is always `related`.**
-`graph inspect` is a *diagnostic* verb that answers questions about a
-single keyword's shape in the graph, not a substitute for the
-document-ranking that `related` does. If a first `related` call returns
-`[]`, the correct next move is a **seed change**, not a switch to
-`graph inspect`.
+Both verbs read the co-occurrence graph, but answer different questions
+and are **not interchangeable** for T2 exploration:
+
+| Verb | Answers | Output | When |
+|---|---|---|---|
+| `related <seed> --mode graph` | "What **documents** are conceptually near this seed?" | Ranked doc paths (PPR) + `neighbor_edges` (npmi-weighted) | **T2-bookend** (session-open + pre-answer, mandatory) and **T2-escalate** (mid-session widening) |
+| `graph inspect <keyword>` | "What is this **keyword** like — scope distribution, top co-occurring words, polysemy?" | Metadata on the *keyword*, no documents | Diagnostic only: seed-quality check, cross-scope pollution audit, "why is my `related` empty?" |
+
+**Failure mode observed in practice**: caller runs `graph inspect` on a
+hub word (protagonist name, framework name, top-level concept) early,
+sees the co-occurring column dominated by stopwords / discourse markers
+("不过", "什么", "the", "would"), concludes *"the graph has no signal
+here"*, and skips T2 entirely for the whole session. This is a misread:
+the empty signal was a **seed-quality problem** (see the seed table
+below), not a graph-quality problem, and `graph inspect` on the wrong
+seed is not a substitute for `related` on a right seed.
+
+Rule of thumb: **catching oneself running `graph inspect` and then *not*
+running `related` immediately after usually means `related` was wanted
+all along.** If a first `related` call returns `[]`, the correct next
+move is a **seed change**, not a switch to `graph inspect`.
+
+### Choosing seeds for `related`
+
+`related` faithfully amplifies whatever seed it is handed. A well-chosen
+seed returns a compact on-topic neighbourhood; a poorly-chosen seed
+returns `[]`, an irrelevant list, or noise. Seed choice is the single
+biggest lever at T2 — **grga will not reject bad seeds**, it computes PPR
+on whatever is provided.
+
+**Prefer as seeds**: low-DF specific nouns (proper names of techniques,
+entities, APIs, chapter titles — check `graph_signals.seed_chunk_df`,
+single-digit to low-hundreds is the sweet spot); names surfaced by T1
+`search` (harvest 2-3 low-DF specifics from `matches[i].text`);
+multi-seed passes (2-4 diverse specifics beat one hub; PPR fuses across
+seeds).
+
+**Avoid as sole seed**: hub words (protagonist, framework name,
+top-level concept — high DF means co-occurs with everything, PPR
+degenerates); generic descriptors ("main technique", "the API"); terms
+not in the index (`results: []` with empty `seed_chunk_df` means the
+seed isn't a keyword — confirm via T1 `search`, pick a nearby low-DF
+surrogate).
+
+**Meta-rule**: seed selection is a **caller judgment**, not a grga
+policy. The verb surfaces the numbers (`seed_chunk_df`, `npmi`); the
+caller decides whether to keep the seed or swap.
 
 ### Seed-quality decision table for `related --mode graph`
 
@@ -170,3 +210,99 @@ grga index promote            --db <path> --json   # commit
 
 After a promote, `related --mode graph` picks up the new edges
 automatically on the next call.
+
+## Stuck signals & escalation (detail)
+
+SKILL.md keeps the short list of four signals + the escalation table.
+This section is the **binding definition** — thresholds, symptoms,
+multi-signal interactions, and inline-index-build rationale.
+
+**None of the thresholds are hard rules.** Tighten on small / familiar
+corpora where mistakes should trigger fast; loosen on large / unfamiliar
+corpora where a few misfires are expected before the terminology
+settles. The caller self-calibrates.
+
+### The four stuck signals
+
+- **Vocabulary-mismatch** — consecutive `probe` calls return
+  `total_lines == 0`.
+  - Range: **2-4 consecutive zero-hits** before treating the term family
+    as wrong.
+  - Low end (~2): small corpus / familiar domain, fail fast.
+  - High end (~4): large or unfamiliar corpus, allow a few misses first.
+
+- **Literal-fixation** — same concept tried in several literal wordings,
+  all failing.
+  - Range: **3-6 wordings** for the same concept before concluding the
+    concept is not expressed literally at all.
+  - Symptom: producing minor variants (`八位` → `八名` → `八 X`) rather
+    than genuinely new phrasings.
+
+- **Wandering** — many probes inside the same family without the signal
+  converging.
+  - Range: **≥ 5 same-family probes with no convergence trend**.
+    Convergence means `total_lines` moving monotonically toward a
+    workable range (tens-hundreds) or hitting an informative zero.
+  - Symptom: `total_lines` bouncing without direction.
+
+- **Hit-paradox** — `search` returns near-zero hits or far too many but
+  all irrelevant.
+  - Qualitative call, read from `line_ratio`, `heading_path`,
+    `occurrence_index`, and a scan of `matches[i].text`.
+  - Symptom: hits cluster in an unrelated section, or `heading_path` is
+    uniformly wrong.
+
+**Self-calibration**: quick-terminating task or well-known corpus → pull
+ranges toward the low end. Exploratory task or unknown corpus → allow
+the high end. When in doubt, escalate **earlier** — a wasted T2/T3 call
+costs less than five wasted T0/T1 variants.
+
+### Multi-signal interaction
+
+The escalation table (in SKILL.md) is first-choice, not exclusive. If
+vocabulary-mismatch and literal-fixation fire together (common — several
+literal wordings all zero-hit), prefer the **cheaper** action first
+(T2-escalate `related` before T3 `suggest`). Escalate to the more
+expensive tier only if the cheaper one also fails to unblock.
+
+### `index build` is part of the reflection path, not just infra
+
+`grga index build -s <scope> --db <path> --json` is documented as
+"offline / infra" because it is offline work, but that framing
+undersells its role. **When a stuck signal points to T2 and the corpus
+is not yet indexed, building the index inline is the correct next
+action** — typically < 60s on a small-to-medium corpus, often faster
+than another round of T0/T1 variants. Read "offline / infra" as
+"one-off cost, amortised across every subsequent T2 call in the
+session", not "prerequisite the caller must have handled before the
+session."
+
+Pattern when T2 is chosen but the index is absent:
+
+```bash
+grga index build -s <dir> --db <path> --json      # < 60s typical
+grga related <seed> --mode graph --db <path> --json
+```
+
+This applies equally to the mandatory T2-bookends: a missing index is a
+build-inline trigger, never a waiver.
+
+### `suggest` guardrails: production vs. exploration
+
+The verb-level guardrail "never the first verb, capped at 1-2
+escalations per task" is written for the **production caller context** —
+a real end-user query on a well-understood corpus where LLM cost and
+graph-vote pollution both matter.
+
+Relax in two other contexts:
+
+- **Cold-start on an unfamiliar corpus.** The corpus's terminology is
+  not yet known; a `suggest --intent expand` early in the session is
+  legitimate and often cheaper than five wrong-terminology probes.
+- **Skill / workflow testing, exploratory analysis.** Deliberately
+  exercising the loop; `suggest` is what is being tested. Pass
+  `--no-votes` to prevent test queries from polluting
+  `llm_extension_votes`.
+
+The 1-2-escalation cap still applies **per user task**, not per session
+in exploratory contexts.
