@@ -221,6 +221,13 @@ def search_command(
     prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
+    """Structured ripgrep-all search with Layer-2 hit metadata.
+
+    Wraps `rga` and returns typed hits (path, line, text) plus optional
+    occurrence / line_ratio / heading_path annotations. Use `--json` for
+    machine-readable output; combine `--implicit-and/--implicit-or` to pin
+    how adjacent keywords are joined.
+    """
     query = _join_keywords(keywords)
     if not query:
         typer.echo("keywords cannot be empty", err=True)
@@ -317,6 +324,14 @@ def deep_search_command(
     prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
     debug: bool = typer.Option(False, "--debug", help="Print debug information during search."),
 ):
+    """LLM-assisted iterative search with keyword library refeed.
+
+    Runs `rga` in tiered rounds, using an OpenAI-compatible LLM to widen
+    or refine queries between rounds. Records keyword usage into the
+    shared v1 keyword library so subsequent runs bias toward proven
+    keywords. Every LLM-related knob supports overriding the value from
+    `~/.config/grga/settings.json`.
+    """
     query = _join_keywords(keywords)
     if not query:
         typer.echo("query cannot be empty", err=True)
@@ -407,6 +422,12 @@ def preview_command(
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Preview path-only search command."),
 ):
+    """Print the exact `rga` command that `grga search` would run.
+
+    Read-only, no filesystem walk, no tool download. Useful for pasting
+    into a shell to inspect ripgrep-all behaviour outside of grga's JSON
+    envelope, or for building integrations that shell out directly.
+    """
     query = _join_keywords(keywords)
     if not query:
         typer.echo("keywords cannot be empty", err=True)
@@ -532,6 +553,12 @@ def probe_command(
 
 @app.command("check")
 def check_command(json_output: bool = typer.Option(False, "--json", help="Print raw JSON result.")):
+    """Report resolved paths, versions and warnings for required tools.
+
+    Exits non-zero when a required tool (rga, rg, ...) is missing or
+    unusable. Complements `grga tools check` by focusing on the search
+    stack rather than every managed binary.
+    """
     result = check_environment()
     if json_output:
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
@@ -551,6 +578,7 @@ def tools_check_command(
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
     prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
 ):
+    """Report which managed tools are installed and where they resolve from."""
     _apply_prefer_system(prefer_system)
     result = check_tools()
     if json_output:
@@ -566,16 +594,19 @@ def tools_check_command(
 
 @tools_app.command("path")
 def tools_path_command():
+    """Print the platform-specific tools directory currently in use."""
     typer.echo(str(current_tools_dir()))
 
 
 @tools_app.command("root")
 def tools_root_command():
+    """Print the root tools directory (parent of all platform subdirs)."""
     typer.echo(str(tools_root()))
 
 
 @tools_app.command("list")
 def tools_list_command():
+    """List every known tool and whether the current platform is supported."""
     supported = set(supported_tool_names())
     for name, spec in tool_specs().items():
         status = "supported" if name in supported else "unsupported"
@@ -592,6 +623,13 @@ def tools_install_command(
     no_verify: bool = typer.Option(False, "--no-verify", help="Skip sha256 verification (insecure)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
+    """Install managed tools into the tools cache directory.
+
+    Downloads and verifies (sha256) the requested binaries from the
+    upstream release assets, or copies them from a local mirror via
+    `--from`. Fails with structured exit codes on network / verify /
+    partial-install errors (see `docs/exit-codes.md`).
+    """
     verify = not no_verify
     if no_verify:
         emit_warning("insecure", "sha256 verification disabled via --no-verify", json_mode=json_output)
@@ -640,6 +678,7 @@ def tools_update_command(
     no_verify: bool = typer.Option(False, "--no-verify", help="Skip sha256 verification (insecure)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
+    """Update managed tools to the latest supported release."""
     verify = not no_verify
     if no_verify:
         emit_warning("insecure", "sha256 verification disabled via --no-verify", json_mode=json_output)
@@ -674,11 +713,13 @@ def tools_migrate_command(
 
 @tools_app.command("platform")
 def tools_platform_command():
+    """Print the platform key used to select managed tool binaries."""
     typer.echo(platform_key())
 
 
 @skill_app.command("list")
 def skill_list_command(json_output: bool = typer.Option(False, "--json", help="Print raw JSON result.")):
+    """List bundled skills shipped with grga."""
     from grga.skill_install import list_skills
 
     entries = list_skills()
@@ -694,6 +735,7 @@ def skill_list_command(json_output: bool = typer.Option(False, "--json", help="P
 
 @skill_app.command("path")
 def skill_path_command():
+    """Print the directory that ships bundled skill sources."""
     from grga.skill_install import skills_root
 
     typer.echo(str(skills_root()))
@@ -753,6 +795,7 @@ def skill_install_command(
 
 @app.command("gui")
 def gui_command():
+    """Launch the Tk desktop GUI over the same search backend."""
     from grga.gui import main as gui_main
 
     gui_main()
@@ -803,7 +846,7 @@ def expand_command(
 
 @index_app.command("build")
 def index_build_command(
-    scope: Path = typer.Option(Path("."), "--scope", "-s", exists=True, resolve_path=True, help="Directory (or file) to index."),
+    scope: Path = typer.Option(Path("."), "--scope", "-s", "--directory", "-d", exists=True, resolve_path=True, help="Directory (or file) to index. The resolved absolute path becomes the scope key stored in the graph DB and later referenced by read-side commands via --directory."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     chunk_mode: str = typer.Option("line", "--chunk-mode", help="Chunk granularity: line (1 line = 1 chunk) or chars (multi-line char window)."),
     chunk_max_chars: int = typer.Option(600, "--chunk-max-chars", help="Target upper bound on chars per chunk (chars mode)."),
@@ -878,7 +921,7 @@ def index_build_command(
 @index_app.command("promote")
 def index_promote_command(
     threshold: float = typer.Option(3, "--threshold", "-t", help="Minimum vote_count for a pair to be promoted."),
-    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to votes recorded for this scope."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Stored scope key from `grga index build --scope` (resolved absolute path). Restrict promotion to votes recorded for this scope. The directory need not still exist on disk."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be promoted without writing."),
     repromote: bool = typer.Option(False, "--repromote", help="Promote qualifying pairs again even if already promoted."),
@@ -916,7 +959,7 @@ def index_promote_command(
 def suggest_command(
     query: List[str] = typer.Argument(..., help="Original query (natural language or keyword expression)."),
     intent: str = typer.Option("expand", "--intent", "-i", help="Suggest intent: expand | rerank | reformulate."),
-    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Scope key for vote recording."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Stored scope key from `grga index build --scope` (resolved absolute path). Used to attribute recorded keyword-pair votes. The directory need not still exist on disk."),
     hits_json: Optional[Path] = typer.Option(None, "--hits", exists=True, dir_okay=False, help="JSON file with prior hits (a list, or a search result object with 'matches')."),
     max_hits: int = typer.Option(20, "--max-hits", help="Maximum hits sent to the LLM."),
     no_votes: bool = typer.Option(False, "--no-votes", help="Do not record keyword-pair votes (read-only)."),
@@ -1037,7 +1080,7 @@ def related_command(
     mode: str = typer.Option("graph", "--mode", "-m", help="Relation mode: graph | dir | heading."),
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of related documents."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
-    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to a previously indexed scope."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Stored scope key from `grga index build --scope` (resolved absolute path). Restrict PPR / heading / dir expansion to a previously indexed scope. The directory need not still exist on disk."),
     cross_scope: bool = typer.Option(False, "--cross-scope", help="mode=graph only: seed docs stay in --directory, PPR expansion crosses into every other scope."),
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
     preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview."),
