@@ -127,14 +127,17 @@ def _inspect(
         return empty
 
     # Documents (per scope) that contain the keyword.
-    docs_by_scope, seed_docs_by_scope = _seed_docs(conn, folded)
+    docs_by_scope, _seed_docs_ignored = _seed_docs(conn, folded)
     if not docs_by_scope:
         return empty
     total_docs = sum(docs_by_scope.values())
 
-    # Co-occurring keywords: other keywords living in the same (scope, doc).
+    # Co-occurring keywords: other keywords living in the same *chunk* as
+    # the seed (chunk-level, not doc-level — a doc-level aggregation would
+    # collapse every seed inside a document to the same neighbour set and
+    # produce the "identical top-N across unrelated seeds" pathology).
     cooccur_weight, cooccur_scopes, per_scope_cooccur = _cooccurrences(
-        conn, folded, seed_docs_by_scope
+        conn, folded
     )
 
     top_cooccurring = sorted(
@@ -168,39 +171,46 @@ def _inspect(
 def _cooccurrences(
     conn: sqlite3.Connection,
     folded: str,
-    seed_docs_by_scope: Dict[str, set],
 ) -> tuple[Dict[str, float], Dict[str, set], Dict[str, Dict[str, float]]]:
-    """Aggregate keywords co-occurring with ``folded`` in its seed docs.
+    """Aggregate keywords co-occurring with ``folded`` at chunk level.
 
     Returns ``(cooccur_weight, cooccur_scopes, per_scope_cooccur)`` where
-    ``per_scope_cooccur[scope][kw]`` is the per-scope weight used by the
-    polysemy heuristic. Shared by :func:`_inspect` and
-    :func:`compute_suspected_polysemy`.
+    weights are the raw sum of ``occurrence_count`` for every neighbour
+    keyword row that lives in a chunk the seed also occupies. The join is
+    on ``(directory, doc_path, chunk_id)`` — a doc-level aggregation would
+    lump together every seed-bearing document's entire keyword histogram
+    and yield the "identical top-N across unrelated seeds" pathology.
+    Shared by :func:`_inspect` and :func:`compute_suspected_polysemy`.
     """
     cooccur_weight: Dict[str, float] = {}
     cooccur_scopes: Dict[str, set] = {}
     per_scope_cooccur: Dict[str, Dict[str, float]] = {}
-    for directory, docs in seed_docs_by_scope.items():
-        doc_list = list(docs)
-        placeholders = ",".join("?" for _ in doc_list)
-        rows = conn.execute(
-            f"""
-            SELECT keyword AS kw, SUM(occurrence_count) AS occurrence_count
-            FROM keyword_chunks
-            WHERE directory = ? AND doc_path IN ({placeholders})
-            GROUP BY keyword
-            """,
-            [directory, *doc_list],
-        ).fetchall()
-        for row in rows:
-            kw = _fold(row["kw"])
-            if not kw or kw == folded:
-                continue
-            weight = float(row["occurrence_count"])
-            cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
-            cooccur_scopes.setdefault(kw, set()).add(directory)
-            scope_map = per_scope_cooccur.setdefault(directory, {})
-            scope_map[kw] = scope_map.get(kw, 0.0) + weight
+    rows = conn.execute(
+        """
+        SELECT other.directory   AS directory,
+               other.keyword     AS kw,
+               SUM(other.occurrence_count) AS occurrence_count
+        FROM keyword_chunks AS seed
+        JOIN keyword_chunks AS other
+          ON other.directory = seed.directory
+         AND other.doc_path  = seed.doc_path
+         AND other.chunk_id  = seed.chunk_id
+        WHERE seed.keyword = ?
+          AND other.keyword <> seed.keyword
+        GROUP BY other.directory, other.keyword
+        """,
+        (folded,),
+    ).fetchall()
+    for row in rows:
+        kw = _fold(row["kw"])
+        if not kw or kw == folded:
+            continue
+        directory = row["directory"]
+        weight = float(row["occurrence_count"])
+        cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
+        cooccur_scopes.setdefault(kw, set()).add(directory)
+        scope_map = per_scope_cooccur.setdefault(directory, {})
+        scope_map[kw] = scope_map.get(kw, 0.0) + weight
     return cooccur_weight, cooccur_scopes, per_scope_cooccur
 
 
@@ -284,10 +294,10 @@ def compute_suspected_polysemy(
     folded = _fold(keyword)
     if not folded:
         return False, ""
-    docs_by_scope, seed_docs_by_scope = _seed_docs(conn, folded)
+    docs_by_scope, _ = _seed_docs(conn, folded)
     if not docs_by_scope:
         return False, ""
-    _, _, per_scope_cooccur = _cooccurrences(conn, folded, seed_docs_by_scope)
+    _, _, per_scope_cooccur = _cooccurrences(conn, folded)
     return _detect_polysemy(docs_by_scope, per_scope_cooccur, cooccur_limit)
 
 
@@ -314,7 +324,7 @@ def compute_suspected_polysemy_batch(
         if not docs_by_scope:
             out[kw] = False
             continue
-        _, _, per_scope_cooccur = _cooccurrences(conn, kw, seed_docs_by_scope)
+        _, _, per_scope_cooccur = _cooccurrences(conn, kw)
         suspected, _ = _detect_polysemy(
             docs_by_scope, per_scope_cooccur, cooccur_limit
         )
