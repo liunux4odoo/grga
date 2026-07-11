@@ -1,0 +1,139 @@
+{
+  "mode": "baseline_regex",
+  "args": {
+    "max_ngram_n": 2,
+    "min_count": 3,
+    "npmi_threshold": 0.3,
+    "ent_threshold": 1.0,
+    "rebuild": false
+  },
+  "corpus_stats": {
+    "effective_lines": 11809,
+    "total_terms": 72478,
+    "total_edges": 159,
+    "build_time_sec": 0.47
+  },
+  "length_distribution": {
+    "total_terms": 72478,
+    "by_length": {
+      "2": 1613,
+      "3": 2431,
+      "4": 4024,
+      "5": 4599,
+      "6": 5729,
+      "7": 5709,
+      "8": 5891,
+      "9": 5605,
+      "10": 5388,
+      "11": 4910,
+      "12": 4361,
+      "13": 3926,
+      "14": 3258,
+      "15": 2896,
+      "16": 2426,
+      "17": 2072,
+      "18": 1643,
+      "19": 1379,
+      "20": 4618
+    },
+    "ge15_count": 15034,
+    "ge15_ratio": 0.2074
+  },
+  "phrase_check": {
+    "seeds": [
+      "罗辑",
+      "汪淼",
+      "叶文洁",
+      "章北海",
+      "程心",
+      "云天明",
+      "智子",
+      "面壁者",
+      "黑暗森林",
+      "破壁人",
+      "三体",
+      "三体世界",
+      "红岸",
+      "阶梯计划",
+      "自然选择",
+      "咒语"
+    ],
+    "single_token_hit": {
+      "罗辑": true,
+      "汪淼": true,
+      "叶文洁": true,
+      "章北海": true,
+      "程心": true,
+      "云天明": true,
+      "智子": true,
+      "面壁者": true,
+      "黑暗森林": true,
+      "破壁人": true,
+      "三体": true,
+      "三体世界": false,
+      "红岸": true,
+      "阶梯计划": true,
+      "自然选择": true,
+      "咒语": true
+    },
+    "hit_rate": 0.9375
+  },
+  "queries": [
+    {
+      "seed": "罗辑",
+      "seed_in_graph": false,
+      "seed_df": 4,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "汪淼",
+      "seed_in_graph": false,
+      "seed_df": 2,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "叶文洁",
+      "seed_in_graph": false,
+      "seed_df": 56,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "章北海",
+      "seed_in_graph": true,
+      "seed_df": 22,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "自然选择",
+          "npmi": 0.411728,
+          "w": 4,
+          "df_target": 80
+        }
+      ]
+    },
+    {
+      "seed": "程心",
+      "seed_in_graph": false,
+      "seed_df": 12,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "云天明",
+      "seed_in_graph": false,
+      "seed_df": 3,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "智子",
+      "seed_in_graph": false,
+      "seed_df": 4,
+      "returned_neighbors": []
+    },
+    {
+      "seed": "面壁者",
+      "seed_in_graph": false,
+      "seed_df": 7,
+      "returned_neighbors": []
+    }
+  ]
+}

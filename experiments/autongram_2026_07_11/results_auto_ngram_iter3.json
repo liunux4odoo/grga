@@ -1,0 +1,5916 @@
+{
+  "mode": "auto_ngram",
+  "args": {
+    "max_ngram_n": 4,
+    "min_count": 3,
+    "npmi_threshold": 0.3,
+    "ent_threshold": 1.0,
+    "rebuild": false
+  },
+  "corpus_stats": {
+    "effective_lines": 11759,
+    "total_terms": 31824,
+    "total_edges": 182256,
+    "build_time_sec": 4.77
+  },
+  "length_distribution": {
+    "total_terms": 31824,
+    "by_length": {
+      "1": 1377,
+      "2": 19376,
+      "3": 6094,
+      "4": 4357,
+      "5": 441,
+      "6": 118,
+      "7": 41,
+      "8": 9,
+      "9": 8,
+      "10": 1,
+      "11": 2
+    },
+    "ge15_count": 0,
+    "ge15_ratio": 0.0
+  },
+  "phrase_check": {
+    "seeds": [
+      "罗辑",
+      "汪淼",
+      "叶文洁",
+      "章北海",
+      "程心",
+      "云天明",
+      "智子",
+      "面壁者",
+      "黑暗森林",
+      "破壁人",
+      "三体",
+      "三体世界",
+      "红岸",
+      "阶梯计划",
+      "自然选择",
+      "咒语"
+    ],
+    "single_token_hit": {
+      "罗辑": true,
+      "汪淼": true,
+      "叶文洁": true,
+      "章北海": true,
+      "程心": true,
+      "云天明": true,
+      "智子": true,
+      "面壁者": true,
+      "黑暗森林": true,
+      "破壁人": true,
+      "三体": true,
+      "三体世界": true,
+      "红岸": true,
+      "阶梯计划": true,
+      "自然选择": true,
+      "咒语": true
+    },
+    "hit_rate": 1.0
+  },
+  "queries": [
+    {
+      "seed": "罗辑",
+      "seed_in_graph": true,
+      "seed_df": 855,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "史强",
+          "npmi": 0.383434,
+          "w": 77,
+          "df_target": 154
+        },
+        {
+          "rank": 2,
+          "term": "庄颜",
+          "npmi": 0.366404,
+          "w": 50,
+          "df_target": 93
+        },
+        {
+          "rank": 3,
+          "term": "壁炉",
+          "npmi": 0.348187,
+          "w": 12,
+          "df_target": 15
+        },
+        {
+          "rank": 4,
+          "term": "茶几",
+          "npmi": 0.345786,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 5,
+          "term": "壁炉前",
+          "npmi": 0.344982,
+          "w": 10,
+          "df_target": 12
+        },
+        {
+          "rank": 6,
+          "term": "拐杖",
+          "npmi": 0.344982,
+          "w": 10,
+          "df_target": 12
+        },
+        {
+          "rank": 7,
+          "term": "白蓉",
+          "npmi": 0.343945,
+          "w": 14,
+          "df_target": 19
+        },
+        {
+          "rank": 8,
+          "term": "用拐杖",
+          "npmi": 0.343276,
+          "w": 8,
+          "df_target": 9
+        },
+        {
+          "rank": 9,
+          "term": "主席台",
+          "npmi": 0.337665,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 10,
+          "term": "但罗辑",
+          "npmi": 0.337257,
+          "w": 13,
+          "df_target": 18
+        },
+        {
+          "rank": 11,
+          "term": "雪山",
+          "npmi": 0.335882,
+          "w": 17,
+          "df_target": 26
+        },
+        {
+          "rank": 12,
+          "term": "伸延",
+          "npmi": 0.32823,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 13,
+          "term": "碑文",
+          "npmi": 0.32823,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 14,
+          "term": "隔板",
+          "npmi": 0.32823,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 15,
+          "term": "华北平原",
+          "npmi": 0.325451,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 16,
+          "term": "沙地上",
+          "npmi": 0.319123,
+          "w": 7,
+          "df_target": 9
+        },
+        {
+          "rank": 17,
+          "term": "一百八",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 18,
+          "term": "之剑",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 19,
+          "term": "仰面",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 20,
+          "term": "保卫人员",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 21,
+          "term": "围起来",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 22,
+          "term": "坐落",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 23,
+          "term": "小手",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 24,
+          "term": "居所",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 25,
+          "term": "断头台",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 26,
+          "term": "款式",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 27,
+          "term": "然后转身",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 28,
+          "term": "监护室",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 29,
+          "term": "秘书处",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 30,
+          "term": "绿洲",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 31,
+          "term": "酒窖",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 32,
+          "term": "防弹",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 33,
+          "term": "雅阁",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 34,
+          "term": "靠背",
+          "npmi": 0.316818,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 35,
+          "term": "坎特",
+          "npmi": 0.316287,
+          "w": 28,
+          "df_target": 57
+        },
+        {
+          "rank": 36,
+          "term": "墓碑",
+          "npmi": 0.312382,
+          "w": 16,
+          "df_target": 28
+        },
+        {
+          "rank": 37,
+          "term": "作响",
+          "npmi": 0.307837,
+          "w": 6,
+          "df_target": 8
+        },
+        {
+          "rank": 38,
+          "term": "客厅里",
+          "npmi": 0.307837,
+          "w": 6,
+          "df_target": 8
+        },
+        {
+          "rank": 39,
+          "term": "坎特说",
+          "npmi": 0.304936,
+          "w": 7,
+          "df_target": 10
+        },
+        {
+          "rank": 40,
+          "term": "五十四年",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 41,
+          "term": "及时行乐",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 42,
+          "term": "只得",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 43,
+          "term": "夜雨",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 44,
+          "term": "拄着",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 45,
+          "term": "旧城",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 46,
+          "term": "睡袋",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 47,
+          "term": "默思",
+          "npmi": 0.300289,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 48,
+          "term": "护士",
+          "npmi": 0.298351,
+          "w": 24,
+          "df_target": 52
+        },
+        {
+          "rank": 49,
+          "term": "飞车",
+          "npmi": 0.294133,
+          "w": 9,
+          "df_target": 15
+        },
+        {
+          "rank": 50,
+          "term": "雕塑",
+          "npmi": 0.292854,
+          "w": 8,
+          "df_target": 13
+        },
+        {
+          "rank": 51,
+          "term": "沙发",
+          "npmi": 0.292102,
+          "w": 7,
+          "df_target": 11
+        },
+        {
+          "rank": 52,
+          "term": "湖边",
+          "npmi": 0.285138,
+          "w": 9,
+          "df_target": 16
+        },
+        {
+          "rank": 53,
+          "term": "中叶",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 54,
+          "term": "保持联系",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 55,
+          "term": "决斗",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 56,
+          "term": "凶手说",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 57,
+          "term": "加重",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 58,
+          "term": "十层",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 59,
+          "term": "压强",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 60,
+          "term": "古汉语",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 61,
+          "term": "喝茶",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 62,
+          "term": "嗒",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 63,
+          "term": "地道",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 64,
+          "term": "墓穴",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 65,
+          "term": "夹杂着",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 66,
+          "term": "小黑点",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 67,
+          "term": "山楂树",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 68,
+          "term": "忙活",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 69,
+          "term": "成为面壁者后",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 70,
+          "term": "构思",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 71,
+          "term": "流利",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 72,
+          "term": "生日礼物",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 73,
+          "term": "盒子",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 74,
+          "term": "第一排",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 75,
+          "term": "车停",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 76,
+          "term": "车顶",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 77,
+          "term": "逼视",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 78,
+          "term": "风雪",
+          "npmi": 0.282047,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 79,
+          "term": "车里",
+          "npmi": 0.279983,
+          "w": 10,
+          "df_target": 19
+        },
+        {
+          "rank": 80,
+          "term": "使劲",
+          "npmi": 0.278401,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 81,
+          "term": "卢浮宫",
+          "npmi": 0.278401,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 82,
+          "term": "当罗辑",
+          "npmi": 0.278401,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 83,
+          "term": "新时代",
+          "npmi": 0.278401,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 84,
+          "term": "床",
+          "npmi": 0.277695,
+          "w": 13,
+          "df_target": 27
+        },
+        {
+          "rank": 85,
+          "term": "一辆车",
+          "npmi": 0.277459,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 86,
+          "term": "令罗辑",
+          "npmi": 0.277459,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 87,
+          "term": "围巾",
+          "npmi": 0.277459,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 88,
+          "term": "雪原",
+          "npmi": 0.277459,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 89,
+          "term": "高速公路",
+          "npmi": 0.277459,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 90,
+          "term": "右",
+          "npmi": 0.277121,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 91,
+          "term": "跳起来",
+          "npmi": 0.277121,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 92,
+          "term": "蒙娜丽莎",
+          "npmi": 0.276689,
+          "w": 9,
+          "df_target": 17
+        },
+        {
+          "rank": 93,
+          "term": "爱人",
+          "npmi": 0.273232,
+          "w": 8,
+          "df_target": 15
+        },
+        {
+          "rank": 94,
+          "term": "救世主",
+          "npmi": 0.272727,
+          "w": 10,
+          "df_target": 20
+        },
+        {
+          "rank": 95,
+          "term": "成为面壁者",
+          "npmi": 0.269608,
+          "w": 7,
+          "df_target": 13
+        },
+        {
+          "rank": 96,
+          "term": "步话机",
+          "npmi": 0.265828,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 97,
+          "term": "翻身",
+          "npmi": 0.265828,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 98,
+          "term": "车门",
+          "npmi": 0.265828,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 99,
+          "term": "床上",
+          "npmi": 0.263617,
+          "w": 19,
+          "df_target": 48
+        },
+        {
+          "rank": 100,
+          "term": "衣服",
+          "npmi": 0.262327,
+          "w": 24,
+          "df_target": 65
+        }
+      ]
+    },
+    {
+      "seed": "汪淼",
+      "seed_in_graph": true,
+      "seed_df": 430,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "胶卷",
+          "npmi": 0.454052,
+          "w": 14,
+          "df_target": 18
+        },
+        {
+          "rank": 2,
+          "term": "幽灵倒计时",
+          "npmi": 0.450433,
+          "w": 11,
+          "df_target": 13
+        },
+        {
+          "rank": 3,
+          "term": "暗室",
+          "npmi": 0.446434,
+          "w": 9,
+          "df_target": 10
+        },
+        {
+          "rank": 4,
+          "term": "感应服",
+          "npmi": 0.436454,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 5,
+          "term": "纳米中心",
+          "npmi": 0.427533,
+          "w": 7,
+          "df_target": 8
+        },
+        {
+          "rank": 6,
+          "term": "莱卡",
+          "npmi": 0.427533,
+          "w": 7,
+          "df_target": 8
+        },
+        {
+          "rank": 7,
+          "term": "两根钢柱",
+          "npmi": 0.426203,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 8,
+          "term": "大殿",
+          "npmi": 0.420662,
+          "w": 11,
+          "df_target": 16
+        },
+        {
+          "rank": 9,
+          "term": "莫尔斯电码",
+          "npmi": 0.414295,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 10,
+          "term": "相机",
+          "npmi": 0.403774,
+          "w": 11,
+          "df_target": 18
+        },
+        {
+          "rank": 11,
+          "term": "冲洗",
+          "npmi": 0.402717,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 12,
+          "term": "干仓",
+          "npmi": 0.402717,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 13,
+          "term": "徐冰冰",
+          "npmi": 0.402717,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 14,
+          "term": "装上",
+          "npmi": 0.402717,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 15,
+          "term": "右岸",
+          "npmi": 0.399889,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 16,
+          "term": "巨日",
+          "npmi": 0.399889,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 17,
+          "term": "拍出",
+          "npmi": 0.399889,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 18,
+          "term": "桦皮本",
+          "npmi": 0.399889,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 19,
+          "term": "网友聚会",
+          "npmi": 0.399889,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 20,
+          "term": "这卷",
+          "npmi": 0.399889,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 21,
+          "term": "令汪淼",
+          "npmi": 0.39954,
+          "w": 9,
+          "df_target": 14
+        },
+        {
+          "rank": 22,
+          "term": "杨母",
+          "npmi": 0.399127,
+          "w": 12,
+          "df_target": 21
+        },
+        {
+          "rank": 23,
+          "term": "装具",
+          "npmi": 0.398074,
+          "w": 8,
+          "df_target": 12
+        },
+        {
+          "rank": 24,
+          "term": "沙瑞山",
+          "npmi": 0.392373,
+          "w": 12,
+          "df_target": 22
+        },
+        {
+          "rank": 25,
+          "term": "之琴",
+          "npmi": 0.386353,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 26,
+          "term": "伏羲",
+          "npmi": 0.386353,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 27,
+          "term": "正方形",
+          "npmi": 0.386353,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 28,
+          "term": "酷热",
+          "npmi": 0.386353,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 29,
+          "term": "不由",
+          "npmi": 0.384849,
+          "w": 10,
+          "df_target": 18
+        },
+        {
+          "rank": 30,
+          "term": "天文馆",
+          "npmi": 0.38286,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 31,
+          "term": "黑球",
+          "npmi": 0.38286,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 32,
+          "term": "晨光",
+          "npmi": 0.380929,
+          "w": 9,
+          "df_target": 16
+        },
+        {
+          "rank": 33,
+          "term": "摆锤",
+          "npmi": 0.369068,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 34,
+          "term": "魏成",
+          "npmi": 0.368163,
+          "w": 13,
+          "df_target": 29
+        },
+        {
+          "rank": 35,
+          "term": "底片上",
+          "npmi": 0.365659,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 36,
+          "term": "出汗",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 37,
+          "term": "反应黑箱",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 38,
+          "term": "大铜球",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 39,
+          "term": "打印",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 40,
+          "term": "抓过",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 41,
+          "term": "日轮",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 42,
+          "term": "洞内",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 43,
+          "term": "电脑前",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 44,
+          "term": "瘦削",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 45,
+          "term": "网页",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 46,
+          "term": "那个身影",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 47,
+          "term": "银发",
+          "npmi": 0.365119,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 48,
+          "term": "申玉菲",
+          "npmi": 0.365096,
+          "w": 15,
+          "df_target": 36
+        },
+        {
+          "rank": 49,
+          "term": "两岸",
+          "npmi": 0.363523,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 50,
+          "term": "汪淼走到",
+          "npmi": 0.363523,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 51,
+          "term": "白球",
+          "npmi": 0.363523,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 52,
+          "term": "纳米丝",
+          "npmi": 0.363523,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 53,
+          "term": "台球桌",
+          "npmi": 0.356495,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 54,
+          "term": "巨响",
+          "npmi": 0.356495,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 55,
+          "term": "妻子",
+          "npmi": 0.353086,
+          "w": 15,
+          "df_target": 39
+        },
+        {
+          "rank": 56,
+          "term": "异样",
+          "npmi": 0.350486,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 57,
+          "term": "晨曦",
+          "npmi": 0.350486,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 58,
+          "term": "照片上",
+          "npmi": 0.350486,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 59,
+          "term": "金字塔",
+          "npmi": 0.350451,
+          "w": 17,
+          "df_target": 47
+        },
+        {
+          "rank": 60,
+          "term": "纣王",
+          "npmi": 0.350177,
+          "w": 10,
+          "df_target": 23
+        },
+        {
+          "rank": 61,
+          "term": "追随者",
+          "npmi": 0.34983,
+          "w": 9,
+          "df_target": 20
+        },
+        {
+          "rank": 62,
+          "term": "拍",
+          "npmi": 0.349182,
+          "w": 13,
+          "df_target": 33
+        },
+        {
+          "rank": 63,
+          "term": "墨子",
+          "npmi": 0.347341,
+          "w": 12,
+          "df_target": 30
+        },
+        {
+          "rank": 64,
+          "term": "倒计时",
+          "npmi": 0.34704,
+          "w": 14,
+          "df_target": 37
+        },
+        {
+          "rank": 65,
+          "term": "大地上",
+          "npmi": 0.345582,
+          "w": 15,
+          "df_target": 41
+        },
+        {
+          "rank": 66,
+          "term": "曙光",
+          "npmi": 0.345017,
+          "w": 6,
+          "df_target": 12
+        },
+        {
+          "rank": 67,
+          "term": "奔向",
+          "npmi": 0.344221,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 68,
+          "term": "横",
+          "npmi": 0.344221,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 69,
+          "term": "洞门",
+          "npmi": 0.344221,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 70,
+          "term": "玩家",
+          "npmi": 0.344221,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 71,
+          "term": "这个名字",
+          "npmi": 0.344221,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 72,
+          "term": "游戏",
+          "npmi": 0.343824,
+          "w": 18,
+          "df_target": 53
+        },
+        {
+          "rank": 73,
+          "term": "兽皮",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 74,
+          "term": "刹住",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 75,
+          "term": "厨房",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 76,
+          "term": "司机",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 77,
+          "term": "头皮",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 78,
+          "term": "妻儿",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 79,
+          "term": "孔洞",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 80,
+          "term": "小型机",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 81,
+          "term": "拿起电话",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 82,
+          "term": "汪淼一眼",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 83,
+          "term": "河面",
+          "npmi": 0.338149,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 84,
+          "term": "扭头",
+          "npmi": 0.336914,
+          "w": 5,
+          "df_target": 10
+        },
+        {
+          "rank": 85,
+          "term": "教皇",
+          "npmi": 0.334458,
+          "w": 6,
+          "df_target": 13
+        },
+        {
+          "rank": 86,
+          "term": "登录",
+          "npmi": 0.334458,
+          "w": 6,
+          "df_target": 13
+        },
+        {
+          "rank": 87,
+          "term": "戴上",
+          "npmi": 0.3275,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 88,
+          "term": "摄影",
+          "npmi": 0.3275,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 89,
+          "term": "摆动",
+          "npmi": 0.3275,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 90,
+          "term": "模样",
+          "npmi": 0.3275,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 91,
+          "term": "长袍",
+          "npmi": 0.3275,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 92,
+          "term": "地平线",
+          "npmi": 0.322353,
+          "w": 10,
+          "df_target": 28
+        },
+        {
+          "rank": 93,
+          "term": "张",
+          "npmi": 0.32134,
+          "w": 8,
+          "df_target": 21
+        },
+        {
+          "rank": 94,
+          "term": "大地",
+          "npmi": 0.320951,
+          "w": 17,
+          "df_target": 57
+        },
+        {
+          "rank": 95,
+          "term": "黎明",
+          "npmi": 0.318338,
+          "w": 7,
+          "df_target": 18
+        },
+        {
+          "rank": 96,
+          "term": "照片",
+          "npmi": 0.31739,
+          "w": 10,
+          "df_target": 29
+        },
+        {
+          "rank": 97,
+          "term": "数码相机",
+          "npmi": 0.316113,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 98,
+          "term": "模糊不清",
+          "npmi": 0.316113,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 99,
+          "term": "母女",
+          "npmi": 0.316113,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 100,
+          "term": "汪淼注意到",
+          "npmi": 0.316113,
+          "w": 3,
+          "df_target": 6
+        }
+      ]
+    },
+    {
+      "seed": "叶文洁",
+      "seed_in_graph": true,
+      "seed_df": 336,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "杨卫宁",
+          "npmi": 0.547343,
+          "w": 36,
+          "df_target": 53
+        },
+        {
+          "rank": 2,
+          "term": "屯",
+          "npmi": 0.487494,
+          "w": 8,
+          "df_target": 8
+        },
+        {
+          "rank": 3,
+          "term": "齐家",
+          "npmi": 0.487494,
+          "w": 8,
+          "df_target": 8
+        },
+        {
+          "rank": 4,
+          "term": "红岸基地",
+          "npmi": 0.476936,
+          "w": 19,
+          "df_target": 31
+        },
+        {
+          "rank": 5,
+          "term": "大兴安岭",
+          "npmi": 0.465283,
+          "w": 11,
+          "df_target": 15
+        },
+        {
+          "rank": 6,
+          "term": "雷志成",
+          "npmi": 0.462013,
+          "w": 17,
+          "df_target": 29
+        },
+        {
+          "rank": 7,
+          "term": "红岸天线",
+          "npmi": 0.457979,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 8,
+          "term": "主控室",
+          "npmi": 0.448659,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 9,
+          "term": "发射部",
+          "npmi": 0.448659,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 10,
+          "term": "雷政委",
+          "npmi": 0.447961,
+          "w": 14,
+          "df_target": 24
+        },
+        {
+          "rank": 11,
+          "term": "基地",
+          "npmi": 0.447772,
+          "w": 38,
+          "df_target": 102
+        },
+        {
+          "rank": 12,
+          "term": "杨总工程师",
+          "npmi": 0.445183,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 13,
+          "term": "检修",
+          "npmi": 0.445183,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 14,
+          "term": "母校",
+          "npmi": 0.445183,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 15,
+          "term": "猎头",
+          "npmi": 0.445183,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 16,
+          "term": "资料室",
+          "npmi": 0.445183,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 17,
+          "term": "天体物理学",
+          "npmi": 0.434493,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 18,
+          "term": "复印纸",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 19,
+          "term": "外文",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 20,
+          "term": "大凤",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 21,
+          "term": "太阳辐射",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 22,
+          "term": "屯里",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 23,
+          "term": "房里",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 24,
+          "term": "斧子",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 25,
+          "term": "油灯",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 26,
+          "term": "监室",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 27,
+          "term": "砍树",
+          "npmi": 0.429703,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 28,
+          "term": "哨兵",
+          "npmi": 0.420922,
+          "w": 8,
+          "df_target": 13
+        },
+        {
+          "rank": 29,
+          "term": "文洁",
+          "npmi": 0.420679,
+          "w": 17,
+          "df_target": 38
+        },
+        {
+          "rank": 30,
+          "term": "电台",
+          "npmi": 0.417241,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 31,
+          "term": "砍伐",
+          "npmi": 0.417241,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 32,
+          "term": "程丽华",
+          "npmi": 0.414636,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 33,
+          "term": "红岸工程",
+          "npmi": 0.412093,
+          "w": 10,
+          "df_target": 19
+        },
+        {
+          "rank": 34,
+          "term": "波形",
+          "npmi": 0.401608,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 35,
+          "term": "课题",
+          "npmi": 0.401608,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 36,
+          "term": "论文",
+          "npmi": 0.397435,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 37,
+          "term": "值班员",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 38,
+          "term": "军大衣",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 39,
+          "term": "增益",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 40,
+          "term": "干部",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 41,
+          "term": "技术人员",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 42,
+          "term": "文笔",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 43,
+          "term": "白求恩",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 44,
+          "term": "碑文",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 45,
+          "term": "第一声",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 46,
+          "term": "腹中",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 47,
+          "term": "进入红岸基地",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 48,
+          "term": "镇",
+          "npmi": 0.394933,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 49,
+          "term": "齐",
+          "npmi": 0.394411,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 50,
+          "term": "红岸",
+          "npmi": 0.390595,
+          "w": 19,
+          "df_target": 54
+        },
+        {
+          "rank": 51,
+          "term": "红岸系统",
+          "npmi": 0.384138,
+          "w": 8,
+          "df_target": 17
+        },
+        {
+          "rank": 52,
+          "term": "雷达峰",
+          "npmi": 0.384138,
+          "w": 8,
+          "df_target": 17
+        },
+        {
+          "rank": 53,
+          "term": "连队",
+          "npmi": 0.382262,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 54,
+          "term": "政委",
+          "npmi": 0.376104,
+          "w": 7,
+          "df_target": 15
+        },
+        {
+          "rank": 55,
+          "term": "半年",
+          "npmi": 0.375109,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 56,
+          "term": "叶文洁感到",
+          "npmi": 0.375109,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 57,
+          "term": "天体物理",
+          "npmi": 0.375109,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 58,
+          "term": "小汪",
+          "npmi": 0.375109,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 59,
+          "term": "监听",
+          "npmi": 0.373275,
+          "w": 10,
+          "df_target": 25
+        },
+        {
+          "rank": 60,
+          "term": "频段",
+          "npmi": 0.36869,
+          "w": 5,
+          "df_target": 10
+        },
+        {
+          "rank": 61,
+          "term": "严冬",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 62,
+          "term": "回信",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 63,
+          "term": "岗亭",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 64,
+          "term": "惨死",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 65,
+          "term": "接收系统",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 66,
+          "term": "操场上",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 67,
+          "term": "遗址",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 68,
+          "term": "锯",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 69,
+          "term": "鸟儿",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 70,
+          "term": "黄土",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 71,
+          "term": "发射系统",
+          "npmi": 0.367414,
+          "w": 7,
+          "df_target": 16
+        },
+        {
+          "rank": 72,
+          "term": "发射功率",
+          "npmi": 0.358388,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 73,
+          "term": "射电天文",
+          "npmi": 0.358388,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 74,
+          "term": "小叶",
+          "npmi": 0.358388,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 75,
+          "term": "天线",
+          "npmi": 0.355214,
+          "w": 18,
+          "df_target": 63
+        },
+        {
+          "rank": 76,
+          "term": "接收到",
+          "npmi": 0.348785,
+          "w": 8,
+          "df_target": 22
+        },
+        {
+          "rank": 77,
+          "term": "电磁辐射",
+          "npmi": 0.348785,
+          "w": 8,
+          "df_target": 22
+        },
+        {
+          "rank": 78,
+          "term": "中科院",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 79,
+          "term": "公文包",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 80,
+          "term": "国防",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 81,
+          "term": "天体物理学家",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 82,
+          "term": "孤寂",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 83,
+          "term": "张主任",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 84,
+          "term": "日凌干扰",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 85,
+          "term": "母女",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 86,
+          "term": "粗暴",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 87,
+          "term": "能量镜面",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 88,
+          "term": "落日",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 89,
+          "term": "西北",
+          "npmi": 0.345927,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 90,
+          "term": "部",
+          "npmi": 0.345204,
+          "w": 5,
+          "df_target": 12
+        },
+        {
+          "rank": 91,
+          "term": "出身",
+          "npmi": 0.34364,
+          "w": 4,
+          "df_target": 9
+        },
+        {
+          "rank": 92,
+          "term": "令她",
+          "npmi": 0.342689,
+          "w": 8,
+          "df_target": 23
+        },
+        {
+          "rank": 93,
+          "term": "译解",
+          "npmi": 0.334893,
+          "w": 5,
+          "df_target": 13
+        },
+        {
+          "rank": 94,
+          "term": "父亲",
+          "npmi": 0.333387,
+          "w": 19,
+          "df_target": 78
+        },
+        {
+          "rank": 95,
+          "term": "风中",
+          "npmi": 0.330797,
+          "w": 7,
+          "df_target": 21
+        },
+        {
+          "rank": 96,
+          "term": "才华",
+          "npmi": 0.330447,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 97,
+          "term": "两件",
+          "npmi": 0.327296,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 98,
+          "term": "农民",
+          "npmi": 0.327296,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 99,
+          "term": "剧痛",
+          "npmi": 0.327296,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 100,
+          "term": "封信",
+          "npmi": 0.327296,
+          "w": 3,
+          "df_target": 7
+        }
+      ]
+    },
+    {
+      "seed": "章北海",
+      "seed_in_graph": true,
+      "seed_df": 237,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "东方延绪",
+          "npmi": 0.530219,
+          "w": 31,
+          "df_target": 66
+        },
+        {
+          "rank": 2,
+          "term": "唐",
+          "npmi": 0.517791,
+          "w": 13,
+          "df_target": 19
+        },
+        {
+          "rank": 3,
+          "term": "一号基地",
+          "npmi": 0.502943,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 4,
+          "term": "陨石子弹",
+          "npmi": 0.502943,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 5,
+          "term": "焊花",
+          "npmi": 0.494704,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 6,
+          "term": "瞄准镜",
+          "npmi": 0.494704,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 7,
+          "term": "黄河站",
+          "npmi": 0.494704,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 8,
+          "term": "自然选择",
+          "npmi": 0.489599,
+          "w": 30,
+          "df_target": 80
+        },
+        {
+          "rank": 9,
+          "term": "交通艇",
+          "npmi": 0.48889,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 10,
+          "term": "弹夹",
+          "npmi": 0.48889,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 11,
+          "term": "船坞",
+          "npmi": 0.479457,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 12,
+          "term": "航天服",
+          "npmi": 0.474082,
+          "w": 11,
+          "df_target": 20
+        },
+        {
+          "rank": 13,
+          "term": "簿",
+          "npmi": 0.471891,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 14,
+          "term": "悬浮着",
+          "npmi": 0.461552,
+          "w": 6,
+          "df_target": 9
+        },
+        {
+          "rank": 15,
+          "term": "喷射推进器",
+          "npmi": 0.460948,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 16,
+          "term": "坦诚",
+          "npmi": 0.460948,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 17,
+          "term": "操作界面",
+          "npmi": 0.458622,
+          "w": 8,
+          "df_target": 14
+        },
+        {
+          "rank": 18,
+          "term": "官兵",
+          "npmi": 0.442398,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 19,
+          "term": "巨舰",
+          "npmi": 0.442398,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 20,
+          "term": "合影",
+          "npmi": 0.438118,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 21,
+          "term": "中弹",
+          "npmi": 0.437121,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 22,
+          "term": "冥冥中",
+          "npmi": 0.437121,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 23,
+          "term": "史学",
+          "npmi": 0.437121,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 24,
+          "term": "困倦",
+          "npmi": 0.437121,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 25,
+          "term": "摘",
+          "npmi": 0.437121,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 26,
+          "term": "增援未来",
+          "npmi": 0.435081,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 27,
+          "term": "航空母舰",
+          "npmi": 0.435081,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 28,
+          "term": "舱室",
+          "npmi": 0.426056,
+          "w": 9,
+          "df_target": 21
+        },
+        {
+          "rank": 29,
+          "term": "吴岳",
+          "npmi": 0.424375,
+          "w": 15,
+          "df_target": 44
+        },
+        {
+          "rank": 30,
+          "term": "口令",
+          "npmi": 0.423602,
+          "w": 6,
+          "df_target": 12
+        },
+        {
+          "rank": 31,
+          "term": "收藏者",
+          "npmi": 0.413654,
+          "w": 5,
+          "df_target": 10
+        },
+        {
+          "rank": 32,
+          "term": "廊道",
+          "npmi": 0.413044,
+          "w": 6,
+          "df_target": 13
+        },
+        {
+          "rank": 33,
+          "term": "举手",
+          "npmi": 0.410151,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 34,
+          "term": "工作会议",
+          "npmi": 0.410151,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 35,
+          "term": "待命状态",
+          "npmi": 0.410151,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 36,
+          "term": "深海加速液",
+          "npmi": 0.410151,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 37,
+          "term": "笔记本",
+          "npmi": 0.410151,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 38,
+          "term": "陨石",
+          "npmi": 0.409715,
+          "w": 8,
+          "df_target": 20
+        },
+        {
+          "rank": 39,
+          "term": "球形",
+          "npmi": 0.403385,
+          "w": 12,
+          "df_target": 37
+        },
+        {
+          "rank": 40,
+          "term": "敬礼",
+          "npmi": 0.401376,
+          "w": 5,
+          "df_target": 11
+        },
+        {
+          "rank": 41,
+          "term": "空天飞机",
+          "npmi": 0.401376,
+          "w": 5,
+          "df_target": 11
+        },
+        {
+          "rank": 42,
+          "term": "司令官",
+          "npmi": 0.398555,
+          "w": 7,
+          "df_target": 18
+        },
+        {
+          "rank": 43,
+          "term": "首长",
+          "npmi": 0.393845,
+          "w": 11,
+          "df_target": 35
+        },
+        {
+          "rank": 44,
+          "term": "军徽",
+          "npmi": 0.388114,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 45,
+          "term": "加工",
+          "npmi": 0.388114,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 46,
+          "term": "平视",
+          "npmi": 0.388114,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 47,
+          "term": "挑战",
+          "npmi": 0.388114,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 48,
+          "term": "航天界",
+          "npmi": 0.388114,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 49,
+          "term": "参谋长",
+          "npmi": 0.379857,
+          "w": 5,
+          "df_target": 13
+        },
+        {
+          "rank": 50,
+          "term": "特遣队",
+          "npmi": 0.379857,
+          "w": 5,
+          "df_target": 13
+        },
+        {
+          "rank": 51,
+          "term": "太空军",
+          "npmi": 0.379181,
+          "w": 16,
+          "df_target": 65
+        },
+        {
+          "rank": 52,
+          "term": "安全带",
+          "npmi": 0.377655,
+          "w": 6,
+          "df_target": 17
+        },
+        {
+          "rank": 53,
+          "term": "星舰地球",
+          "npmi": 0.374699,
+          "w": 11,
+          "df_target": 40
+        },
+        {
+          "rank": 54,
+          "term": "两位副舰长",
+          "npmi": 0.374154,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 55,
+          "term": "常伟思说",
+          "npmi": 0.37031,
+          "w": 5,
+          "df_target": 14
+        },
+        {
+          "rank": 56,
+          "term": "空间站",
+          "npmi": 0.37031,
+          "w": 5,
+          "df_target": 14
+        },
+        {
+          "rank": 57,
+          "term": "舰长",
+          "npmi": 0.370133,
+          "w": 16,
+          "df_target": 69
+        },
+        {
+          "rank": 58,
+          "term": "圆柱形",
+          "npmi": 0.369483,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 59,
+          "term": "攥",
+          "npmi": 0.369483,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 60,
+          "term": "舰长权限",
+          "npmi": 0.369483,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 61,
+          "term": "驱逐舰",
+          "npmi": 0.369483,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 62,
+          "term": "太空战舰",
+          "npmi": 0.362219,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 63,
+          "term": "执行舰长",
+          "npmi": 0.362219,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 64,
+          "term": "舱壁",
+          "npmi": 0.359817,
+          "w": 7,
+          "df_target": 24
+        },
+        {
+          "rank": 65,
+          "term": "手枪",
+          "npmi": 0.358766,
+          "w": 8,
+          "df_target": 29
+        },
+        {
+          "rank": 66,
+          "term": "笑了笑",
+          "npmi": 0.356217,
+          "w": 6,
+          "df_target": 20
+        },
+        {
+          "rank": 67,
+          "term": "将要",
+          "npmi": 0.353344,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 68,
+          "term": "父亲",
+          "npmi": 0.351556,
+          "w": 16,
+          "df_target": 78
+        },
+        {
+          "rank": 69,
+          "term": "前辈",
+          "npmi": 0.341301,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 70,
+          "term": "方阵",
+          "npmi": 0.341301,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 71,
+          "term": "地下室",
+          "npmi": 0.339108,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 72,
+          "term": "审视",
+          "npmi": 0.339108,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 73,
+          "term": "心里说",
+          "npmi": 0.339108,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 74,
+          "term": "所有与会者",
+          "npmi": 0.339108,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 75,
+          "term": "潮湿",
+          "npmi": 0.339108,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 76,
+          "term": "界面",
+          "npmi": 0.33906,
+          "w": 7,
+          "df_target": 28
+        },
+        {
+          "rank": 77,
+          "term": "边疆",
+          "npmi": 0.337937,
+          "w": 5,
+          "df_target": 18
+        },
+        {
+          "rank": 78,
+          "term": "这场战争",
+          "npmi": 0.332022,
+          "w": 4,
+          "df_target": 14
+        },
+        {
+          "rank": 79,
+          "term": "一模一样",
+          "npmi": 0.326374,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 80,
+          "term": "失败主义",
+          "npmi": 0.325355,
+          "w": 7,
+          "df_target": 31
+        },
+        {
+          "rank": 81,
+          "term": "状况",
+          "npmi": 0.323382,
+          "w": 4,
+          "df_target": 15
+        },
+        {
+          "rank": 82,
+          "term": "写着",
+          "npmi": 0.314854,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 83,
+          "term": "副舰长",
+          "npmi": 0.314854,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 84,
+          "term": "悬浮于",
+          "npmi": 0.314854,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 85,
+          "term": "亚洲舰队",
+          "npmi": 0.311831,
+          "w": 6,
+          "df_target": 28
+        },
+        {
+          "rank": 86,
+          "term": "军事",
+          "npmi": 0.30771,
+          "w": 4,
+          "df_target": 17
+        },
+        {
+          "rank": 87,
+          "term": "太空舰队",
+          "npmi": 0.307202,
+          "w": 6,
+          "df_target": 29
+        },
+        {
+          "rank": 88,
+          "term": "失重中",
+          "npmi": 0.307202,
+          "w": 6,
+          "df_target": 29
+        },
+        {
+          "rank": 89,
+          "term": "上级",
+          "npmi": 0.306361,
+          "w": 5,
+          "df_target": 23
+        },
+        {
+          "rank": 90,
+          "term": "信心",
+          "npmi": 0.306361,
+          "w": 5,
+          "df_target": 23
+        },
+        {
+          "rank": 91,
+          "term": "东方延绪说",
+          "npmi": 0.304338,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 92,
+          "term": "公民",
+          "npmi": 0.304338,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 93,
+          "term": "座椅",
+          "npmi": 0.304338,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 94,
+          "term": "忧虑",
+          "npmi": 0.304338,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 95,
+          "term": "港口",
+          "npmi": 0.304338,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 96,
+          "term": "队列",
+          "npmi": 0.300553,
+          "w": 4,
+          "df_target": 18
+        },
+        {
+          "rank": 97,
+          "term": "面罩",
+          "npmi": 0.300553,
+          "w": 4,
+          "df_target": 18
+        },
+        {
+          "rank": 98,
+          "term": "飘",
+          "npmi": 0.300553,
+          "w": 4,
+          "df_target": 18
+        },
+        {
+          "rank": 99,
+          "term": "军装",
+          "npmi": 0.29562,
+          "w": 5,
+          "df_target": 25
+        },
+        {
+          "rank": 100,
+          "term": "进入太空",
+          "npmi": 0.29562,
+          "w": 5,
+          "df_target": 25
+        }
+      ]
+    },
+    {
+      "seed": "程心",
+      "seed_in_graph": true,
+      "seed_df": 950,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "AA",
+          "npmi": 0.44681,
+          "w": 130,
+          "df_target": 215
+        },
+        {
+          "rank": 2,
+          "term": "维德",
+          "npmi": 0.367715,
+          "w": 77,
+          "df_target": 150
+        },
+        {
+          "rank": 3,
+          "term": "曹彬",
+          "npmi": 0.350556,
+          "w": 38,
+          "df_target": 63
+        },
+        {
+          "rank": 4,
+          "term": "关一帆",
+          "npmi": 0.34829,
+          "w": 83,
+          "df_target": 183
+        },
+        {
+          "rank": 5,
+          "term": "弗雷斯",
+          "npmi": 0.345941,
+          "w": 22,
+          "df_target": 31
+        },
+        {
+          "rank": 6,
+          "term": "终端站",
+          "npmi": 0.339082,
+          "w": 13,
+          "df_target": 16
+        },
+        {
+          "rank": 7,
+          "term": "曹彬告诉",
+          "npmi": 0.331888,
+          "w": 6,
+          "df_target": 6
+        },
+        {
+          "rank": 8,
+          "term": "太空服",
+          "npmi": 0.330965,
+          "w": 20,
+          "df_target": 30
+        },
+        {
+          "rank": 9,
+          "term": "平凡",
+          "npmi": 0.324093,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 10,
+          "term": "超然",
+          "npmi": 0.324093,
+          "w": 5,
+          "df_target": 5
+        },
+        {
+          "rank": 11,
+          "term": "三个世纪前",
+          "npmi": 0.316261,
+          "w": 11,
+          "df_target": 15
+        },
+        {
+          "rank": 12,
+          "term": "井",
+          "npmi": 0.315037,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 13,
+          "term": "短暂地",
+          "npmi": 0.315037,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 14,
+          "term": "走出穿梭机",
+          "npmi": 0.315037,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 15,
+          "term": "心上",
+          "npmi": 0.311553,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 16,
+          "term": "零下",
+          "npmi": 0.311553,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 17,
+          "term": "探照灯",
+          "npmi": 0.310548,
+          "w": 9,
+          "df_target": 12
+        },
+        {
+          "rank": 18,
+          "term": "季姆",
+          "npmi": 0.304936,
+          "w": 7,
+          "df_target": 9
+        },
+        {
+          "rank": 19,
+          "term": "透明罩",
+          "npmi": 0.304936,
+          "w": 7,
+          "df_target": 9
+        },
+        {
+          "rank": 20,
+          "term": "云天明",
+          "npmi": 0.30415,
+          "w": 78,
+          "df_target": 210
+        },
+        {
+          "rank": 21,
+          "term": "书写",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 22,
+          "term": "多想",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 23,
+          "term": "失重推进器",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 24,
+          "term": "尾翼",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 25,
+          "term": "张力",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 26,
+          "term": "情报工作",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 27,
+          "term": "扩建",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 28,
+          "term": "沃伯顿",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 29,
+          "term": "洪流",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 30,
+          "term": "演讲者",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 31,
+          "term": "田里",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 32,
+          "term": "短发",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 33,
+          "term": "脑外科",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 34,
+          "term": "轻捷",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 35,
+          "term": "配置",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 36,
+          "term": "铅云",
+          "npmi": 0.304083,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 37,
+          "term": "灰星",
+          "npmi": 0.301313,
+          "w": 8,
+          "df_target": 11
+        },
+        {
+          "rank": 38,
+          "term": "让她",
+          "npmi": 0.301292,
+          "w": 26,
+          "df_target": 51
+        },
+        {
+          "rank": 39,
+          "term": "几光年",
+          "npmi": 0.300607,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 40,
+          "term": "地感觉到",
+          "npmi": 0.300607,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 41,
+          "term": "摄氏度",
+          "npmi": 0.300607,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 42,
+          "term": "艇",
+          "npmi": 0.298516,
+          "w": 10,
+          "df_target": 15
+        },
+        {
+          "rank": 43,
+          "term": "乘坐",
+          "npmi": 0.298315,
+          "w": 11,
+          "df_target": 17
+        },
+        {
+          "rank": 44,
+          "term": "艾AA",
+          "npmi": 0.296418,
+          "w": 16,
+          "df_target": 28
+        },
+        {
+          "rank": 45,
+          "term": "穿梭机",
+          "npmi": 0.295964,
+          "w": 28,
+          "df_target": 58
+        },
+        {
+          "rank": 46,
+          "term": "女性化",
+          "npmi": 0.293938,
+          "w": 6,
+          "df_target": 8
+        },
+        {
+          "rank": 47,
+          "term": "胶囊",
+          "npmi": 0.293938,
+          "w": 6,
+          "df_target": 8
+        },
+        {
+          "rank": 48,
+          "term": "柯曼琳",
+          "npmi": 0.290749,
+          "w": 7,
+          "df_target": 10
+        },
+        {
+          "rank": 49,
+          "term": "飘行",
+          "npmi": 0.290749,
+          "w": 7,
+          "df_target": 10
+        },
+        {
+          "rank": 50,
+          "term": "太空艇",
+          "npmi": 0.290315,
+          "w": 36,
+          "df_target": 83
+        },
+        {
+          "rank": 51,
+          "term": "程心注意到",
+          "npmi": 0.289064,
+          "w": 9,
+          "df_target": 14
+        },
+        {
+          "rank": 52,
+          "term": "亮线",
+          "npmi": 0.287096,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 53,
+          "term": "天明",
+          "npmi": 0.287096,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 54,
+          "term": "设计师",
+          "npmi": 0.287096,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 55,
+          "term": "但程心",
+          "npmi": 0.283863,
+          "w": 15,
+          "df_target": 28
+        },
+        {
+          "rank": 56,
+          "term": "男人",
+          "npmi": 0.281782,
+          "w": 33,
+          "df_target": 78
+        },
+        {
+          "rank": 57,
+          "term": "两极",
+          "npmi": 0.280749,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 58,
+          "term": "冬眠中心",
+          "npmi": 0.280749,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 59,
+          "term": "流线型",
+          "npmi": 0.280749,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 60,
+          "term": "航天技术",
+          "npmi": 0.280749,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 61,
+          "term": "长短",
+          "npmi": 0.280749,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 62,
+          "term": "信息窗口",
+          "npmi": 0.280703,
+          "w": 21,
+          "df_target": 44
+        },
+        {
+          "rank": 63,
+          "term": "纽约",
+          "npmi": 0.279449,
+          "w": 9,
+          "df_target": 15
+        },
+        {
+          "rank": 64,
+          "term": "抬起头来",
+          "npmi": 0.278407,
+          "w": 8,
+          "df_target": 13
+        },
+        {
+          "rank": 65,
+          "term": "双肩",
+          "npmi": 0.278401,
+          "w": 6,
+          "df_target": 9
+        },
+        {
+          "rank": 66,
+          "term": "太空飞行器",
+          "npmi": 0.277915,
+          "w": 7,
+          "df_target": 11
+        },
+        {
+          "rank": 67,
+          "term": "手动",
+          "npmi": 0.277915,
+          "w": 7,
+          "df_target": 11
+        },
+        {
+          "rank": 68,
+          "term": "心",
+          "npmi": 0.2746,
+          "w": 27,
+          "df_target": 63
+        },
+        {
+          "rank": 69,
+          "term": "舷梯",
+          "npmi": 0.272727,
+          "w": 10,
+          "df_target": 18
+        },
+        {
+          "rank": 70,
+          "term": "PIA",
+          "npmi": 0.270005,
+          "w": 17,
+          "df_target": 36
+        },
+        {
+          "rank": 71,
+          "term": "星环",
+          "npmi": 0.269989,
+          "w": 38,
+          "df_target": 100
+        },
+        {
+          "rank": 72,
+          "term": "不再那么",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 73,
+          "term": "会聚到",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 74,
+          "term": "向远方",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 75,
+          "term": "型号",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 76,
+          "term": "女人味",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 77,
+          "term": "孤零零地",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 78,
+          "term": "小臂",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 79,
+          "term": "心碎",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 80,
+          "term": "意味深长",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 81,
+          "term": "抑郁",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 82,
+          "term": "整齐划一",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 83,
+          "term": "漠然",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 84,
+          "term": "男女",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 85,
+          "term": "白嫩",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 86,
+          "term": "目不转睛",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 87,
+          "term": "看看窗外",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 88,
+          "term": "知名",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 89,
+          "term": "穿着一身",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 90,
+          "term": "紧缩",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 91,
+          "term": "紧靠着",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 92,
+          "term": "艰苦",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 93,
+          "term": "转身向",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 94,
+          "term": "这次会面",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 95,
+          "term": "那排",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 96,
+          "term": "钉子",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 97,
+          "term": "钢门",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 98,
+          "term": "闭起双眼",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 99,
+          "term": "骚扰",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 100,
+          "term": "麻痹",
+          "npmi": 0.269313,
+          "w": 3,
+          "df_target": 4
+        }
+      ]
+    },
+    {
+      "seed": "云天明",
+      "seed_in_graph": true,
+      "seed_df": 210,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "胡文",
+          "npmi": 0.55588,
+          "w": 10,
+          "df_target": 11
+        },
+        {
+          "rank": 2,
+          "term": "三个故事",
+          "npmi": 0.51066,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 3,
+          "term": "化疗",
+          "npmi": 0.504035,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 4,
+          "term": "注射机",
+          "npmi": 0.504035,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 5,
+          "term": "童话故事",
+          "npmi": 0.495038,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 6,
+          "term": "张医生",
+          "npmi": 0.493989,
+          "w": 7,
+          "df_target": 10
+        },
+        {
+          "rank": 7,
+          "term": "情报",
+          "npmi": 0.487037,
+          "w": 16,
+          "df_target": 36
+        },
+        {
+          "rank": 8,
+          "term": "受赠者",
+          "npmi": 0.48651,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 9,
+          "term": "针头",
+          "npmi": 0.48651,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 10,
+          "term": "孤僻",
+          "npmi": 0.458661,
+          "w": 7,
+          "df_target": 13
+        },
+        {
+          "rank": 11,
+          "term": "三个故事中",
+          "npmi": 0.457979,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 12,
+          "term": "何博士",
+          "npmi": 0.456897,
+          "w": 8,
+          "df_target": 16
+        },
+        {
+          "rank": 13,
+          "term": "几光年",
+          "npmi": 0.453264,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 14,
+          "term": "战略情报",
+          "npmi": 0.453264,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 15,
+          "term": "胡文说",
+          "npmi": 0.453264,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 16,
+          "term": "饮料",
+          "npmi": 0.453264,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 17,
+          "term": "监听者",
+          "npmi": 0.451739,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 18,
+          "term": "解读出",
+          "npmi": 0.451739,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 19,
+          "term": "老李",
+          "npmi": 0.448682,
+          "w": 7,
+          "df_target": 14
+        },
+        {
+          "rank": 20,
+          "term": "安乐",
+          "npmi": 0.448584,
+          "w": 8,
+          "df_target": 17
+        },
+        {
+          "rank": 21,
+          "term": "姐姐",
+          "npmi": 0.442807,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 22,
+          "term": "黄灯",
+          "npmi": 0.442807,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 23,
+          "term": "故事中",
+          "npmi": 0.439392,
+          "w": 7,
+          "df_target": 15
+        },
+        {
+          "rank": 24,
+          "term": "种地",
+          "npmi": 0.433961,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 25,
+          "term": "宣誓",
+          "npmi": 0.429234,
+          "w": 5,
+          "df_target": 10
+        },
+        {
+          "rank": 26,
+          "term": "安乐室",
+          "npmi": 0.424769,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 27,
+          "term": "左臂",
+          "npmi": 0.424769,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 28,
+          "term": "英国人",
+          "npmi": 0.424769,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 29,
+          "term": "同学",
+          "npmi": 0.419223,
+          "w": 6,
+          "df_target": 14
+        },
+        {
+          "rank": 30,
+          "term": "保密",
+          "npmi": 0.416957,
+          "w": 5,
+          "df_target": 11
+        },
+        {
+          "rank": 31,
+          "term": "解读",
+          "npmi": 0.407148,
+          "w": 11,
+          "df_target": 36
+        },
+        {
+          "rank": 32,
+          "term": "麦子",
+          "npmi": 0.402733,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 33,
+          "term": "故事",
+          "npmi": 0.398507,
+          "w": 15,
+          "df_target": 59
+        },
+        {
+          "rank": 34,
+          "term": "购买",
+          "npmi": 0.384102,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 35,
+          "term": "那颗星",
+          "npmi": 0.384102,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 36,
+          "term": "IDC",
+          "npmi": 0.370607,
+          "w": 7,
+          "df_target": 25
+        },
+        {
+          "rank": 37,
+          "term": "屏",
+          "npmi": 0.367963,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 38,
+          "term": "大学",
+          "npmi": 0.356638,
+          "w": 9,
+          "df_target": 39
+        },
+        {
+          "rank": 39,
+          "term": "二百八十",
+          "npmi": 0.353727,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 40,
+          "term": "谈起",
+          "npmi": 0.353727,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 41,
+          "term": "病人",
+          "npmi": 0.353517,
+          "w": 5,
+          "df_target": 18
+        },
+        {
+          "rank": 42,
+          "term": "伤害",
+          "npmi": 0.346553,
+          "w": 5,
+          "df_target": 19
+        },
+        {
+          "rank": 43,
+          "term": "玻璃",
+          "npmi": 0.342736,
+          "w": 6,
+          "df_target": 25
+        },
+        {
+          "rank": 44,
+          "term": "隐喻",
+          "npmi": 0.338528,
+          "w": 4,
+          "df_target": 15
+        },
+        {
+          "rank": 45,
+          "term": "女孩",
+          "npmi": 0.337367,
+          "w": 7,
+          "df_target": 32
+        },
+        {
+          "rank": 46,
+          "term": "介绍说",
+          "npmi": 0.329473,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 47,
+          "term": "圣经",
+          "npmi": 0.329473,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 48,
+          "term": "所有权",
+          "npmi": 0.329473,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 49,
+          "term": "饕餮海",
+          "npmi": 0.329473,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 50,
+          "term": "会面",
+          "npmi": 0.322855,
+          "w": 4,
+          "df_target": 17
+        },
+        {
+          "rank": 51,
+          "term": "交往",
+          "npmi": 0.318957,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 52,
+          "term": "另一边",
+          "npmi": 0.318957,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 53,
+          "term": "有意",
+          "npmi": 0.318957,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 54,
+          "term": "童年",
+          "npmi": 0.318957,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 55,
+          "term": "讲",
+          "npmi": 0.317817,
+          "w": 7,
+          "df_target": 37
+        },
+        {
+          "rank": 56,
+          "term": "恶心",
+          "npmi": 0.309282,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 57,
+          "term": "截获",
+          "npmi": 0.309282,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 58,
+          "term": "暗示",
+          "npmi": 0.309282,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 59,
+          "term": "视线",
+          "npmi": 0.309282,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 60,
+          "term": "负责人",
+          "npmi": 0.309282,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 61,
+          "term": "程心",
+          "npmi": 0.30415,
+          "w": 78,
+          "df_target": 950
+        },
+        {
+          "rank": 62,
+          "term": "病房",
+          "npmi": 0.300325,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 63,
+          "term": "中学",
+          "npmi": 0.291987,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 64,
+          "term": "他们之间",
+          "npmi": 0.291987,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 65,
+          "term": "出生",
+          "npmi": 0.291987,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 66,
+          "term": "窗帘",
+          "npmi": 0.291987,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 67,
+          "term": "传递",
+          "npmi": 0.285004,
+          "w": 4,
+          "df_target": 23
+        },
+        {
+          "rank": 68,
+          "term": "国内",
+          "npmi": 0.285004,
+          "w": 4,
+          "df_target": 23
+        },
+        {
+          "rank": 69,
+          "term": "单独",
+          "npmi": 0.284186,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 70,
+          "term": "提到",
+          "npmi": 0.284186,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 71,
+          "term": "移开",
+          "npmi": 0.284186,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 72,
+          "term": "童话",
+          "npmi": 0.284186,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 73,
+          "term": "心里",
+          "npmi": 0.282769,
+          "w": 7,
+          "df_target": 48
+        },
+        {
+          "rank": 74,
+          "term": "阶梯计划",
+          "npmi": 0.277478,
+          "w": 6,
+          "df_target": 41
+        },
+        {
+          "rank": 75,
+          "term": "答应",
+          "npmi": 0.276859,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 76,
+          "term": "躯体",
+          "npmi": 0.276859,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 77,
+          "term": "清澈",
+          "npmi": 0.274563,
+          "w": 4,
+          "df_target": 25
+        },
+        {
+          "rank": 78,
+          "term": "讲述",
+          "npmi": 0.274563,
+          "w": 4,
+          "df_target": 25
+        },
+        {
+          "rank": 79,
+          "term": "作者",
+          "npmi": 0.269951,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 80,
+          "term": "候选人",
+          "npmi": 0.269652,
+          "w": 4,
+          "df_target": 26
+        },
+        {
+          "rank": 81,
+          "term": "宁静",
+          "npmi": 0.264926,
+          "w": 4,
+          "df_target": 27
+        },
+        {
+          "rank": 82,
+          "term": "这种感觉",
+          "npmi": 0.264926,
+          "w": 4,
+          "df_target": 27
+        },
+        {
+          "rank": 83,
+          "term": "不像",
+          "npmi": 0.263416,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 84,
+          "term": "极度",
+          "npmi": 0.263416,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 85,
+          "term": "公司",
+          "npmi": 0.260699,
+          "w": 5,
+          "df_target": 37
+        },
+        {
+          "rank": 86,
+          "term": "女孩子",
+          "npmi": 0.260373,
+          "w": 4,
+          "df_target": 28
+        },
+        {
+          "rank": 87,
+          "term": "艾AA",
+          "npmi": 0.260373,
+          "w": 4,
+          "df_target": 28
+        },
+        {
+          "rank": 88,
+          "term": "含义",
+          "npmi": 0.257287,
+          "w": 7,
+          "df_target": 58
+        },
+        {
+          "rank": 89,
+          "term": "两位",
+          "npmi": 0.257216,
+          "w": 3,
+          "df_target": 20
+        },
+        {
+          "rank": 90,
+          "term": "会议室",
+          "npmi": 0.257216,
+          "w": 3,
+          "df_target": 20
+        },
+        {
+          "rank": 91,
+          "term": "这句话",
+          "npmi": 0.255979,
+          "w": 4,
+          "df_target": 29
+        },
+        {
+          "rank": 92,
+          "term": "告诉",
+          "npmi": 0.25242,
+          "w": 10,
+          "df_target": 94
+        },
+        {
+          "rank": 93,
+          "term": "主任",
+          "npmi": 0.251319,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 94,
+          "term": "医院",
+          "npmi": 0.251319,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 95,
+          "term": "救",
+          "npmi": 0.251319,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 96,
+          "term": "远远",
+          "npmi": 0.251319,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 97,
+          "term": "让她",
+          "npmi": 0.248687,
+          "w": 6,
+          "df_target": 51
+        },
+        {
+          "rank": 98,
+          "term": "舰队国际",
+          "npmi": 0.247628,
+          "w": 4,
+          "df_target": 31
+        },
+        {
+          "rank": 99,
+          "term": "爱",
+          "npmi": 0.247475,
+          "w": 5,
+          "df_target": 41
+        },
+        {
+          "rank": 100,
+          "term": "亮起",
+          "npmi": 0.245697,
+          "w": 3,
+          "df_target": 22
+        }
+      ]
+    },
+    {
+      "seed": "智子",
+      "seed_in_graph": true,
+      "seed_df": 327,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "盲区",
+          "npmi": 0.508514,
+          "w": 12,
+          "df_target": 13
+        },
+        {
+          "rank": 2,
+          "term": "武士刀",
+          "npmi": 0.452241,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 3,
+          "term": "进入盲区",
+          "npmi": 0.452241,
+          "w": 6,
+          "df_target": 7
+        },
+        {
+          "rank": 4,
+          "term": "茶具",
+          "npmi": 0.448582,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 5,
+          "term": "量子计算机",
+          "npmi": 0.448582,
+          "w": 4,
+          "df_target": 4
+        },
+        {
+          "rank": 6,
+          "term": "和服",
+          "npmi": 0.437991,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 7,
+          "term": "迷彩服",
+          "npmi": 0.437991,
+          "w": 5,
+          "df_target": 6
+        },
+        {
+          "rank": 8,
+          "term": "垛顶",
+          "npmi": 0.432985,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 9,
+          "term": "多于",
+          "npmi": 0.432985,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 10,
+          "term": "低维展开",
+          "npmi": 0.424645,
+          "w": 8,
+          "df_target": 13
+        },
+        {
+          "rank": 11,
+          "term": "茶道",
+          "npmi": 0.421523,
+          "w": 7,
+          "df_target": 11
+        },
+        {
+          "rank": 12,
+          "term": "大宇宙中",
+          "npmi": 0.418133,
+          "w": 5,
+          "df_target": 7
+        },
+        {
+          "rank": 13,
+          "term": "屏蔽室",
+          "npmi": 0.40519,
+          "w": 6,
+          "df_target": 10
+        },
+        {
+          "rank": 14,
+          "term": "感应",
+          "npmi": 0.400932,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 15,
+          "term": "高能粒子",
+          "npmi": 0.400932,
+          "w": 5,
+          "df_target": 8
+        },
+        {
+          "rank": 16,
+          "term": "三体文字",
+          "npmi": 0.398214,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 17,
+          "term": "但三体世界",
+          "npmi": 0.398214,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 18,
+          "term": "喝茶",
+          "npmi": 0.398214,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 19,
+          "term": "静电",
+          "npmi": 0.398214,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 20,
+          "term": "人类科学",
+          "npmi": 0.397811,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 21,
+          "term": "期限",
+          "npmi": 0.397811,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 22,
+          "term": "深深鞠躬",
+          "npmi": 0.397811,
+          "w": 4,
+          "df_target": 6
+        },
+        {
+          "rank": 23,
+          "term": "锁死",
+          "npmi": 0.396174,
+          "w": 8,
+          "df_target": 16
+        },
+        {
+          "rank": 24,
+          "term": "保留地",
+          "npmi": 0.392617,
+          "w": 6,
+          "df_target": 11
+        },
+        {
+          "rank": 25,
+          "term": "治安军",
+          "npmi": 0.38905,
+          "w": 7,
+          "df_target": 14
+        },
+        {
+          "rank": 26,
+          "term": "会面",
+          "npmi": 0.387861,
+          "w": 8,
+          "df_target": 17
+        },
+        {
+          "rank": 27,
+          "term": "茶",
+          "npmi": 0.38576,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 28,
+          "term": "加速器",
+          "npmi": 0.380763,
+          "w": 13,
+          "df_target": 35
+        },
+        {
+          "rank": 29,
+          "term": "到达地球",
+          "npmi": 0.380023,
+          "w": 8,
+          "df_target": 18
+        },
+        {
+          "rank": 30,
+          "term": "鞠躬",
+          "npmi": 0.37976,
+          "w": 7,
+          "df_target": 15
+        },
+        {
+          "rank": 31,
+          "term": "对抗",
+          "npmi": 0.371244,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 32,
+          "term": "新一代",
+          "npmi": 0.371244,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 33,
+          "term": "竹林中",
+          "npmi": 0.371244,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 34,
+          "term": "运输机",
+          "npmi": 0.371244,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 35,
+          "term": "镜面球体",
+          "npmi": 0.371244,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 36,
+          "term": "物理学",
+          "npmi": 0.369403,
+          "w": 15,
+          "df_target": 46
+        },
+        {
+          "rank": 37,
+          "term": "轻柔",
+          "npmi": 0.361788,
+          "w": 4,
+          "df_target": 8
+        },
+        {
+          "rank": 38,
+          "term": "别墅",
+          "npmi": 0.351427,
+          "w": 9,
+          "df_target": 26
+        },
+        {
+          "rank": 39,
+          "term": "使三体世界",
+          "npmi": 0.349208,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 40,
+          "term": "前沿",
+          "npmi": 0.349208,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 41,
+          "term": "十一维",
+          "npmi": 0.349208,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 42,
+          "term": "总共",
+          "npmi": 0.349208,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 43,
+          "term": "清泉",
+          "npmi": 0.349208,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 44,
+          "term": "直至",
+          "npmi": 0.349208,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 45,
+          "term": "破解",
+          "npmi": 0.349208,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 46,
+          "term": "高能加速器",
+          "npmi": 0.348701,
+          "w": 5,
+          "df_target": 12
+        },
+        {
+          "rank": 47,
+          "term": "封锁",
+          "npmi": 0.347929,
+          "w": 7,
+          "df_target": 19
+        },
+        {
+          "rank": 48,
+          "term": "不可能进行",
+          "npmi": 0.347039,
+          "w": 4,
+          "df_target": 9
+        },
+        {
+          "rank": 49,
+          "term": "人工智能",
+          "npmi": 0.347039,
+          "w": 4,
+          "df_target": 9
+        },
+        {
+          "rank": 50,
+          "term": "四光年外",
+          "npmi": 0.33839,
+          "w": 5,
+          "df_target": 13
+        },
+        {
+          "rank": 51,
+          "term": "大陆上",
+          "npmi": 0.33839,
+          "w": 5,
+          "df_target": 13
+        },
+        {
+          "rank": 52,
+          "term": "实时",
+          "npmi": 0.334979,
+          "w": 8,
+          "df_target": 25
+        },
+        {
+          "rank": 53,
+          "term": "电路",
+          "npmi": 0.333846,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 54,
+          "term": "云雾",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 55,
+          "term": "告诉你们",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 56,
+          "term": "地球方面",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 57,
+          "term": "宏观世界",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 58,
+          "term": "少有",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 59,
+          "term": "树枝上",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 60,
+          "term": "生存空间",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 61,
+          "term": "视网膜",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 62,
+          "term": "跟随",
+          "npmi": 0.330577,
+          "w": 3,
+          "df_target": 7
+        },
+        {
+          "rank": 63,
+          "term": "移民",
+          "npmi": 0.329239,
+          "w": 17,
+          "df_target": 71
+        },
+        {
+          "rank": 64,
+          "term": "三体世界",
+          "npmi": 0.327989,
+          "w": 40,
+          "df_target": 223
+        },
+        {
+          "rank": 65,
+          "term": "解除",
+          "npmi": 0.327652,
+          "w": 6,
+          "df_target": 18
+        },
+        {
+          "rank": 66,
+          "term": "量子",
+          "npmi": 0.325459,
+          "w": 13,
+          "df_target": 51
+        },
+        {
+          "rank": 67,
+          "term": "如果说",
+          "npmi": 0.321912,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 68,
+          "term": "欢迎",
+          "npmi": 0.321912,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 69,
+          "term": "白云",
+          "npmi": 0.321912,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 70,
+          "term": "黑暗森林状态",
+          "npmi": 0.321912,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 71,
+          "term": "小宇宙",
+          "npmi": 0.320519,
+          "w": 6,
+          "df_target": 19
+        },
+        {
+          "rank": 72,
+          "term": "澳大利亚",
+          "npmi": 0.317523,
+          "w": 15,
+          "df_target": 65
+        },
+        {
+          "rank": 73,
+          "term": "机器人",
+          "npmi": 0.314628,
+          "w": 8,
+          "df_target": 29
+        },
+        {
+          "rank": 74,
+          "term": "庭院",
+          "npmi": 0.314438,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 75,
+          "term": "形成一片",
+          "npmi": 0.314438,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 76,
+          "term": "掌握着",
+          "npmi": 0.314438,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 77,
+          "term": "科学执政官说",
+          "npmi": 0.314438,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 78,
+          "term": "科学技术",
+          "npmi": 0.314438,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 79,
+          "term": "第二支",
+          "npmi": 0.314438,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 80,
+          "term": "飘逸",
+          "npmi": 0.314438,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 81,
+          "term": "粒子",
+          "npmi": 0.311643,
+          "w": 5,
+          "df_target": 16
+        },
+        {
+          "rank": 82,
+          "term": "阅读",
+          "npmi": 0.311643,
+          "w": 5,
+          "df_target": 16
+        },
+        {
+          "rank": 83,
+          "term": "插",
+          "npmi": 0.311016,
+          "w": 4,
+          "df_target": 12
+        },
+        {
+          "rank": 84,
+          "term": "一年",
+          "npmi": 0.306073,
+          "w": 9,
+          "df_target": 36
+        },
+        {
+          "rank": 85,
+          "term": "两个世界",
+          "npmi": 0.303733,
+          "w": 10,
+          "df_target": 42
+        },
+        {
+          "rank": 86,
+          "term": "兴奋起来",
+          "npmi": 0.300994,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 87,
+          "term": "神迹",
+          "npmi": 0.300994,
+          "w": 4,
+          "df_target": 13
+        },
+        {
+          "rank": 88,
+          "term": "一个质子",
+          "npmi": 0.300202,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 89,
+          "term": "一滴",
+          "npmi": 0.300202,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 90,
+          "term": "不会发生",
+          "npmi": 0.300202,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 91,
+          "term": "倾向于",
+          "npmi": 0.300202,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 92,
+          "term": "总有",
+          "npmi": 0.300202,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 93,
+          "term": "讲话",
+          "npmi": 0.300202,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 94,
+          "term": "智能",
+          "npmi": 0.29647,
+          "w": 5,
+          "df_target": 18
+        },
+        {
+          "rank": 95,
+          "term": "监视",
+          "npmi": 0.293711,
+          "w": 11,
+          "df_target": 51
+        },
+        {
+          "rank": 96,
+          "term": "二号",
+          "npmi": 0.291714,
+          "w": 4,
+          "df_target": 14
+        },
+        {
+          "rank": 97,
+          "term": "防御系统",
+          "npmi": 0.291714,
+          "w": 4,
+          "df_target": 14
+        },
+        {
+          "rank": 98,
+          "term": "这么做",
+          "npmi": 0.289702,
+          "w": 6,
+          "df_target": 24
+        },
+        {
+          "rank": 99,
+          "term": "四号",
+          "npmi": 0.287468,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 100,
+          "term": "意图",
+          "npmi": 0.287468,
+          "w": 3,
+          "df_target": 10
+        }
+      ]
+    },
+    {
+      "seed": "面壁者",
+      "seed_in_graph": true,
+      "seed_df": 153,
+      "returned_neighbors": [
+        {
+          "rank": 1,
+          "term": "面壁计划",
+          "npmi": 0.536959,
+          "w": 28,
+          "df_target": 84
+        },
+        {
+          "rank": 2,
+          "term": "保证面壁者",
+          "npmi": 0.524784,
+          "w": 3,
+          "df_target": 3
+        },
+        {
+          "rank": 3,
+          "term": "战略计划",
+          "npmi": 0.523845,
+          "w": 12,
+          "df_target": 25
+        },
+        {
+          "rank": 4,
+          "term": "弗雷德里克",
+          "npmi": 0.515746,
+          "w": 4,
+          "df_target": 5
+        },
+        {
+          "rank": 5,
+          "term": "三位",
+          "npmi": 0.509168,
+          "w": 8,
+          "df_target": 15
+        },
+        {
+          "rank": 6,
+          "term": "豁免权",
+          "npmi": 0.490013,
+          "w": 3,
+          "df_target": 4
+        },
+        {
+          "rank": 7,
+          "term": "调用",
+          "npmi": 0.483599,
+          "w": 5,
+          "df_target": 9
+        },
+        {
+          "rank": 8,
+          "term": "听证会",
+          "npmi": 0.481332,
+          "w": 6,
+          "df_target": 12
+        },
+        {
+          "rank": 9,
+          "term": "战略",
+          "npmi": 0.47942,
+          "w": 19,
+          "df_target": 67
+        },
+        {
+          "rank": 10,
+          "term": "四位",
+          "npmi": 0.473614,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 11,
+          "term": "破壁",
+          "npmi": 0.473614,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 12,
+          "term": "面壁法案",
+          "npmi": 0.473614,
+          "w": 4,
+          "df_target": 7
+        },
+        {
+          "rank": 13,
+          "term": "特权",
+          "npmi": 0.463043,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 14,
+          "term": "联合国面壁法案",
+          "npmi": 0.463043,
+          "w": 3,
+          "df_target": 5
+        },
+        {
+          "rank": 15,
+          "term": "泰勒",
+          "npmi": 0.460457,
+          "w": 25,
+          "df_target": 113
+        },
+        {
+          "rank": 16,
+          "term": "破解",
+          "npmi": 0.441007,
+          "w": 3,
+          "df_target": 6
+        },
+        {
+          "rank": 17,
+          "term": "权力",
+          "npmi": 0.437338,
+          "w": 9,
+          "df_target": 30
+        },
+        {
+          "rank": 18,
+          "term": "意图",
+          "npmi": 0.428952,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 19,
+          "term": "比尔",
+          "npmi": 0.428952,
+          "w": 4,
+          "df_target": 10
+        },
+        {
+          "rank": 20,
+          "term": "破壁人",
+          "npmi": 0.424721,
+          "w": 15,
+          "df_target": 68
+        },
+        {
+          "rank": 21,
+          "term": "欺骗",
+          "npmi": 0.424476,
+          "w": 7,
+          "df_target": 23
+        },
+        {
+          "rank": 22,
+          "term": "面壁",
+          "npmi": 0.417018,
+          "w": 4,
+          "df_target": 11
+        },
+        {
+          "rank": 23,
+          "term": "联合国行星防御理事会",
+          "npmi": 0.406237,
+          "w": 3,
+          "df_target": 8
+        },
+        {
+          "rank": 24,
+          "term": "赋予",
+          "npmi": 0.406122,
+          "w": 4,
+          "df_target": 12
+        },
+        {
+          "rank": 25,
+          "term": "资源",
+          "npmi": 0.405991,
+          "w": 13,
+          "df_target": 63
+        },
+        {
+          "rank": 26,
+          "term": "逻辑",
+          "npmi": 0.401673,
+          "w": 5,
+          "df_target": 17
+        },
+        {
+          "rank": 27,
+          "term": "主席台上",
+          "npmi": 0.392001,
+          "w": 3,
+          "df_target": 9
+        },
+        {
+          "rank": 28,
+          "term": "执行",
+          "npmi": 0.381711,
+          "w": 8,
+          "df_target": 38
+        },
+        {
+          "rank": 29,
+          "term": "不可理解",
+          "npmi": 0.379267,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 30,
+          "term": "主流防御",
+          "npmi": 0.379267,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 31,
+          "term": "亲自",
+          "npmi": 0.379267,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 32,
+          "term": "迷宫",
+          "npmi": 0.379267,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 33,
+          "term": "选定",
+          "npmi": 0.379267,
+          "w": 3,
+          "df_target": 10
+        },
+        {
+          "rank": 34,
+          "term": "身份",
+          "npmi": 0.374678,
+          "w": 8,
+          "df_target": 40
+        },
+        {
+          "rank": 35,
+          "term": "雪地",
+          "npmi": 0.367747,
+          "w": 3,
+          "df_target": 11
+        },
+        {
+          "rank": 36,
+          "term": "面壁者雷迪亚兹",
+          "npmi": 0.362508,
+          "w": 4,
+          "df_target": 17
+        },
+        {
+          "rank": 37,
+          "term": "否决",
+          "npmi": 0.357231,
+          "w": 3,
+          "df_target": 12
+        },
+        {
+          "rank": 38,
+          "term": "罗辑博士",
+          "npmi": 0.356867,
+          "w": 7,
+          "df_target": 38
+        },
+        {
+          "rank": 39,
+          "term": "代表",
+          "npmi": 0.351191,
+          "w": 11,
+          "df_target": 73
+        },
+        {
+          "rank": 40,
+          "term": "制定",
+          "npmi": 0.34858,
+          "w": 4,
+          "df_target": 19
+        },
+        {
+          "rank": 41,
+          "term": "成为面壁者",
+          "npmi": 0.347556,
+          "w": 3,
+          "df_target": 13
+        },
+        {
+          "rank": 42,
+          "term": "主席先生",
+          "npmi": 0.338599,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 43,
+          "term": "合格",
+          "npmi": 0.338599,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 44,
+          "term": "幽灵",
+          "npmi": 0.338599,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 45,
+          "term": "特别联大",
+          "npmi": 0.338599,
+          "w": 3,
+          "df_target": 14
+        },
+        {
+          "rank": 46,
+          "term": "雷迪亚兹",
+          "npmi": 0.337007,
+          "w": 16,
+          "df_target": 133
+        },
+        {
+          "rank": 47,
+          "term": "行为",
+          "npmi": 0.336408,
+          "w": 6,
+          "df_target": 36
+        },
+        {
+          "rank": 48,
+          "term": "依靠",
+          "npmi": 0.330261,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 49,
+          "term": "轮值主席",
+          "npmi": 0.330261,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 50,
+          "term": "面壁者罗辑",
+          "npmi": 0.330261,
+          "w": 3,
+          "df_target": 15
+        },
+        {
+          "rank": 51,
+          "term": "行星防御理事会",
+          "npmi": 0.329275,
+          "w": 6,
+          "df_target": 38
+        },
+        {
+          "rank": 52,
+          "term": "会议上",
+          "npmi": 0.328507,
+          "w": 5,
+          "df_target": 30
+        },
+        {
+          "rank": 53,
+          "term": "相应",
+          "npmi": 0.325849,
+          "w": 6,
+          "df_target": 39
+        },
+        {
+          "rank": 54,
+          "term": "伽尔宁",
+          "npmi": 0.324283,
+          "w": 5,
+          "df_target": 31
+        },
+        {
+          "rank": 55,
+          "term": "解脱",
+          "npmi": 0.32246,
+          "w": 3,
+          "df_target": 16
+        },
+        {
+          "rank": 56,
+          "term": "委员会",
+          "npmi": 0.320193,
+          "w": 5,
+          "df_target": 32
+        },
+        {
+          "rank": 57,
+          "term": "希恩斯",
+          "npmi": 0.319613,
+          "w": 15,
+          "df_target": 137
+        },
+        {
+          "rank": 58,
+          "term": "计划",
+          "npmi": 0.316775,
+          "w": 16,
+          "df_target": 152
+        },
+        {
+          "rank": 59,
+          "term": "尊重",
+          "npmi": 0.315133,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 60,
+          "term": "秘书长",
+          "npmi": 0.315133,
+          "w": 3,
+          "df_target": 17
+        },
+        {
+          "rank": 61,
+          "term": "公布",
+          "npmi": 0.314216,
+          "w": 4,
+          "df_target": 25
+        },
+        {
+          "rank": 62,
+          "term": "提升",
+          "npmi": 0.308225,
+          "w": 3,
+          "df_target": 18
+        },
+        {
+          "rank": 63,
+          "term": "原则",
+          "npmi": 0.304579,
+          "w": 4,
+          "df_target": 27
+        },
+        {
+          "rank": 64,
+          "term": "伤害",
+          "npmi": 0.30169,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 65,
+          "term": "决议",
+          "npmi": 0.30169,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 66,
+          "term": "无疑",
+          "npmi": 0.30169,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 67,
+          "term": "转移到",
+          "npmi": 0.30169,
+          "w": 3,
+          "df_target": 19
+        },
+        {
+          "rank": 68,
+          "term": "秘密",
+          "npmi": 0.298458,
+          "w": 6,
+          "df_target": 48
+        },
+        {
+          "rank": 69,
+          "term": "微笑",
+          "npmi": 0.295738,
+          "w": 6,
+          "df_target": 49
+        },
+        {
+          "rank": 70,
+          "term": "举动",
+          "npmi": 0.29549,
+          "w": 3,
+          "df_target": 20
+        },
+        {
+          "rank": 71,
+          "term": "人类历史上",
+          "npmi": 0.29549,
+          "w": 3,
+          "df_target": 20
+        },
+        {
+          "rank": 72,
+          "term": "拒绝",
+          "npmi": 0.29471,
+          "w": 5,
+          "df_target": 39
+        },
+        {
+          "rank": 73,
+          "term": "联合国",
+          "npmi": 0.293711,
+          "w": 11,
+          "df_target": 109
+        },
+        {
+          "rank": 74,
+          "term": "真实",
+          "npmi": 0.29056,
+          "w": 9,
+          "df_target": 86
+        },
+        {
+          "rank": 75,
+          "term": "法律",
+          "npmi": 0.290461,
+          "w": 6,
+          "df_target": 51
+        },
+        {
+          "rank": 76,
+          "term": "证据",
+          "npmi": 0.289593,
+          "w": 3,
+          "df_target": 21
+        },
+        {
+          "rank": 77,
+          "term": "实现",
+          "npmi": 0.287899,
+          "w": 6,
+          "df_target": 52
+        },
+        {
+          "rank": 78,
+          "term": "氢弹",
+          "npmi": 0.28728,
+          "w": 4,
+          "df_target": 31
+        },
+        {
+          "rank": 79,
+          "term": "做什么",
+          "npmi": 0.283971,
+          "w": 3,
+          "df_target": 22
+        },
+        {
+          "rank": 80,
+          "term": "使命",
+          "npmi": 0.280504,
+          "w": 7,
+          "df_target": 67
+        },
+        {
+          "rank": 81,
+          "term": "借助",
+          "npmi": 0.278598,
+          "w": 3,
+          "df_target": 23
+        },
+        {
+          "rank": 82,
+          "term": "会场",
+          "npmi": 0.276543,
+          "w": 7,
+          "df_target": 69
+        },
+        {
+          "rank": 83,
+          "term": "双方",
+          "npmi": 0.273454,
+          "w": 3,
+          "df_target": 24
+        },
+        {
+          "rank": 84,
+          "term": "水星",
+          "npmi": 0.272084,
+          "w": 4,
+          "df_target": 35
+        },
+        {
+          "rank": 85,
+          "term": "萨伊",
+          "npmi": 0.272084,
+          "w": 4,
+          "df_target": 35
+        },
+        {
+          "rank": 86,
+          "term": "失败",
+          "npmi": 0.271239,
+          "w": 6,
+          "df_target": 59
+        },
+        {
+          "rank": 87,
+          "term": "会议",
+          "npmi": 0.269717,
+          "w": 8,
+          "df_target": 86
+        },
+        {
+          "rank": 88,
+          "term": "限制",
+          "npmi": 0.268556,
+          "w": 4,
+          "df_target": 36
+        },
+        {
+          "rank": 89,
+          "term": "戴着",
+          "npmi": 0.26852,
+          "w": 3,
+          "df_target": 25
+        },
+        {
+          "rank": 90,
+          "term": "艰难",
+          "npmi": 0.26852,
+          "w": 3,
+          "df_target": 25
+        },
+        {
+          "rank": 91,
+          "term": "国际社会",
+          "npmi": 0.26378,
+          "w": 3,
+          "df_target": 26
+        },
+        {
+          "rank": 92,
+          "term": "天花板",
+          "npmi": 0.26378,
+          "w": 3,
+          "df_target": 26
+        },
+        {
+          "rank": 93,
+          "term": "消耗",
+          "npmi": 0.26378,
+          "w": 3,
+          "df_target": 26
+        },
+        {
+          "rank": 94,
+          "term": "威胁",
+          "npmi": 0.262704,
+          "w": 5,
+          "df_target": 50
+        },
+        {
+          "rank": 95,
+          "term": "PDC",
+          "npmi": 0.260153,
+          "w": 5,
+          "df_target": 51
+        },
+        {
+          "rank": 96,
+          "term": "责任",
+          "npmi": 0.260035,
+          "w": 7,
+          "df_target": 78
+        },
+        {
+          "rank": 97,
+          "term": "笑",
+          "npmi": 0.257651,
+          "w": 5,
+          "df_target": 52
+        },
+        {
+          "rank": 98,
+          "term": "其他人",
+          "npmi": 0.252271,
+          "w": 4,
+          "df_target": 41
+        },
+        {
+          "rank": 99,
+          "term": "承担",
+          "npmi": 0.250582,
+          "w": 3,
+          "df_target": 29
+        },
+        {
+          "rank": 100,
+          "term": "眼神",
+          "npmi": 0.246484,
+          "w": 3,
+          "df_target": 30
+        }
+      ]
+    }
+  ],
+  "detection_summary": {
+    "new_or_updated_phrases": 101,
+    "top20_by_npmi": [
+      {
+        "phrase": "冯诺伊曼",
+        "n": 2,
+        "count": 44,
+        "npmi": 0.9928,
+        "branch_ent": 3.0981,
+        "h_left": 3.0981,
+        "h_right": 3.1701
+      },
+      {
+        "phrase": "概况KB",
+        "n": 2,
+        "count": 3,
+        "npmi": 0.957,
+        "branch_ent": 1.0986,
+        "h_left": 1.0986,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "达芬奇",
+        "n": 2,
+        "count": 5,
+        "npmi": 0.8976,
+        "branch_ent": 1.0986,
+        "h_left": 1.0986,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "男岁",
+        "n": 2,
+        "count": 3,
+        "npmi": 0.8079,
+        "branch_ent": 1.0986,
+        "h_left": 1.0986,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "前进四",
+        "n": 2,
+        "count": 16,
+        "npmi": 0.7765,
+        "branch_ent": 1.0986,
+        "h_left": 1.0986,
+        "h_right": 2.3694
+      },
+      {
+        "phrase": "年月日",
+        "n": 3,
+        "count": 15,
+        "npmi": 0.7523,
+        "branch_ent": 1.677,
+        "h_left": 2.0449,
+        "h_right": 1.677
+      },
+      {
+        "phrase": "万有引力号",
+        "n": 2,
+        "count": 125,
+        "npmi": 0.7404,
+        "branch_ent": 4.0029,
+        "h_left": 4.1257,
+        "h_right": 4.0029
+      },
+      {
+        "phrase": "林格斐兹罗",
+        "n": 2,
+        "count": 10,
+        "npmi": 0.7354,
+        "branch_ent": 1.4708,
+        "h_left": 1.7918,
+        "h_right": 1.4708
+      },
+      {
+        "phrase": "公元年",
+        "n": 2,
+        "count": 15,
+        "npmi": 0.7317,
+        "branch_ent": 1.6988,
+        "h_left": 2.2103,
+        "h_right": 1.6988
+      },
+      {
+        "phrase": "蓝色空间号",
+        "n": 3,
+        "count": 108,
+        "npmi": 0.7258,
+        "branch_ent": 3.6265,
+        "h_left": 4.1024,
+        "h_right": 3.6265
+      },
+      {
+        "phrase": "托马斯维德",
+        "n": 2,
+        "count": 10,
+        "npmi": 0.7185,
+        "branch_ent": 1.3297,
+        "h_left": 1.3297,
+        "h_right": 1.9062
+      },
+      {
+        "phrase": "星环号",
+        "n": 2,
+        "count": 99,
+        "npmi": 0.7182,
+        "branch_ent": 3.8632,
+        "h_left": 3.9104,
+        "h_right": 3.8632
+      },
+      {
+        "phrase": "自然选择号",
+        "n": 2,
+        "count": 85,
+        "npmi": 0.7096,
+        "branch_ent": 3.5849,
+        "h_left": 3.8069,
+        "h_right": 3.5849
+      },
+      {
+        "phrase": "麦克伊文斯",
+        "n": 2,
+        "count": 4,
+        "npmi": 0.6742,
+        "branch_ent": 1.0986,
+        "h_left": 1.3863,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "频率兆赫",
+        "n": 2,
+        "count": 4,
+        "npmi": 0.6733,
+        "branch_ent": 1.0397,
+        "h_left": 1.0397,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "公元世纪",
+        "n": 2,
+        "count": 4,
+        "npmi": 0.672,
+        "branch_ent": 1.0986,
+        "h_left": 1.0986,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "纪元公元年",
+        "n": 3,
+        "count": 3,
+        "npmi": 0.6608,
+        "branch_ent": 1.0986,
+        "h_left": 1.0986,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "第次",
+        "n": 2,
+        "count": 4,
+        "npmi": 0.6564,
+        "branch_ent": 1.0397,
+        "h_left": 1.0397,
+        "h_right": 1.3863
+      },
+      {
+        "phrase": "如幽灵般",
+        "n": 2,
+        "count": 3,
+        "npmi": 0.6563,
+        "branch_ent": 1.0986,
+        "h_left": 1.0986,
+        "h_right": 1.0986
+      },
+      {
+        "phrase": "万有引力号上",
+        "n": 2,
+        "count": 23,
+        "npmi": 0.6544,
+        "branch_ent": 2.2719,
+        "h_left": 2.2719,
+        "h_right": 2.2719
+      }
+    ]
+  }
+}
