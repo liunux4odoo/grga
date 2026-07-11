@@ -809,7 +809,7 @@ def index_build_command(
     chunk_max_chars: int = typer.Option(600, "--chunk-max-chars", help="Target upper bound on chars per chunk (chars mode)."),
     chunk_min_chars: int = typer.Option(300, "--chunk-min-chars", help="Target lower bound on chars per chunk (chars mode)."),
     min_pair_count: int = typer.Option(3, "--min-pair-count", help="Minimum chunk co-occurrence count for a pair to be stored."),
-    max_file_kb: int = typer.Option(512, "--max-file-kb", help="Skip files larger than this many KiB."),
+    max_file_kb: int = typer.Option(0, "--max-file-kb", help="Skip files larger than this many KiB. 0 (default) = no size limit."),
     append: bool = typer.Option(False, "--append", help="Accumulate onto existing rows instead of replacing the scope."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
@@ -858,9 +858,13 @@ def index_build_command(
         if bad_suffix:
             parts.append(f"{bad_suffix} file(s) had unindexed suffixes")
         if parts:
+            if too_large:
+                relax = "pass --max-file-kb 0 for no size limit or raise it"
+            else:
+                relax = "narrow --scope or add supported suffixes"
             typer.echo(
                 "hint: no files were indexed; " + ", ".join(parts) + ". "
-                "Try raising --max-file-kb or narrowing --scope.",
+                f"Try {relax}.",
                 err=True,
             )
         else:

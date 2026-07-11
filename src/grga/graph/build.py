@@ -140,7 +140,12 @@ def iter_text_files(
     ignore_dirs: Iterable[str],
     on_skip: Optional[Callable[[str], None]] = None,
 ) -> Iterable[Path]:
-    """Yield candidate text files under ``scope`` (unchanged from doc-level)."""
+    """Yield candidate text files under ``scope`` (unchanged from doc-level).
+
+    ``max_file_bytes <= 0`` means *no size limit* (sentinel semantics): every
+    text file passes the size gate. A positive value skips files larger than
+    it and reports them via ``on_skip("too_large")``.
+    """
     ignore_set = {name for name in ignore_dirs}
     if scope.is_file():
         yield scope
@@ -172,7 +177,7 @@ def iter_text_files(
                 size = entry.stat().st_size
             except OSError:
                 continue
-            if size > max_file_bytes:
+            if max_file_bytes > 0 and size > max_file_bytes:
                 if on_skip is not None:
                     on_skip("too_large")
                 continue
@@ -330,7 +335,7 @@ def build_graph_index(
     chunk_max_chars: int = DEFAULT_CHUNK_MAX_CHARS,
     chunk_min_chars: int = DEFAULT_CHUNK_MIN_CHARS,
     min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
-    max_file_bytes: int = 512 * 1024,
+    max_file_bytes: int = 0,
     ignore_dirs: Iterable[str] = (".git", ".grga", ".venv", "node_modules",
                                    "__pycache__", "dist", "build", "target",
                                    ".mypy_cache", ".pytest_cache"),
@@ -349,7 +354,9 @@ def build_graph_index(
         chunk_max_chars / chunk_min_chars: target char window for ``chars``.
         min_pair_count: minimum chunk co-occurrence count for a pair to be
             stored in ``keyword_pairs`` (sparsification, plan §5.4).
-        max_file_bytes: files larger than this are skipped.
+        max_file_bytes: files larger than this are skipped. ``0`` (the
+            default) disables the size gate entirely; pass a positive value
+            for a defensive upper bound.
         ignore_dirs: directory names pruned during the walk.
         replace: when ``True`` (default) all pre-existing rows for this
             scope in ``chunks`` / ``keyword_chunks`` / ``heading_docs`` and
