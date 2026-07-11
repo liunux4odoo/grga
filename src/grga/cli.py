@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -858,6 +859,120 @@ def expand_command(
     typer.echo(context.text)
 
 
+def _make_index_build_progress():
+    """Return ``(on_event, close)`` for a pretty ``rich`` progress bar.
+
+    Falls back to ``(None, None)`` when stderr is not a TTY or ``rich`` is
+    unavailable; the caller then uses the plain-string ``progress`` callback
+    instead. The bar is drawn on stderr so ``--json`` / piped stdout stays
+    machine-clean (this helper is only invoked in the human, non-JSON path).
+    """
+    if not sys.stderr.isatty():
+        return None, None
+    try:
+        from rich.console import Console
+        from rich.progress import (
+            BarColumn,
+            MofNCompleteColumn,
+            Progress,
+            SpinnerColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+    except Exception:
+        return None, None
+
+    console = Console(stderr=True)
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("[dim]{task.fields[note]}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    )
+
+    def _short(path: str, width: int = 40) -> str:
+        name = Path(path).name
+        return name if len(name) <= width else "…" + name[-(width - 1):]
+
+    state: dict = {}
+    progress.start()
+
+    def on_event(event: dict) -> None:
+        phase = event.get("phase")
+        if phase == "scan_start":
+            state["scan"] = progress.add_task(
+                "[cyan]扫描 / 读取文件", total=None, note=""
+            )
+        elif phase == "scan_advance":
+            progress.update(
+                state.get("scan"),
+                completed=event["current"],
+                note=_short(event.get("path", "")),
+            )
+        elif phase == "scan_end":
+            task = state.get("scan")
+            if task is not None:
+                progress.update(
+                    task,
+                    total=event["total_docs"],
+                    completed=event["total_docs"],
+                    note=f"{event['total_chunks']} chunks",
+                )
+        elif phase == "ngram_iter_start":
+            key = "ngram"
+            if key not in state:
+                state[key] = progress.add_task(
+                    "[magenta]n-gram 分词", total=event["iters"], note=""
+                )
+            progress.update(
+                state[key],
+                completed=event["iter"] - 1,
+                note=f"第 {event['iter']}/{event['iters']} 轮 · {event['chunks']} chunks",
+            )
+        elif phase == "ngram_iter_end":
+            task = state.get("ngram")
+            if task is not None:
+                progress.update(
+                    task,
+                    completed=event["iter"],
+                    note=f"{event['phrases']} 短语",
+                )
+        elif phase == "materialise_start":
+            state["mat"] = progress.add_task(
+                "[green]写入 chunks / 关键词", total=event["total_docs"], note=""
+            )
+        elif phase == "materialise_advance":
+            progress.update(
+                state.get("mat"),
+                completed=event["current"],
+                note=_short(event.get("path", "")),
+            )
+        elif phase == "pairs_start":
+            state["pairs"] = progress.add_task(
+                "[yellow]生成共现对",
+                total=event.get("candidate_pairs") or None,
+                note=f"{event.get('surviving_pairs', 0)} 保留",
+            )
+            task = state["pairs"]
+            progress.update(task, completed=event.get("candidate_pairs") or 0)
+        elif phase == "pairs_done":
+            task = state.get("pairs")
+            if task is not None:
+                progress.update(task, note=f"{event['pairs_written']} 对写入")
+
+    def close() -> None:
+        try:
+            progress.stop()
+        except Exception:
+            pass
+
+    return on_event, close
+
+
 @index_app.command("build")
 def index_build_command(
     scope: Path = typer.Option(Path("."), "--scope", "-s", "--directory", "-d", exists=True, resolve_path=True, help="Directory (or file) to index. The resolved absolute path becomes the scope key stored in the graph DB and later referenced by read-side commands via --directory."),
@@ -897,19 +1012,33 @@ def index_build_command(
         typer.echo("--max-ngram-n must be >= 2", err=True)
         raise typer.Exit(2)
 
-    stats = build_graph_index(
-        scope,
-        db_path=str(db_path) if db_path else None,
-        chunk_mode=chunk_mode,
-        chunk_max_chars=chunk_max_chars,
-        chunk_min_chars=chunk_min_chars,
-        min_pair_count=min_pair_count,
-        max_file_bytes=max_file_kb * 1024,
-        ngram_iters=ngram_iters,
-        max_ngram_n=max_ngram_n,
-        replace=not append,
-        progress=(None if json_output else (lambda message: typer.echo(message, err=True))),
-    )
+    rich_on_event = None
+    rich_close = None
+    text_progress = None
+    if not json_output:
+        rich_on_event, rich_close = _make_index_build_progress()
+        if rich_on_event is None:
+            # Non-TTY / rich unavailable: keep the legacy plain-text log lines.
+            text_progress = lambda message: typer.echo(message, err=True)
+
+    try:
+        stats = build_graph_index(
+            scope,
+            db_path=str(db_path) if db_path else None,
+            chunk_mode=chunk_mode,
+            chunk_max_chars=chunk_max_chars,
+            chunk_min_chars=chunk_min_chars,
+            min_pair_count=min_pair_count,
+            max_file_bytes=max_file_kb * 1024,
+            ngram_iters=ngram_iters,
+            max_ngram_n=max_ngram_n,
+            replace=not append,
+            progress=text_progress,
+            on_event=rich_on_event,
+        )
+    finally:
+        if rich_close is not None:
+            rich_close()
     if json_output:
         typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
         return

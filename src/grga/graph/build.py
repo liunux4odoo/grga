@@ -703,6 +703,7 @@ def build_graph_index(
     ngram_iters: int = DEFAULT_NGRAM_ITERS,
     max_ngram_n: int = DEFAULT_MAX_NGRAM_N,
     progress: Optional[Callable[[str], None]] = None,
+    on_event: Optional[Callable[[dict], None]] = None,
 ) -> BuildStats:
     """Build ``chunks`` / ``keyword_chunks`` / ``keyword_pairs`` for ``scope``.
 
@@ -724,7 +725,17 @@ def build_graph_index(
             scope in ``chunks`` / ``keyword_chunks`` / ``heading_docs`` and
             the ``chunk_cooccur`` rows in ``keyword_pairs`` are cleared
             first. ``llm_promoted`` pairs are never touched here.
-        progress: optional status callback.
+        progress: optional status callback (plain string, legacy).
+        on_event: optional structured progress callback. Emits dicts of
+            the form ``{"phase": <str>, ...}``. Phases: ``scan_start`` (no
+            total known), ``scan_advance`` (``current`` = files read so
+            far, ``path`` = current file), ``scan_end`` (``total_docs`` /
+            ``total_chunks``), ``ngram_iter_start`` (``iter`` / ``iters``
+            / ``chunks``), ``ngram_iter_end`` (same + ``phrases``),
+            ``materialise_start`` (``total_docs``), ``materialise_advance``
+            (``current`` = doc index just finished, ``total``, ``path``),
+            ``pairs_start`` (``candidate_pairs``), ``pairs_done``
+            (``pairs_written``), ``done`` (final ``BuildStats.to_dict()``).
 
     Returns:
         A :class:`BuildStats` describing the run.
@@ -740,6 +751,17 @@ def build_graph_index(
     scope_path = Path(scope).expanduser().resolve()
     scope_key = str(scope_path)
     stats = BuildStats(scope=scope_key, chunk_mode=chunk_mode)
+
+    def _emit(phase: str, **fields) -> None:
+        if on_event is None:
+            return
+        payload = {"phase": phase}
+        payload.update(fields)
+        try:
+            on_event(payload)
+        except Exception:
+            # Progress reporting must never break a build.
+            pass
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     conn = connect(target_db)
@@ -785,6 +807,7 @@ def build_graph_index(
         # is (doc_id, rel_path, path, is_md, [(chunk, text), ...]).
         # ------------------------------------------------------------------
         docs: List[tuple] = []
+        _emit("scan_start")
         for path in iter_text_files(
             scope_path,
             max_file_bytes=max_file_bytes,
@@ -816,6 +839,19 @@ def build_graph_index(
             )
             doc_id = interner.doc_id(scope_dir_id, rel_path)
             docs.append((doc_id, rel_path, path, is_md, chunks))
+            _emit(
+                "scan_advance",
+                current=stats.files_scanned,
+                path=str(path),
+                chunks=len(chunks),
+            )
+
+        total_scanned_chunks = sum(len(entry[4]) for entry in docs)
+        _emit(
+            "scan_end",
+            total_docs=len(docs),
+            total_chunks=total_scanned_chunks,
+        )
 
         # ------------------------------------------------------------------
         # Pass 1: iterative auto n-gram dictionary refinement. Each iteration
@@ -831,6 +867,13 @@ def build_graph_index(
         chunk_tokens: Dict[tuple, List[str]] = {}
         iters = max(1, int(ngram_iters))
         for iteration in range(iters):
+            _emit(
+                "ngram_iter_start",
+                iter=iteration + 1,
+                iters=iters,
+                chunks=total_scanned_chunks,
+                phrases=len(auto_dict),
+            )
             jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
             phrase_set = set(auto_dict.keys())
             chunk_tokens = {}
@@ -857,6 +900,13 @@ def build_graph_index(
                     f"ngram iter {iteration + 1}/{iters}: "
                     f"{len(auto_dict)} phrases, {len(chunk_tokens)} chunks tokenised"
                 )
+            _emit(
+                "ngram_iter_end",
+                iter=iteration + 1,
+                iters=iters,
+                chunks=len(chunk_tokens),
+                phrases=len(auto_dict),
+            )
         _persist_auto_dict(conn, scope_dir_id, auto_dict.values(), now)
         stats.ngram_phrases_written = len(auto_dict)
 
@@ -868,7 +918,8 @@ def build_graph_index(
         pair_count: Counter = Counter()
         n_chunks_with_keywords = 0
 
-        for doc_id, rel_path, path, is_md, chunks in docs:
+        _emit("materialise_start", total_docs=len(docs))
+        for doc_index, (doc_id, rel_path, path, is_md, chunks) in enumerate(docs, start=1):
             # Per-doc keyword counts derived from the FINAL chunk_tokens.
             per_chunk_kw: List[Tuple[int, Dict[str, int]]] = []
             file_distinct_kws: set = set()
@@ -971,6 +1022,12 @@ def build_graph_index(
                     f"materialised {stats.files_indexed} files "
                     f"({stats.chunks_written} chunks, {stats.keyword_chunks_written} kw rows)"
                 )
+            _emit(
+                "materialise_advance",
+                current=doc_index,
+                total=len(docs),
+                path=str(path),
+            )
 
         # Materialise keyword_pairs (chunk_cooccur) from the accumulated
         # pair counts + chunk-df, applying npmi and min_pair_count. Batch-
@@ -982,6 +1039,11 @@ def build_graph_index(
             (a, b, c) for (a, b), c in pair_count.items()
             if c >= min_pair_count
         ]
+        _emit(
+            "pairs_start",
+            candidate_pairs=len(pair_count),
+            surviving_pairs=len(surviving_pairs),
+        )
         pair_rows = []
         if surviving_pairs:
             pair_kws = {kw for (a, b, _c) in surviving_pairs for kw in (a, b)}
@@ -1013,4 +1075,6 @@ def build_graph_index(
         conn.close()
 
     stats.elapsed_seconds = time.perf_counter() - started
+    _emit("pairs_done", pairs_written=stats.pairs_written)
+    _emit("done", stats=stats.to_dict())
     return stats
