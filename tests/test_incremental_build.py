@@ -345,6 +345,131 @@ def test_forget_missing_phrase_is_noop(tmp_path, sidecar_env):
     assert fs.keyword_chunks_removed == 0
 
 
+def test_forget_phrase_case_insensitive_matches_stored_dict(tmp_path, sidecar_env):
+    """`forget --phrase pdc主席` must delete stored `PDC主席` dict rows.
+
+    ``auto_ngram_dict`` stores phrases as-detected (mixed case), while the
+    ``keywords`` intern table is casefolded. A verbatim `phrase IN (?)`
+    match against the dict would leave stored casings orphaned while the
+    cascade wipes their keyword_chunks — asymmetry review finding.
+    """
+    scope = tmp_path / "scope"
+    scope.mkdir()
+    (scope / "a.txt").write_text(
+        "PDC主席 罗辑 PDC主席 罗辑\n" * 5, encoding="utf-8"
+    )
+
+    db = tmp_path / "graph.db"
+    build_graph_index(scope, db_path=db, mode="rebuild",
+                      refresh_ngram="append")
+
+    # Seed a mixed-case dict entry directly (the small toy corpus does
+    # not exceed the detection thresholds, so the dict starts empty in
+    # practice). This mirrors the real-world scenario where an entry
+    # from a larger corpus was stored as ``PDC主席``.
+    conn = connect(db)
+    ensure_schema(conn)
+    interner = IdInterner(conn)
+    scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
+    conn.execute(
+        "INSERT INTO auto_ngram_dict "
+        "(dir_id, phrase, n, count, npmi, branch_ent, updated_at) "
+        "VALUES (?, 'PDC主席', 2, 5, 0.9, 2.0, '2026-07-11T00:00:00Z')",
+        (scope_dir_id,),
+    )
+    conn.commit()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ? AND phrase = ?",
+        (scope_dir_id, "PDC主席"),
+    ).fetchone()[0] == 1
+    conn.close()
+
+    # Forget using lower-case input.
+    fs = forget_scope_phrases(scope, db_path=db, phrases=["pdc主席"])
+    assert fs.ngram_dict_removed == 1
+    # The stored dict row must be gone.
+    conn = connect(db)
+    ensure_schema(conn)
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ? AND phrase = ?",
+        (scope_dir_id, "PDC主席"),
+    ).fetchone()[0]
+    conn.close()
+    assert remaining == 0
+    # And this phrase must not appear in phrases_missing (silent orphan
+    # was the failure mode being guarded against).
+    assert "pdc主席" not in fs.phrases_missing
+
+
+def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monkeypatch):
+    """A build with zero doc changes must not touch keyword_pairs.
+
+    Guard against the "recompute called unconditionally" regression the
+    review flagged: previously an incremental no-op still did DELETE +
+    full-scan pair rebuild. We prove the skip by patching
+    ``recompute_pairs`` and asserting it never fires.
+    """
+    scope = tmp_path / "scope"
+    _write_corpus(scope)
+    db = tmp_path / "graph.db"
+
+    build_graph_index(scope, db_path=db, mode="rebuild",
+                      refresh_ngram="append")
+
+    from grga.graph import build as build_mod
+    call_count = {"n": 0}
+    real = build_mod.recompute_pairs
+
+    def _counting(*args, **kwargs):
+        call_count["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(build_mod, "recompute_pairs", _counting)
+
+    s = build_graph_index(scope, db_path=db, mode="build",
+                          refresh_ngram="append")
+    assert s.docs_unchanged == 3
+    assert s.docs_updated == 0
+    assert call_count["n"] == 0
+    # pairs_written must still be populated (read back from DB), not 0.
+    conn = connect(db)
+    ensure_schema(conn)
+    interner = IdInterner(conn)
+    scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
+    db_pair_count = conn.execute(
+        "SELECT COUNT(*) FROM keyword_pairs WHERE dir_id = ? AND source = ?",
+        (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+    ).fetchone()[0]
+    conn.close()
+    assert s.pairs_written == db_pair_count
+
+
+def test_rebuild_docs_added_matches_scan(tmp_path, sidecar_env):
+    """`docs_added` in rebuild must equal per-file scan count, including
+    files that produced no keywords."""
+    scope = tmp_path / "scope"
+    scope.mkdir()
+    # Two files with keywords, one that will produce zero keywords
+    # (only ASCII stopwords) so files_indexed < files_scanned.
+    (scope / "a.md").write_text(
+        "# 面壁计划\n面壁计划 罗辑 面壁计划 罗辑\n" * 5, encoding="utf-8"
+    )
+    (scope / "b.txt").write_text(
+        "罗辑 智子 罗辑 智子\n" * 5, encoding="utf-8"
+    )
+    (scope / "empty.txt").write_text("the and for the\n", encoding="utf-8")
+
+    db = tmp_path / "graph.db"
+    s = build_graph_index(scope, db_path=db, mode="rebuild",
+                          refresh_ngram="append")
+    assert s.docs_added == s.files_scanned
+    # Verify docs table actually got the empty-keyword file too.
+    conn = connect(db)
+    ensure_schema(conn)
+    assert conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0] == 3
+    conn.close()
+
+
 def test_forget_on_missing_scope_is_noop(tmp_path):
     """forget on a scope that was never indexed must not raise."""
     scope = tmp_path / "empty_scope"

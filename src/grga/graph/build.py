@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import os
 import re
 import shutil
 import subprocess
@@ -39,7 +38,6 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
-from itertools import combinations
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -892,6 +890,32 @@ def _delete_doc_index_rows_keep_docs(
     )
 
 
+def _delete_scope_index_rows(conn, scope_dir_id: int) -> None:
+    """Wipe every index-layer row for the given scope.
+
+    Uses subquery-scoped DELETEs so we do not have to shuttle the full
+    doc_id list into Python for large scopes. Keeps the three-table set
+    (``chunks`` / ``keyword_chunks`` / ``heading_docs``) in exactly one
+    place — rebuild and forget --all both go through here so any new
+    ``doc_id``-keyed table gets picked up automatically.
+    """
+    conn.execute(
+        "DELETE FROM keyword_chunks WHERE doc_id IN "
+        "(SELECT id FROM docs WHERE dir_id = ?)",
+        (scope_dir_id,),
+    )
+    conn.execute(
+        "DELETE FROM chunks WHERE doc_id IN "
+        "(SELECT id FROM docs WHERE dir_id = ?)",
+        (scope_dir_id,),
+    )
+    conn.execute(
+        "DELETE FROM heading_docs WHERE doc_id IN "
+        "(SELECT id FROM docs WHERE dir_id = ?)",
+        (scope_dir_id,),
+    )
+
+
 VALID_BUILD_MODES = ("build", "rebuild")
 VALID_REFRESH_NGRAM = ("never", "append", "replace")
 
@@ -1029,23 +1053,9 @@ def build_graph_index(
         if mode == "rebuild":
             # Full clear of index + derived layers for this scope.
             # ``keyword_chunks`` / ``chunks`` / ``heading_docs`` are keyed
-            # by ``doc_id`` which resolves through ``docs.dir_id``; delete
-            # via the docs belonging to this scope.
-            conn.execute(
-                "DELETE FROM keyword_chunks WHERE doc_id IN "
-                "(SELECT id FROM docs WHERE dir_id = ?)",
-                (scope_dir_id,),
-            )
-            conn.execute(
-                "DELETE FROM chunks WHERE doc_id IN "
-                "(SELECT id FROM docs WHERE dir_id = ?)",
-                (scope_dir_id,),
-            )
-            conn.execute(
-                "DELETE FROM heading_docs WHERE doc_id IN "
-                "(SELECT id FROM docs WHERE dir_id = ?)",
-                (scope_dir_id,),
-            )
+            # by ``doc_id`` which resolves through ``docs.dir_id``. The
+            # shared helper keeps the three-table set in one place.
+            _delete_scope_index_rows(conn, scope_dir_id)
             conn.execute(
                 "DELETE FROM keyword_pairs WHERE dir_id = ? AND source = ?",
                 (scope_dir_id, CHUNK_COOCCUR_SOURCE),
@@ -1369,35 +1379,48 @@ def build_graph_index(
         if removed_doc_ids:
             _delete_doc_index_rows(conn, removed_doc_ids)
 
-        # In rebuild mode, ``mode="rebuild"`` cleared everything and
-        # docs_added counts every scanned file. Populate the stats so
-        # the numbers make sense downstream. (For rebuild we do not
-        # know an "unchanged" concept; every file was reprocessed.)
-        if mode == "rebuild":
-            stats.docs_added = stats.files_indexed
-            # ``files_indexed`` excludes ``no_keywords`` docs. That is
-            # already reflected by ``docs.append``s above; keeping the
-            # numbers strictly by-classification.
+        # ``docs_added`` was already incremented per-file in the scan loop
+        # for both modes (in ``rebuild`` mode ``existing_docs`` is empty
+        # so every readable file classifies as ``DOC_ADDED``). No mode
+        # override needed — the per-file counts are the authoritative
+        # accounting and they include ``no_keywords`` files whose docs
+        # rows do exist in the DB. Docstring at line 121 documents this.
 
         # ------------------------------------------------------------------
         # Pass 3: derived layer. Recompute keyword_pairs from the DB
         # (single SQL scan + npmi arithmetic; see design §6). Uniform
         # across both modes so unchanged docs' contributions are always
         # accounted for.
+        #
+        # Skip the recompute entirely on a no-op incremental build (no
+        # added / updated / removed docs): the pair table already matches
+        # the unchanged index layer, so a full clear+rebuild would be
+        # wasted work — a no-op ``build`` should be near-free. Report the
+        # existing pair count so stats stay accurate.
         # ------------------------------------------------------------------
-        candidate_count = int(conn.execute(
-            "SELECT COUNT(DISTINCT kw_id) FROM keyword_chunks kc "
-            "JOIN docs d ON d.id = kc.doc_id WHERE d.dir_id = ?",
-            (scope_dir_id,),
-        ).fetchone()[0])
-        _emit(
-            "pairs_start",
-            candidate_pairs=candidate_count,
-            surviving_pairs=0,
-        )
-        stats.pairs_written = recompute_pairs(
-            conn, scope_dir_id, min_pair_count=min_pair_count, now=now,
-        )
+        index_layer_changed = bool(docs) or bool(removed_doc_ids) or mode == "rebuild"
+        if index_layer_changed:
+            candidate_count = int(conn.execute(
+                "SELECT COUNT(DISTINCT kw_id) FROM keyword_chunks kc "
+                "JOIN docs d ON d.id = kc.doc_id WHERE d.dir_id = ?",
+                (scope_dir_id,),
+            ).fetchone()[0])
+            _emit(
+                "pairs_start",
+                candidate_pairs=candidate_count,
+                surviving_pairs=0,
+            )
+            stats.pairs_written = recompute_pairs(
+                conn, scope_dir_id, min_pair_count=min_pair_count, now=now,
+            )
+        else:
+            # No index-layer change: keep the existing pairs untouched and
+            # report their current count.
+            stats.pairs_written = int(conn.execute(
+                "SELECT COUNT(*) FROM keyword_pairs "
+                "WHERE dir_id = ? AND source = ?",
+                (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+            ).fetchone()[0])
 
         # ------------------------------------------------------------------
         # Toolchain fingerprint: emit a warning if it changed vs. the
@@ -1444,10 +1467,14 @@ def recompute_pairs(
 ) -> int:
     """Rematerialise ``keyword_pairs(chunk_cooccur)`` for one scope from DB.
 
-    Reads ``chunks`` / ``keyword_chunks`` for the scope, computes
-    ``chunk_df`` per keyword, ``n_chunks`` (denominator of segment NPMI),
-    and pair co-occurrence counts, filters by ``min_pair_count``, and
-    writes the rows back with ``INSERT OR REPLACE`` semantics.
+    Uses SQL aggregation end-to-end (design §6): a self-join on
+    ``keyword_chunks`` groups by ``(a.kw_id, b.kw_id)`` with
+    ``a.kw_id < b.kw_id`` to enumerate distinct pairs, sparsifies via
+    ``HAVING COUNT(*) >= min_pair_count``, and a separate scan produces
+    ``chunk_df`` and ``n_chunks``. This keeps the intermediate row set
+    inside SQLite instead of materialising every keyword_chunks row
+    into Python — the old in-Python path was O(rows) memory and had a
+    quadratic per-chunk pair enumeration in pure Python.
 
     Returns the number of pair rows written. Caller owns the transaction.
     """
@@ -1460,58 +1487,61 @@ def recompute_pairs(
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     )
 
-    # 2. Load per-chunk keyword membership. One row per (kw_id, chunk).
-    #    ``keyword_chunks`` PK is (kw_id, doc_id, chunk_id) so it is exactly
-    #    the "which kws live in which chunk" set we need.
-    rows = conn.execute(
-        "SELECT kc.kw_id, kc.doc_id, kc.chunk_id "
-        "FROM keyword_chunks kc "
-        "JOIN docs d ON d.id = kc.doc_id "
-        "WHERE d.dir_id = ?",
-        (scope_dir_id,),
-    ).fetchall()
-
-    # Group by chunk to enumerate pairs. This is the direct equivalent of
-    # the in-memory ``pair_count`` loop that lived inside build_graph_index
-    # Pass 2, but now sourced from DB so it is authoritative regardless
-    # of which docs were touched this build.
-    chunk_kw: Dict[Tuple[int, int], List[int]] = defaultdict(list)
-    chunk_df_counter: Counter = Counter()
-    for row in rows:
-        kw_id = int(row["kw_id"])
-        doc_id = int(row["doc_id"])
-        chunk_id = int(row["chunk_id"])
-        chunk_kw[(doc_id, chunk_id)].append(kw_id)
-        chunk_df_counter[kw_id] += 1
-
-    pair_count: Counter = Counter()
-    for kws in chunk_kw.values():
-        distinct = sorted(set(kws))
-        if len(distinct) < 2:
-            continue
-        for a, b in combinations(distinct, 2):
-            pair_count[(a, b)] += 1
-
-    # 3. n_chunks = distinct chunks that contributed at least one keyword.
-    #    Matches the semantic used by build_graph_index (segment NPMI over
-    #    "chunks with a keyword") — see the pre-refactor code path where
-    #    ``n_chunks_with_keywords`` was the denominator.
-    n_chunks = len(chunk_kw)
-    if n_chunks == 0 or not pair_count:
+    # 2. chunk_df — one row per keyword giving the number of distinct
+    #    chunks that contain it. ``keyword_chunks`` primary key is
+    #    ``(kw_id, doc_id, chunk_id)`` so COUNT(*) grouping by kw_id is
+    #    already the per-kw distinct-chunk count.
+    chunk_df: Dict[int, int] = {
+        int(row[0]): int(row[1])
+        for row in conn.execute(
+            "SELECT kc.kw_id, COUNT(*) FROM keyword_chunks kc "
+            "JOIN docs d ON d.id = kc.doc_id "
+            "WHERE d.dir_id = ? GROUP BY kc.kw_id",
+            (scope_dir_id,),
+        ).fetchall()
+    }
+    if not chunk_df:
         return 0
 
-    surviving = [
-        (a, b, c) for (a, b), c in pair_count.items() if c >= min_pair_count
-    ]
+    # 3. n_chunks — chunks that contain at least one keyword (matches
+    #    the pre-refactor ``n_chunks_with_keywords`` denominator).
+    n_chunks = int(conn.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM keyword_chunks kc "
+        "JOIN docs d ON d.id = kc.doc_id WHERE d.dir_id = ? "
+        "GROUP BY kc.doc_id, kc.chunk_id)",
+        (scope_dir_id,),
+    ).fetchone()[0])
+    if n_chunks == 0:
+        return 0
+
+    # 4. Pair counts — self-join keyword_chunks on same chunk, restrict
+    #    to ``a.kw_id < b.kw_id`` to enumerate each unordered pair
+    #    exactly once, aggregate + sparsify in SQL. This keeps peak
+    #    memory bounded by the surviving pair count, not the raw
+    #    keyword_chunks row count.
+    surviving = conn.execute(
+        "SELECT a.kw_id, b.kw_id, COUNT(*) AS cooccur "
+        "FROM keyword_chunks a "
+        "JOIN keyword_chunks b "
+        "  ON a.doc_id = b.doc_id AND a.chunk_id = b.chunk_id "
+        "  AND a.kw_id < b.kw_id "
+        "JOIN docs d ON d.id = a.doc_id "
+        "WHERE d.dir_id = ? "
+        "GROUP BY a.kw_id, b.kw_id "
+        "HAVING COUNT(*) >= ?",
+        (scope_dir_id, int(min_pair_count)),
+    ).fetchall()
     if not surviving:
         return 0
 
     pair_rows = []
-    for a, b, c in surviving:
-        npmi = _npmi(c, chunk_df_counter[a], chunk_df_counter[b], n_chunks)
-        pair_rows.append(
-            (scope_dir_id, a, b, float(c), npmi, now)
-        )
+    for row in surviving:
+        a = int(row[0])
+        b = int(row[1])
+        c = int(row[2])
+        npmi = _npmi(c, chunk_df.get(a, 0), chunk_df.get(b, 0), n_chunks)
+        pair_rows.append((scope_dir_id, a, b, float(c), npmi, now))
+
     conn.executemany(
         """
         INSERT INTO keyword_pairs
@@ -1655,25 +1685,28 @@ def forget_scope_phrases(
                     stats.elapsed_seconds = time.perf_counter() - started
                     return stats
                 # keywords are stored casefolded; auto_ngram_dict phrases
-                # are stored as-detected (mixed CJK + case). The kw
-                # lookup should follow the ``kw_ids_ro`` (casefold) path
-                # for keyword_chunks / keyword_pairs; ``auto_ngram_dict``
-                # DELETE keys on ``phrase`` verbatim. Both lookups need
-                # to be independent.
+                # are stored as-detected (mixed CJK + case). Look up both
+                # sides case-insensitively so ``forget --phrase pdc主席``
+                # matches a stored ``PDC主席`` — otherwise the cascade
+                # would fire (casefolded kw_id resolves) but the asset
+                # row would silently survive, leaving an orphaned dict
+                # entry that resurfaces on the next build.
                 kw_lookup = interner.kw_ids_ro([p.casefold() for p in phrase_list])
-                # Detect phrases that exist in the dict for this scope.
-                placeholders = ",".join("?" for _ in phrase_list)
-                dict_present = {
-                    str(row[0]) for row in conn.execute(
-                        f"SELECT phrase FROM auto_ngram_dict "
-                        f"WHERE dir_id = ? AND phrase IN ({placeholders})",
-                        [scope_dir_id, *phrase_list],
-                    ).fetchall()
-                }
+                # Detect phrases present in the dict for this scope by
+                # LOWER(phrase) match, then remember the *actual stored
+                # casings* so the DELETE targets exactly those rows.
+                lowered_inputs = [p.casefold() for p in phrase_list]
+                placeholders = ",".join("?" for _ in lowered_inputs)
+                dict_present_pairs = conn.execute(
+                    f"SELECT phrase FROM auto_ngram_dict "
+                    f"WHERE dir_id = ? AND LOWER(phrase) IN ({placeholders})",
+                    [scope_dir_id, *lowered_inputs],
+                ).fetchall()
+                dict_present = {str(row[0]) for row in dict_present_pairs}
+                dict_present_lowered = {p.casefold() for p in dict_present}
                 for phrase in phrase_list:
-                    if phrase not in dict_present and (
-                        phrase.casefold() not in kw_lookup
-                    ):
+                    cf = phrase.casefold()
+                    if cf not in dict_present_lowered and cf not in kw_lookup:
                         stats.phrases_missing.append(phrase)
                 # Cascade delete keyword_chunks rows for the matching kw
                 # ids in this scope.

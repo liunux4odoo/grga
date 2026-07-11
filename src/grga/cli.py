@@ -1002,15 +1002,17 @@ def index_build_command(
     ``keyword_chunks`` (cheap: single SQL scan + npmi arithmetic).
     """
     from grga.graph.build import (
-        VALID_CHUNK_MODES, VALID_REFRESH_NGRAM, build_graph_index,
+        VALID_CHUNK_MODES, VALID_REFRESH_NGRAM,
     )
 
     if chunk_mode not in VALID_CHUNK_MODES:
         typer.echo(f"--chunk-mode must be one of: {', '.join(VALID_CHUNK_MODES)}", err=True)
         raise typer.Exit(2)
-    if refresh_ngram not in ("append", "never"):
+    build_refresh_choices = tuple(v for v in VALID_REFRESH_NGRAM if v != "replace")
+    if refresh_ngram not in build_refresh_choices:
         typer.echo(
-            f"--refresh-ngram for `build` must be one of: append, never "
+            f"--refresh-ngram for `build` must be one of: "
+            f"{', '.join(build_refresh_choices)} "
             f"(got {refresh_ngram!r}); use `grga index rebuild --refresh-ngram=replace` "
             "to clear the vocabulary.",
             err=True,
@@ -1047,20 +1049,20 @@ def index_build_command(
             text_progress = lambda message: typer.echo(message, err=True)
 
     try:
-        stats = build_graph_index(
-            scope,
-            db_path=str(db_path) if db_path else None,
+        stats = _run_index_build(
+            scope=scope,
+            mode=mode,
+            refresh_ngram=refresh_ngram,
+            db_path=db_path,
             chunk_mode=chunk_mode,
             chunk_max_chars=chunk_max_chars,
             chunk_min_chars=chunk_min_chars,
             min_pair_count=min_pair_count,
-            max_file_bytes=max_file_kb * 1024,
+            max_file_kb=max_file_kb,
             ngram_iters=ngram_iters,
             max_ngram_n=max_ngram_n,
-            mode=mode,
-            refresh_ngram=refresh_ngram,
-            progress=text_progress,
-            on_event=rich_on_event,
+            text_progress=text_progress,
+            rich_on_event=rich_on_event,
         )
     finally:
         if rich_close is not None:
@@ -1092,7 +1094,7 @@ def index_rebuild_command(
     to also clear the vocabulary. See design doc §3.2.
     """
     from grga.graph.build import (
-        VALID_CHUNK_MODES, VALID_REFRESH_NGRAM, build_graph_index,
+        VALID_CHUNK_MODES, VALID_REFRESH_NGRAM,
     )
 
     if chunk_mode not in VALID_CHUNK_MODES:
@@ -1117,20 +1119,20 @@ def index_rebuild_command(
             text_progress = lambda message: typer.echo(message, err=True)
 
     try:
-        stats = build_graph_index(
-            scope,
-            db_path=str(db_path) if db_path else None,
+        stats = _run_index_build(
+            scope=scope,
+            mode="rebuild",
+            refresh_ngram=refresh_ngram,
+            db_path=db_path,
             chunk_mode=chunk_mode,
             chunk_max_chars=chunk_max_chars,
             chunk_min_chars=chunk_min_chars,
             min_pair_count=min_pair_count,
-            max_file_bytes=max_file_kb * 1024,
+            max_file_kb=max_file_kb,
             ngram_iters=ngram_iters,
             max_ngram_n=max_ngram_n,
-            mode="rebuild",
-            refresh_ngram=refresh_ngram,
-            progress=text_progress,
-            on_event=rich_on_event,
+            text_progress=text_progress,
+            rich_on_event=rich_on_event,
         )
     finally:
         if rich_close is not None:
@@ -1139,6 +1141,46 @@ def index_rebuild_command(
         typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
         return
     _echo_build_summary(stats, max_file_kb=max_file_kb)
+
+
+def _run_index_build(
+    *,
+    scope: Path,
+    mode: str,
+    refresh_ngram: str,
+    db_path: Optional[Path],
+    chunk_mode: str,
+    chunk_max_chars: int,
+    chunk_min_chars: int,
+    min_pair_count: int,
+    max_file_kb: int,
+    ngram_iters: int,
+    max_ngram_n: int,
+    text_progress,
+    rich_on_event,
+):
+    """Shared runner for `index build` and `index rebuild`.
+
+    Owns the single call site into ``build_graph_index`` so both CLI
+    commands stay in sync when its argument surface evolves.
+    """
+    from grga.graph.build import build_graph_index
+
+    return build_graph_index(
+        scope,
+        db_path=str(db_path) if db_path else None,
+        chunk_mode=chunk_mode,
+        chunk_max_chars=chunk_max_chars,
+        chunk_min_chars=chunk_min_chars,
+        min_pair_count=min_pair_count,
+        max_file_bytes=max_file_kb * 1024,
+        ngram_iters=ngram_iters,
+        max_ngram_n=max_ngram_n,
+        mode=mode,
+        refresh_ngram=refresh_ngram,
+        progress=text_progress,
+        on_event=rich_on_event,
+    )
 
 
 @index_app.command("forget")
