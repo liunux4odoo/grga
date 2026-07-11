@@ -140,8 +140,12 @@ def test_build_populates_chunk_tables(sidecar_env, tmp_path):
     conn = connect(db)
     try:
         kw_rows = conn.execute(
-            "SELECT keyword, doc_path, occurrence_count FROM keyword_chunks "
-            "ORDER BY doc_path, keyword"
+            "SELECT k.kw AS keyword, d.doc_path AS doc_path, "
+            "       kc.occurrence_count AS occurrence_count "
+            "FROM keyword_chunks kc "
+            "JOIN keywords k ON k.id = kc.kw_id "
+            "JOIN docs d ON d.id = kc.doc_id "
+            "ORDER BY d.doc_path, k.kw"
         ).fetchall()
         assert kw_rows
         docs = {row["doc_path"] for row in kw_rows}
@@ -156,7 +160,8 @@ def test_build_populates_chunk_tables(sidecar_env, tmp_path):
         assert pair_rows > 0
 
         head_rows = conn.execute(
-            "SELECT heading_path, doc_path FROM heading_docs"
+            "SELECT hd.heading_path AS heading_path, d.doc_path AS doc_path "
+            "FROM heading_docs hd JOIN docs d ON d.id = hd.doc_id"
         ).fetchall()
         paths = {row["heading_path"] for row in head_rows}
         assert any("Install" in p for p in paths)
@@ -185,13 +190,19 @@ def test_replace_flag_clears_previous_chunk_rows(sidecar_env, tmp_path):
     try:
         remaining = [
             row["doc_path"]
-            for row in conn.execute("SELECT DISTINCT doc_path FROM chunks").fetchall()
+            for row in conn.execute(
+                "SELECT DISTINCT d.doc_path AS doc_path "
+                "FROM chunks c JOIN docs d ON d.id = c.doc_id"
+            ).fetchall()
         ]
         assert "install.md" not in remaining
         # chunk_cooccur pairs for the removed doc's exclusive keywords cleared.
         kw_remaining = [
             row["doc_path"]
-            for row in conn.execute("SELECT DISTINCT doc_path FROM keyword_chunks").fetchall()
+            for row in conn.execute(
+                "SELECT DISTINCT d.doc_path AS doc_path "
+                "FROM keyword_chunks kc JOIN docs d ON d.id = kc.doc_id"
+            ).fetchall()
         ]
         assert "install.md" not in kw_remaining
     finally:
@@ -204,6 +215,7 @@ def test_build_preserves_llm_promoted_pairs(sidecar_env, tmp_path):
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
+    from grga.graph.ids import IdInterner
     from grga.graph.schema import LLM_PROMOTED_SOURCE, ensure_schema
 
     build_graph_index(scope, db_path=db, min_pair_count=1)
@@ -212,11 +224,15 @@ def test_build_preserves_llm_promoted_pairs(sidecar_env, tmp_path):
     conn = connect(db)
     try:
         ensure_schema(conn)
+        interner = IdInterner(conn)
+        dir_id = interner.dir_id(str(scope.resolve()))
+        kw_a = interner.kw_id("llmx")
+        kw_b = interner.kw_id("llmy")
         conn.execute(
-            "INSERT INTO keyword_pairs (scope, directory, keyword_a, keyword_b, "
+            "INSERT INTO keyword_pairs (dir_id, kw_a_id, kw_b_id, "
             "source, cooccur_count, npmi, updated_at) "
-            "VALUES ('', ?, 'llmx', 'llmy', ?, 5, NULL, '2026-01-01')",
-            (str(scope.resolve()), LLM_PROMOTED_SOURCE),
+            "VALUES (?, ?, ?, ?, 5, NULL, '2026-01-01')",
+            (dir_id, kw_a, kw_b, LLM_PROMOTED_SOURCE),
         )
         conn.commit()
     finally:
@@ -228,8 +244,10 @@ def test_build_preserves_llm_promoted_pairs(sidecar_env, tmp_path):
     conn = connect(db)
     try:
         survived = conn.execute(
-            "SELECT COUNT(*) FROM keyword_pairs WHERE source=? "
-            "AND keyword_a='llmx' AND keyword_b='llmy'",
+            "SELECT COUNT(*) FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id "
+            "WHERE p.source = ? AND ka.kw = 'llmx' AND kb.kw = 'llmy'",
             (LLM_PROMOTED_SOURCE,),
         ).fetchone()[0]
         assert survived == 1
@@ -254,7 +272,9 @@ def test_v1_counts_not_touched_by_build(sidecar_env, tmp_path):
     conn = connect(db)
     try:
         counts = conn.execute(
-            "SELECT COUNT(*) FROM keyword_counts WHERE term IN ('alpha', 'beta')"
+            "SELECT COUNT(*) FROM keyword_counts c "
+            "JOIN keywords k ON k.id = c.kw_id "
+            "WHERE k.kw IN ('alpha', 'beta')"
         ).fetchone()[0]
         assert counts == 2
     finally:

@@ -179,39 +179,47 @@ class KeywordLibrary:
         self._init_schema()
 
     def _init_schema(self):
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS keyword_counts (
-                scope TEXT NOT NULL,
-                directory TEXT NOT NULL,
-                term TEXT NOT NULL,
-                count REAL NOT NULL DEFAULT 0,
-                updated_at TEXT,
-                PRIMARY KEY (scope, directory, term)
-            );
-            CREATE TABLE IF NOT EXISTS keyword_sources (
-                directory TEXT NOT NULL,
-                keyword TEXT NOT NULL,
-                path TEXT NOT NULL,
-                line_number INTEGER NOT NULL DEFAULT 0,
-                count REAL NOT NULL DEFAULT 0,
-                updated_at TEXT,
-                PRIMARY KEY (directory, keyword, path, line_number)
-            );
-            CREATE INDEX IF NOT EXISTS idx_counts_dir ON keyword_counts (directory, count);
-            CREATE INDEX IF NOT EXISTS idx_sources_kw ON keyword_sources (directory, keyword);
-            """
-        )
+        # v5 tables (normalized) are created by graph.schema.ensure_schema.
+        # KeywordLibrary shares the same DB artefact, so we route schema
+        # setup through the single source of truth rather than issuing our
+        # own CREATE TABLE (which would drift from the intern-based layout).
+        from grga.graph.schema import ensure_schema
+
+        ensure_schema(self.conn)
         self.conn.commit()
+
+    def _dir_id(self, directory):
+        from grga.graph.ids import IdInterner
+
+        if getattr(self, "_interner", None) is None:
+            self._interner = IdInterner(self.conn)
+        return self._interner.dir_id(directory)
+
+    def _kw_id(self, kw):
+        from grga.graph.ids import IdInterner
+
+        if getattr(self, "_interner", None) is None:
+            self._interner = IdInterner(self.conn)
+        return self._interner.kw_id(kw)
+
+    def _dir_id_ro(self, directory):
+        from grga.graph.ids import IdInterner
+
+        if getattr(self, "_interner", None) is None:
+            self._interner = IdInterner(self.conn)
+        return self._interner.dir_id_ro(directory)
 
     def decay(self, directory):
         if not (0 < self.decay_factor < 1):
             return
-        params = (self.decay_factor, directory)
-        self.conn.execute("UPDATE keyword_counts SET count = count * ? WHERE directory = ?", params)
-        self.conn.execute("UPDATE keyword_sources SET count = count * ? WHERE directory = ?", params)
-        self.conn.execute("DELETE FROM keyword_counts WHERE directory = ? AND count < ?", (directory, self.min_count))
-        self.conn.execute("DELETE FROM keyword_sources WHERE directory = ? AND count < ?", (directory, self.min_count))
+        dir_id = self._dir_id_ro(directory)
+        if dir_id is None:
+            return
+        params = (self.decay_factor, dir_id)
+        self.conn.execute("UPDATE keyword_counts SET count = count * ? WHERE dir_id = ?", params)
+        self.conn.execute("UPDATE keyword_sources SET count = count * ? WHERE dir_id = ?", params)
+        self.conn.execute("DELETE FROM keyword_counts WHERE dir_id = ? AND count < ?", (dir_id, self.min_count))
+        self.conn.execute("DELETE FROM keyword_sources WHERE dir_id = ? AND count < ?", (dir_id, self.min_count))
         self.conn.commit()
 
     def add_keywords(self, scope, directory, keywords):
@@ -219,15 +227,17 @@ class KeywordLibrary:
         if not terms:
             return
         now = _now()
+        dir_id = self._dir_id(directory)
         for term in terms:
+            kw_id = self._kw_id(term)
             self.conn.execute(
                 """
-                INSERT INTO keyword_counts (scope, directory, term, count, updated_at)
+                INSERT INTO keyword_counts (scope, dir_id, kw_id, count, updated_at)
                 VALUES (?, ?, ?, 1, ?)
-                ON CONFLICT(scope, directory, term)
+                ON CONFLICT(scope, dir_id, kw_id)
                 DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
                 """,
-                (scope, directory, term, now),
+                (scope, dir_id, kw_id, now),
             )
         # Since the chunk-level migration (schema v4) keyword_pairs is a
         # multi-source table gated by anti-pollution (only ``chunk_cooccur``
@@ -256,14 +266,15 @@ class KeywordLibrary:
             return
         line = int(line_number) if isinstance(line_number, int) else 0
         now = _now()
+        dir_id = self._dir_id(directory)
         self.conn.executemany(
             """
-            INSERT INTO keyword_sources (directory, keyword, path, line_number, count, updated_at)
+            INSERT INTO keyword_sources (dir_id, kw_id, path, line_number, count, updated_at)
             VALUES (?, ?, ?, ?, 1, ?)
-            ON CONFLICT(directory, keyword, path, line_number)
+            ON CONFLICT(dir_id, kw_id, path, line_number)
             DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
             """,
-            [(directory, term, path, line, now) for term in terms],
+            [(dir_id, self._kw_id(term), path, line, now) for term in terms],
         )
 
     def commit(self):
@@ -272,26 +283,41 @@ class KeywordLibrary:
     def history(self, directory, seed_keywords, limit=30, global_library=False):
         # Pair history now reads from ``llm_extension_votes`` (the pre-promote
         # buffer that deep-search co-mentions feed into). ``keyword_pairs``
-        # in schema v4 is a graph-facing table with a different PK; the
+        # in schema v5 is a graph-facing table with a different PK; the
         # ``history`` caller (deep-search's query-plan seed) needs the raw
         # LLM-driven co-occurrence buffer, not the promoted / chunk edges.
         seeds = [item for item in _normalize_keywords(seed_keywords)]
         params = []
         where = []
         if not global_library:
-            where.append("directory = ?")
-            params.append(directory)
+            dir_id = self._dir_id_ro(directory)
+            if dir_id is None:
+                # Unknown scope in the intern table => no votes / counts to
+                # report. Match the previous "return []"-on-miss semantics.
+                return []
+            where.append("v.dir_id = ?")
+            params.append(dir_id)
         if seeds:
             placeholders = ",".join("?" for _ in seeds)
             lowered = [item.casefold() for item in seeds]
-            where.append(f"(keyword_a IN ({placeholders}) OR keyword_b IN ({placeholders}))")
+            where.append(
+                f"(ka.kw IN ({placeholders}) OR kb.kw IN ({placeholders}))"
+            )
             params.extend(lowered)
             params.extend(lowered)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         try:
             rows = self.conn.execute(
-                f"SELECT keyword_a, keyword_b, vote_count FROM llm_extension_votes"
-                f"{clause} ORDER BY vote_count DESC LIMIT ?",
+                f"""
+                SELECT ka.kw AS keyword_a,
+                       kb.kw AS keyword_b,
+                       v.vote_count AS vote_count
+                FROM llm_extension_votes v
+                JOIN keywords ka ON ka.id = v.kw_a_id
+                JOIN keywords kb ON kb.id = v.kw_b_id
+                {clause}
+                ORDER BY v.vote_count DESC LIMIT ?
+                """,
                 (*params, limit),
             ).fetchall()
         except sqlite3.OperationalError:
@@ -306,10 +332,23 @@ class KeywordLibrary:
         ]
         if pairs or seeds:
             return pairs
-        count_params = [] if global_library else [directory]
-        count_clause = "" if global_library else " WHERE directory = ?"
+        count_params = []
+        count_where = []
+        if not global_library:
+            dir_id = self._dir_id_ro(directory)
+            if dir_id is None:
+                return []
+            count_where.append("c.dir_id = ?")
+            count_params.append(dir_id)
+        count_clause = (" WHERE " + " AND ".join(count_where)) if count_where else ""
         rows = self.conn.execute(
-            f"SELECT scope, term, count FROM keyword_counts{count_clause} ORDER BY count DESC LIMIT ?",
+            f"""
+            SELECT c.scope AS scope, k.kw AS term, c.count AS count
+            FROM keyword_counts c
+            JOIN keywords k ON k.id = c.kw_id
+            {count_clause}
+            ORDER BY c.count DESC LIMIT ?
+            """,
             (*count_params, limit),
         ).fetchall()
         return [{"source": row["scope"], "keywords": [row["term"]], "count": round(row["count"], 3)} for row in rows]

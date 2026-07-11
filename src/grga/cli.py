@@ -932,6 +932,37 @@ def index_build_command(
             )
 
 
+@index_app.command("vacuum")
+def index_vacuum_command(
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    json_output: bool = typer.Option(False, "--json", help="Print size delta as JSON."),
+):
+    """Reclaim disk space in the graph DB by running ``VACUUM``.
+
+    The schema v5 migration leaves a large freelist (tables were renamed +
+    rewritten in-place); ``VACUUM`` compacts the file back to its packed
+    size. Safe to run at any time and generally a no-op on a fresh DB.
+    """
+    from grga.graph.schema import vacuum_db
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    if not target.exists():
+        typer.echo(f"no DB at {target}", err=True)
+        raise typer.Exit(2)
+    result = vacuum_db(target)
+    if json_output:
+        typer.echo(json.dumps({"db_path": str(target), **result}, ensure_ascii=False))
+        return
+    mb = 1024 * 1024
+    typer.echo(
+        f"vacuum {target}: "
+        f"{result['before_bytes'] // mb} MB → "
+        f"{result['after_bytes'] // mb} MB "
+        f"(freed {result['freed_bytes'] // mb} MB)"
+    )
+
+
 @index_app.command("promote")
 def index_promote_command(
     threshold: float = typer.Option(3, "--threshold", "-t", help="Minimum vote_count for a pair to be promoted."),

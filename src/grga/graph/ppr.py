@@ -81,10 +81,13 @@ def load_edges(
     include_pairs: bool = True,
     min_weight: float = 0.0,
 ) -> List[Edge]:
-    """Load undirected edges from ``keyword_pairs`` (schema v4).
+    """Load undirected edges from ``keyword_pairs`` (schema v5).
 
     All sources contribute; :func:`edge_weight` maps each row to a
-    non-negative PPR weight.
+    non-negative PPR weight. Rows are joined back to keyword text at
+    load-time — the PPR graph's node type is a keyword string
+    (:class:`IndexedGraph` uses the strings as node ids) so the callers'
+    seed / result vocabulary stays contract-compatible.
     """
     ensure_schema(conn)
     edges: Dict[Tuple[str, str], float] = {}
@@ -93,11 +96,23 @@ def load_edges(
         where = ""
         params: List = []
         if directory is not None:
-            where = " WHERE directory = ?"
-            params.append(directory)
+            # Resolve the scope path to a dir_id up front. An unknown
+            # directory means no edges in this scope.
+            row = conn.execute(
+                "SELECT id FROM directories WHERE path = ?", (directory,)
+            ).fetchone()
+            if row is None:
+                return []
+            where = " WHERE p.dir_id = ?"
+            params.append(int(row[0]))
         rows = conn.execute(
-            f"SELECT keyword_a, keyword_b, source, cooccur_count, npmi "
-            f"FROM keyword_pairs{where}",
+            "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, "
+            "       p.source AS source, p.cooccur_count AS cooccur_count, "
+            "       p.npmi AS npmi "
+            "FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id"
+            f"{where}",
             params,
         ).fetchall()
         for row in rows:

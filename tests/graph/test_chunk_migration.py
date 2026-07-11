@@ -277,7 +277,8 @@ def test_rare_seed_no_warning_field(tmp_path):
 
 def test_v3_migration_atomic_transaction(tmp_path):
     """A v3 database migrates in one shot: single ensure_schema call brings
-    it to v4 with keyword_docs dropped and llm_promoted rows salvaged."""
+    it to the current schema with keyword_docs dropped and llm_promoted rows
+    salvaged (v3 → v4 → v5 chain, one atomic transaction)."""
     db = tmp_path / "legacy.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(
@@ -316,7 +317,10 @@ def test_v3_migration_atomic_transaction(tmp_path):
         ).fetchone()[0] == 0
         # LLM-promoted rows salvaged
         rows = c.execute(
-            "SELECT keyword_a, keyword_b, source FROM keyword_pairs"
+            "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, p.source AS source "
+            "FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id"
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["source"] == LLM_PROMOTED_SOURCE
@@ -324,7 +328,7 @@ def test_v3_migration_atomic_transaction(tmp_path):
         c.close()
 
 
-def test_v4_migration_idempotent(tmp_path):
+def test_current_schema_migration_idempotent(tmp_path):
     db = tmp_path / "graph.db"
     c = connect(db)
     try:
@@ -351,7 +355,10 @@ def test_llm_promote_flow_marks_source_correctly(tmp_path):
     c = connect(db)
     try:
         row = c.execute(
-            "SELECT source FROM keyword_pairs WHERE keyword_a='alpha' AND keyword_b='beta'"
+            "SELECT p.source AS source FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id "
+            "WHERE ka.kw = 'alpha' AND kb.kw = 'beta'"
         ).fetchone()
         assert row is not None
         assert row["source"] == LLM_PROMOTED_SOURCE

@@ -71,7 +71,7 @@
       "step": 3,
       "family": "sqlite3-detour",
       "kind": "antipattern",
-      "cmd": "SELECT directory FROM keyword_chunks",
+      "cmd": "SELECT dir.path FROM keyword_chunks kc JOIN docs d ON d.id=kc.doc_id JOIN directories dir ON dir.id=d.dir_id",
       "signal": "empty",
       "decision": "❌ 直查图内容",
       "insight": "schema 是内部实现会漂；应走 graph inspect 公开接口"

@@ -1,51 +1,64 @@
-"""Graph schema management (chunk-level migration, schema v4).
+"""Graph schema management (normalized migration, schema v5).
 
 ``ensure_schema(conn)`` creates the current graph tables and, when it finds
-an older database, performs a **one-shot** migration to the chunk-level
-co-occurrence model (``docs/design/plan-2026-07-11-chunk-migration.md``).
+an older database, performs a **one-shot** migration. Two historical
+migration hops are chained so any pre-v5 database converges on v5 in a
+single atomic transaction:
 
-Current (v4) graph tables owned by this module:
+* v1/v2/v3 → v4: the chunk-level co-occurrence model
+  (``docs/design/plan-2026-07-11-chunk-migration.md``).
+* v4 → v5: **normalization** — the repeated ``directory`` / ``keyword`` /
+  ``doc_path`` TEXT columns are interned into three lookup tables and the
+  business tables reference them by integer id
+  (``docs/design/plan-2026-07-11-schema-v5-normalization.md``). This is a
+  ~73% size reduction on large corpora (327 MB → ~87 MB measured).
+
+Current (v5) tables owned by this module:
+
+Intern tables:
+
+* ``directories``  — ``id`` → resolved scope path (``''`` = unscoped).
+* ``keywords``     — ``id`` → casefolded keyword.
+* ``docs``         — ``id`` → ``(dir_id, doc_path)``.
+
+Business tables (all referencing the intern tables by id):
 
 * ``chunks``          — chunk metadata (line ranges, char counts) per doc.
 * ``keyword_chunks``  — keyword → chunk inverted index (segment df原料).
 * ``keyword_pairs``   — multi-source pair table: ``source='chunk_cooccur'``
   rows carry segment-level ``cooccur_count`` + ``npmi``;
   ``source='llm_promoted'`` rows come from ``grga index promote``.
-* ``heading_docs``    — Markdown chapter structure (unchanged).
-* ``llm_extension_votes`` — LLM pair vote buffer (unchanged).
+* ``heading_docs``    — Markdown chapter structure.
+* ``llm_extension_votes`` — LLM pair vote buffer.
+* ``keyword_counts`` / ``keyword_sources`` — v1 deep-search heat/source
+  tables (also normalized to ``dir_id`` / ``kw_id`` in v5).
 
-The v1 counters ``keyword_counts`` / ``keyword_sources`` are preserved and
-never touched by this module.
-
-Migration (v3 → v4), one atomic transaction:
-
-* ``keyword_docs`` is **dropped** (doc-level graph proven structurally
-  insufficient; see the plan §10).
-* ``keyword_pairs`` is rebuilt with a ``source`` column in its primary key.
-  Legacy rows written by the old promotion path (old ``scope='llm_promoted'``)
-  are salvaged as ``source='llm_promoted'``; every other legacy row (v1
-  deep-search / doc-level derived) is dropped — segment build recomputes it.
-* ``chunks`` / ``keyword_chunks`` are created.
-
-The migration is idempotent: an already-v4 database is a no-op fast path.
+The migration is idempotent: an already-v5 database is a no-op fast path.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
+import sys
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Source markers for ``keyword_pairs`` rows. These are the *only* two
 # allowed values (plan HC4 / §3.3).
 CHUNK_COOCCUR_SOURCE = "chunk_cooccur"
 LLM_PROMOTED_SOURCE = "llm_promoted"
 
-# Preserved v1 counter tables. Never dropped, altered, or renamed.
+# v1 deep-search counter tables. Normalized in v5 but conceptually still the
+# "v1" heat / source pair. Kept as a named group for tests / introspection.
 V1_TABLES = ("keyword_counts", "keyword_sources")
 
-# Graph tables owned by this module (post-migration shape).
+# Intern (lookup) tables introduced in v5.
+INTERN_TABLES = ("directories", "keywords", "docs")
+
+# Graph business tables owned by this module (post-migration shape).
 GRAPH_TABLES = ("chunks", "keyword_chunks", "keyword_pairs", "heading_docs",
                 "llm_extension_votes")
 
@@ -94,7 +107,13 @@ def connect(path: Union[str, Path]) -> sqlite3.Connection:
     """
     resolved = Path(path).expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(resolved))
+    # The v4→v5 migration holds a write lock (``BEGIN IMMEDIATE``) for the
+    # duration of the one-shot rewrite (~10s on a large corpus). Python's
+    # default 5s busy timeout would make a *concurrent* grga invocation fail
+    # with ``database is locked`` before the migrator finishes. A 60s timeout
+    # lets the loser wait out the migration and then take the idempotent
+    # fast-path instead of crashing.
+    conn = sqlite3.connect(str(resolved), timeout=60.0)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -119,76 +138,106 @@ def _table_columns(conn: sqlite3.Connection, name: str) -> set:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({name})")}
 
 
+_CREATE_INTERN_TABLES = """
+CREATE TABLE IF NOT EXISTS directories (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS keywords (
+    id INTEGER PRIMARY KEY,
+    kw TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS docs (
+    id INTEGER PRIMARY KEY,
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    doc_path TEXT NOT NULL,
+    UNIQUE(dir_id, doc_path)
+);
+"""
+
 _CREATE_KEYWORD_PAIRS = """
 CREATE TABLE IF NOT EXISTS keyword_pairs (
-    scope TEXT NOT NULL DEFAULT '',
-    directory TEXT NOT NULL,
-    keyword_a TEXT NOT NULL,
-    keyword_b TEXT NOT NULL,
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    kw_a_id INTEGER NOT NULL REFERENCES keywords(id),
+    kw_b_id INTEGER NOT NULL REFERENCES keywords(id),
     source TEXT NOT NULL,
     cooccur_count REAL NOT NULL DEFAULT 0,
     npmi REAL,
     updated_at TEXT,
-    PRIMARY KEY (directory, keyword_a, keyword_b, source)
-);
+    PRIMARY KEY (dir_id, kw_a_id, kw_b_id, source)
+) WITHOUT ROWID;
 """
 
 _CREATE_GRAPH_TABLES = """
 CREATE TABLE IF NOT EXISTS chunks (
-    scope TEXT NOT NULL DEFAULT '',
-    directory TEXT NOT NULL,
-    doc_path TEXT NOT NULL,
+    doc_id INTEGER NOT NULL REFERENCES docs(id),
     chunk_id INTEGER NOT NULL,
     start_line INTEGER NOT NULL,
     end_line INTEGER NOT NULL,
     char_count INTEGER NOT NULL,
-    PRIMARY KEY (directory, doc_path, chunk_id)
-);
+    PRIMARY KEY (doc_id, chunk_id)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS keyword_chunks (
-    directory TEXT NOT NULL,
-    keyword TEXT NOT NULL,
-    doc_path TEXT NOT NULL,
+    kw_id INTEGER NOT NULL REFERENCES keywords(id),
+    doc_id INTEGER NOT NULL REFERENCES docs(id),
     chunk_id INTEGER NOT NULL,
     occurrence_count INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (directory, keyword, doc_path, chunk_id)
-);
+    PRIMARY KEY (kw_id, doc_id, chunk_id)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS heading_docs (
-    directory TEXT NOT NULL,
+    doc_id INTEGER NOT NULL REFERENCES docs(id),
     heading_path TEXT NOT NULL,
-    doc_path TEXT NOT NULL,
     chapter_id TEXT NOT NULL DEFAULT '',
     start_line INTEGER NOT NULL DEFAULT 0,
     end_line INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT,
-    PRIMARY KEY (directory, heading_path, doc_path, chapter_id)
+    PRIMARY KEY (doc_id, heading_path, chapter_id)
 );
 CREATE TABLE IF NOT EXISTS llm_extension_votes (
-    directory TEXT NOT NULL,
-    keyword_a TEXT NOT NULL,
-    keyword_b TEXT NOT NULL,
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    kw_a_id INTEGER NOT NULL REFERENCES keywords(id),
+    kw_b_id INTEGER NOT NULL REFERENCES keywords(id),
     vote_count REAL NOT NULL DEFAULT 0,
     last_voted TEXT,
-    PRIMARY KEY (directory, keyword_a, keyword_b)
+    promoted_at TEXT,
+    PRIMARY KEY (dir_id, kw_a_id, kw_b_id)
+);
+CREATE TABLE IF NOT EXISTS keyword_counts (
+    scope TEXT NOT NULL DEFAULT '',
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    kw_id INTEGER NOT NULL REFERENCES keywords(id),
+    count REAL NOT NULL DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (scope, dir_id, kw_id)
+);
+CREATE TABLE IF NOT EXISTS keyword_sources (
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    kw_id INTEGER NOT NULL REFERENCES keywords(id),
+    path TEXT NOT NULL,
+    line_number INTEGER NOT NULL DEFAULT 0,
+    count REAL NOT NULL DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (dir_id, kw_id, path, line_number)
 );
 """
 
 _CREATE_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_keyword_chunks_kw
-    ON keyword_chunks (directory, keyword);
+CREATE INDEX IF NOT EXISTS idx_docs_dir
+    ON docs (dir_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_chunks_doc
-    ON keyword_chunks (directory, doc_path, chunk_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_doc
-    ON chunks (directory, doc_path);
+    ON keyword_chunks (doc_id, chunk_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_pairs_a
-    ON keyword_pairs (directory, keyword_a);
+    ON keyword_pairs (dir_id, kw_a_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_pairs_b
-    ON keyword_pairs (directory, keyword_b);
+    ON keyword_pairs (dir_id, kw_b_id);
 CREATE INDEX IF NOT EXISTS idx_heading_docs_head
-    ON heading_docs (directory, heading_path);
-CREATE INDEX IF NOT EXISTS idx_heading_docs_doc
-    ON heading_docs (directory, doc_path);
+    ON heading_docs (heading_path);
+CREATE INDEX IF NOT EXISTS idx_keyword_counts_count
+    ON keyword_counts (dir_id, count DESC);
+CREATE INDEX IF NOT EXISTS idx_keyword_sources_kw
+    ON keyword_sources (dir_id, kw_id);
 CREATE INDEX IF NOT EXISTS idx_votes_dir
-    ON llm_extension_votes (directory, vote_count DESC);
+    ON llm_extension_votes (dir_id, vote_count DESC);
 """
 
 
@@ -215,32 +264,91 @@ def _create_current_tables(conn: sqlite3.Connection) -> None:
     preserved (:func:`sqlite3.Connection.executescript` would COMMIT).
     """
     for stmt in _split_sql(
-        _CREATE_KEYWORD_PAIRS + _CREATE_GRAPH_TABLES + _CREATE_INDEXES
+        _CREATE_INTERN_TABLES
+        + _CREATE_KEYWORD_PAIRS
+        + _CREATE_GRAPH_TABLES
+        + _CREATE_INDEXES
     ):
         conn.execute(stmt)
 
 
+def _migration_announce(db_path: Optional[str], stage: str) -> None:
+    """Emit a one-line stderr notice around the migration.
+
+    Silent when ``GRGA_QUIET_MIGRATION=1`` (for test noise reduction) or when
+    ``sys.stderr`` is unavailable. This is UX plumbing — never let a failure
+    here derail the migration itself.
+    """
+    if os.environ.get("GRGA_QUIET_MIGRATION"):
+        return
+    try:
+        loc = f" at {db_path}" if db_path else ""
+        print(f"[grga] {stage}{loc}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _check_disk_space(conn: sqlite3.Connection) -> None:
+    """Raise a clear message if the migration is likely to run out of space.
+
+    The v4 → v5 migration briefly doubles the on-disk size (source shape +
+    intermediate ``v4__*`` tables + rollback journal). We require ~2× the
+    current DB size in free space; if less, abort *before* touching the DB
+    so the user sees an actionable message instead of a random ``disk is
+    full`` deep in a copy loop.
+    """
+    # Resolve the DB path from the connection. sqlite3 exposes it via
+    # ``PRAGMA database_list`` (file for the main DB, "" for :memory:).
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None:
+        return
+    db_file = row[2] if len(row) >= 3 else ""
+    if not db_file:
+        return  # in-memory or file-less DB — no disk check meaningful
+    try:
+        db_size = os.path.getsize(db_file)
+    except OSError:
+        return
+    try:
+        stat = shutil.disk_usage(os.path.dirname(db_file) or ".")
+    except OSError:
+        return
+    required = db_size * 2
+    if stat.free < required:
+        mb = 1024 * 1024
+        raise RuntimeError(
+            "grga schema v5 migration needs about "
+            f"{required // mb} MB free space (current DB is "
+            f"{db_size // mb} MB), but only {stat.free // mb} MB is "
+            f"available on the volume holding {db_file}. Free up space "
+            "and retry, or run `grga index vacuum` first to shrink the "
+            "existing DB."
+        )
+
+
 def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Idempotently bring ``conn`` to the current chunk-level schema (v4).
+    """Idempotently bring ``conn`` to the current normalized schema (v5).
 
     Safe to call on:
 
     * a brand-new empty database (creates every current table);
-    * a v1-only database (``keyword_counts`` etc. preserved, graph tables
-      added, legacy ``keyword_pairs`` restructured);
+    * a v1-only database (v1 counters normalized in place, v3 legacy pair
+      table dropped, chunk-level tables added — all in one hop);
     * a v2/v3 database (``keyword_docs`` dropped, ``keyword_pairs``
-      restructured, ``chunks`` / ``keyword_chunks`` created);
+      restructured, ``chunks`` / ``keyword_chunks`` created — v4 shape —
+      then normalized to v5 shape in the same transaction);
+    * a v4 database (normalized to v5);
     * a database already at ``SCHEMA_VERSION`` (no-op fast path).
 
     Does **not** commit — the caller's transaction (implicit or explicit)
-    is honoured throughout. This lets ``KeywordLibrary.add_keywords`` /
-    ``promote_votes`` / any other multi-statement writer batch schema-setup
-    with their own INSERTs atomically. Migration (v3→v4) *does* need its
-    own atomic scope: :func:`_migrate_to_v4` opens a nested transaction
-    only when the caller has none in progress, otherwise it participates
-    in the caller's transaction (Python 3.12 sqlite3 forbids nesting
-    ``BEGIN`` and would raise ``cannot start a transaction within a
-    transaction`` if we opened one unconditionally).
+    is honoured throughout. Migration (any → v5) *does* need its own atomic
+    scope: :func:`_migrate_forward` opens a nested transaction only when
+    the caller has none in progress, otherwise it participates in the
+    caller's transaction (Python 3.12 sqlite3 forbids nesting ``BEGIN``
+    and would raise ``cannot start a transaction within a transaction`` if
+    we opened one unconditionally). The ``user_version`` stamp is issued
+    **inside** that transaction so the shape and the version can never
+    diverge on a crash / SIGKILL.
 
     Returns the final ``user_version`` after the call.
     """
@@ -248,38 +356,64 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
     if current >= SCHEMA_VERSION:
         # Fast path: DB is at the current schema. Assume migration created
         # every table when it stamped user_version = SCHEMA_VERSION, so we
-        # avoid the 13 sqlite_master probes ``_create_current_tables``
-        # would otherwise perform on every call.
+        # avoid the sqlite_master probes ``_create_current_tables`` would
+        # otherwise perform on every call.
         return current
 
-    _migrate_to_v4(conn)
-    conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+    _migrate_forward(conn)
     return SCHEMA_VERSION
 
 
-def _migrate_to_v4(conn: sqlite3.Connection) -> None:
-    """Bring ``conn`` from any pre-v4 shape to v4.
+def _migrate_forward(conn: sqlite3.Connection) -> None:
+    """Bring ``conn`` from any pre-v5 shape to v5 in one atomic transaction.
 
-    Atomicity: when the caller has no in-flight transaction we open one
-    (``BEGIN IMMEDIATE``) so the DROP / CREATE / salvage sequence is one
-    all-or-nothing unit. When the caller *does* have an in-flight
-    transaction we cannot open a nested one (Python's sqlite3 rejects
-    it), so we participate in the caller's transaction; the caller then
-    controls the commit/rollback boundary.
+    Runs v3→v4 then v4→v5 back-to-back inside a single ``BEGIN IMMEDIATE``
+    (or the caller's txn if one is already in flight) so partial state can
+    never land on disk. The ``PRAGMA user_version`` stamp lives inside the
+    same transaction so an SIGKILL between the data rewrite and the version
+    bump cannot leave the DB in a mislabelled state.
 
-    Salvages old promotion rows (legacy ``scope='llm_promoted'``) as
-    ``source='llm_promoted'`` and drops every other legacy ``keyword_pairs``
-    row (doc-level / v1-derived — segment build recomputes them). Drops
-    ``keyword_docs``. Creates the current graph tables.
-
-    Legacy detection is re-run *inside* the transaction so a concurrent
-    process that wins the migration race cannot leave us reading a stale
-    "legacy pair table exists" view against the new schema.
+    ``BEGIN IMMEDIATE`` is issued inside the ``try`` block so a lock
+    contention (concurrent writer holding the DB during a big migration)
+    surfaces as a normal exception path and does not skip the rollback
+    contract.
     """
     owned_txn = not conn.in_transaction
-    if owned_txn:
-        conn.execute("BEGIN IMMEDIATE")
+    # Real (non-fast-path) migration is user-visible latency. Warn once
+    # before we grab the write lock so the CLI does not appear to hang.
+    # ``_migrate_v4_to_v5_inplace`` and the v3→v4 hop are both expensive
+    # only when there is real data; on empty DBs the whole thing is a
+    # sub-millisecond no-op and printing a banner would be spammy.
+    db_path_str: Optional[str] = None
+    announced = False
+    row = None
     try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is not None and len(row) >= 3:
+        db_path_str = row[2] or None
+    if db_path_str:
+        try:
+            # Announce only when the DB is big enough for the migration to
+            # take user-noticeable time (>= 20 MB is our rough threshold).
+            if os.path.getsize(db_path_str) >= 20 * 1024 * 1024:
+                _migration_announce(
+                    db_path_str,
+                    "Upgrading index to schema v5 (one-time; typically a few seconds per 100 MB)",
+                )
+                announced = True
+        except OSError:
+            pass
+
+    # Pre-flight disk-space check when the migration would rewrite real
+    # data. Cheap ``PRAGMA``; only actually stat's the FS when the DB has
+    # a real file backing.
+    _check_disk_space(conn)
+
+    try:
+        if owned_txn:
+            conn.execute("BEGIN IMMEDIATE")
         # Re-check under the write lock (TOCTOU guard): another process may
         # have already migrated between the caller's read_schema_version()
         # and this point.
@@ -289,61 +423,447 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
                 conn.execute("COMMIT")
             return
 
-        legacy_pairs = (
-            _table_exists(conn, "keyword_pairs")
-            and "source" not in _table_columns(conn, "keyword_pairs")
-        )
-        legacy_docs = _table_exists(conn, "keyword_docs")
+        # v1/v2/v3 → v4 first (only if we detect legacy shape). This
+        # produces the v4 shape (denormalized TEXT columns) in memory,
+        # then v4 → v5 folds it into the intern tables.
+        if _needs_v3_to_v4(conn):
+            _migrate_v3_to_v4_inplace(conn)
 
-        salvaged = []
-        if legacy_pairs:
-            rows = conn.execute(
-                "SELECT directory, keyword_a, keyword_b, count, updated_at "
-                "FROM keyword_pairs WHERE scope = ?",
-                (LLM_PROMOTED_SOURCE,),
-            ).fetchall()
-            salvaged = [
-                (
-                    row["directory"],
-                    row["keyword_a"],
-                    row["keyword_b"],
-                    float(row["count"] or 0.0),
-                    row["updated_at"] if "updated_at" in row.keys() else None,
-                )
-                for row in rows
-            ]
-            conn.execute("DROP TABLE keyword_pairs")
+        # Now v4 → v5 normalization. If the DB was already v4 (or we just
+        # brought it to v4), migrate to the intern-based layout.
+        _migrate_v4_to_v5_inplace(conn)
 
-        if legacy_docs:
-            conn.execute("DROP TABLE IF EXISTS keyword_docs")
-
-        _create_current_tables(conn)
-
-        if salvaged:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO keyword_pairs
-                    (scope, directory, keyword_a, keyword_b, source,
-                     cooccur_count, npmi, updated_at)
-                VALUES ('', ?, ?, ?, ?, ?, NULL, ?)
-                """,
-                [
-                    (directory, kw_a, kw_b, LLM_PROMOTED_SOURCE, count, updated)
-                    for (directory, kw_a, kw_b, count, updated) in salvaged
-                ],
-            )
+        # Stamp the version **inside** the transaction so shape + version
+        # commit atomically.
+        conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
 
         if owned_txn:
             conn.execute("COMMIT")
+        if announced:
+            _migration_announce(
+                db_path_str,
+                "Schema v5 upgrade complete. Run `grga index vacuum` to reclaim disk space.",
+            )
     except Exception:
-        if owned_txn:
-            # Only attempt rollback for a transaction we ourselves opened;
-            # a caller-owned txn is the caller's to roll back.
+        if owned_txn and conn.in_transaction:
+            # Only attempt rollback when we actually opened a txn (and it
+            # is still open — a lock-contention failure on BEGIN IMMEDIATE
+            # leaves in_transaction False, and there is nothing to roll
+            # back in that case).
             try:
                 conn.execute("ROLLBACK")
             except sqlite3.OperationalError:
                 pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# v3 → v4 helpers (the chunk-level migration). Retained so v1/v3 databases
+# can still reach v5 via the v3→v4→v5 chain in one atomic transaction.
+# ---------------------------------------------------------------------------
+
+
+def _needs_v3_to_v4(conn: sqlite3.Connection) -> bool:
+    """True when the DB has legacy pre-v4 pair/doc tables that need rebuild."""
+    if _table_exists(conn, "keyword_docs"):
+        return True
+    if _table_exists(conn, "keyword_pairs"):
+        cols = _table_columns(conn, "keyword_pairs")
+        if "source" not in cols or "cooccur_count" not in cols:
+            return True
+    return False
+
+
+def _migrate_v3_to_v4_inplace(conn: sqlite3.Connection) -> None:
+    """Legacy chunk-level migration (retained for v1/v3 → v5 chains).
+
+    Salvages old promotion rows (legacy ``scope='llm_promoted'``) into a
+    v4-shaped ``keyword_pairs`` and drops ``keyword_docs``. Must run inside
+    the same transaction as the subsequent v4 → v5 normalisation.
+    """
+    salvaged: List[tuple] = []
+    if (
+        _table_exists(conn, "keyword_pairs")
+        and "source" not in _table_columns(conn, "keyword_pairs")
+    ):
+        rows = conn.execute(
+            "SELECT directory, keyword_a, keyword_b, count, updated_at "
+            "FROM keyword_pairs WHERE scope = ?",
+            (LLM_PROMOTED_SOURCE,),
+        ).fetchall()
+        salvaged = [
+            (
+                row["directory"],
+                row["keyword_a"],
+                row["keyword_b"],
+                float(row["count"] or 0.0),
+                row["updated_at"] if "updated_at" in row.keys() else None,
+            )
+            for row in rows
+        ]
+        conn.execute("DROP TABLE keyword_pairs")
+
+    if _table_exists(conn, "keyword_docs"):
+        conn.execute("DROP TABLE IF EXISTS keyword_docs")
+
+    # Create the *v4-shape* keyword_pairs so we can insert salvaged rows,
+    # then v4→v5 rewrites it. We define it inline (rather than via
+    # _create_current_tables) so the schema for this intermediate shape
+    # is explicit and never leaves the transaction.
+    conn.execute(
+        """
+        CREATE TABLE keyword_pairs (
+            scope TEXT NOT NULL DEFAULT '',
+            directory TEXT NOT NULL,
+            keyword_a TEXT NOT NULL,
+            keyword_b TEXT NOT NULL,
+            source TEXT NOT NULL,
+            cooccur_count REAL NOT NULL DEFAULT 0,
+            npmi REAL,
+            updated_at TEXT,
+            PRIMARY KEY (directory, keyword_a, keyword_b, source)
+        )
+        """
+    )
+    if salvaged:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO keyword_pairs
+                (scope, directory, keyword_a, keyword_b, source,
+                 cooccur_count, npmi, updated_at)
+            VALUES ('', ?, ?, ?, ?, ?, NULL, ?)
+            """,
+            [
+                (directory, kw_a, kw_b, LLM_PROMOTED_SOURCE, count, updated)
+                for (directory, kw_a, kw_b, count, updated) in salvaged
+            ],
+        )
+
+
+# ---------------------------------------------------------------------------
+# v4 → v5 normalization: intern directories / keywords / docs, rewrite the
+# business tables to reference them by id.
+# ---------------------------------------------------------------------------
+
+
+def _v4_has_normalized(conn: sqlite3.Connection) -> bool:
+    """True when v5 intern tables + v5-shaped business tables already exist."""
+    if not _table_exists(conn, "directories"):
+        return False
+    if not _table_exists(conn, "keywords"):
+        return False
+    if not _table_exists(conn, "docs"):
+        return False
+    if _table_exists(conn, "keyword_chunks"):
+        cols = _table_columns(conn, "keyword_chunks")
+        if "kw_id" not in cols or "doc_id" not in cols:
+            return False
+    return True
+
+
+def _migrate_v4_to_v5_inplace(conn: sqlite3.Connection) -> None:
+    """Fold v4 denormalized TEXT columns into v5 intern-based layout.
+
+    Runs inside the caller's transaction. The whole rewrite is pure SQL
+    (bulk ``INSERT OR IGNORE ... SELECT ... JOIN``) so the migration cost
+    stays inside SQLite's engine — no Python row loop, no per-row
+    ``INSERT + SELECT`` round-trip for the ~646K distinct keywords that a
+    large corpus produces.
+
+    Strategy:
+
+    1. Create the intern tables (empty).
+    2. Rename each v4 table to ``v4__<name>``.
+    3. Populate the intern tables with ``INSERT OR IGNORE ... SELECT DISTINCT``
+       drawing from every v4 shadow table (so a keyword mentioned only in
+       ``keyword_pairs`` still gets an id).
+    4. Create each v5-shaped business table.
+    5. ``INSERT ... SELECT ... JOIN`` from each ``v4__<name>`` into the new
+       table, joining through the intern tables to translate TEXT → id.
+    6. Drop the ``v4__<name>`` shadow tables.
+    7. Call :func:`_create_current_tables` to add any table that did not
+       exist in the source DB, plus every index.
+    """
+    if _v4_has_normalized(conn):
+        # Already normalized (or brand-new empty DB about to be built). Just
+        # ensure every table + index exists.
+        _create_current_tables(conn)
+        return
+
+    # 1. Create intern tables (empty).
+    for stmt in _split_sql(_CREATE_INTERN_TABLES):
+        conn.execute(stmt)
+
+    # 2. Rename every v4 shadow table that exists. We need the renames done
+    #    before the DISTINCT sweeps so the shadow-table names are stable in
+    #    every subsequent SELECT.
+    v4_tables = [
+        "keyword_chunks", "chunks", "keyword_pairs", "heading_docs",
+        "llm_extension_votes", "keyword_counts", "keyword_sources",
+    ]
+    present: Dict[str, bool] = {}
+    for name in v4_tables:
+        exists = _table_exists(conn, name)
+        # ``keyword_counts`` / ``keyword_sources`` may be pre-v5 (TEXT
+        # columns) or already v5-shaped; only rename the pre-v5 shape.
+        if exists and name in ("keyword_counts", "keyword_sources"):
+            if "kw_id" in _table_columns(conn, name):
+                # Already v5-normalised — leave it alone.
+                exists = False
+        present[name] = exists
+        if exists:
+            conn.execute(f"ALTER TABLE {name} RENAME TO v4__{name}")
+
+    # 3. Populate intern tables. ``UNION`` collapses duplicates before the
+    #    OR IGNORE round-trip, so directories/keywords each get exactly one
+    #    row per distinct string regardless of source-table cardinality.
+    dir_sources: List[str] = []
+    if present["keyword_chunks"]:
+        dir_sources.append("SELECT directory FROM v4__keyword_chunks")
+    if present["chunks"]:
+        dir_sources.append("SELECT directory FROM v4__chunks")
+    if present["keyword_pairs"]:
+        dir_sources.append("SELECT directory FROM v4__keyword_pairs")
+    if present["heading_docs"]:
+        dir_sources.append("SELECT directory FROM v4__heading_docs")
+    if present["llm_extension_votes"]:
+        dir_sources.append("SELECT directory FROM v4__llm_extension_votes")
+    if present["keyword_counts"]:
+        dir_sources.append("SELECT directory FROM v4__keyword_counts")
+    if present["keyword_sources"]:
+        dir_sources.append("SELECT directory FROM v4__keyword_sources")
+    if dir_sources:
+        conn.execute(
+            "INSERT OR IGNORE INTO directories(path) "
+            + " UNION ".join(dir_sources)
+        )
+
+    kw_sources: List[str] = []
+    if present["keyword_chunks"]:
+        kw_sources.append("SELECT keyword FROM v4__keyword_chunks")
+    if present["keyword_pairs"]:
+        kw_sources.append("SELECT keyword_a FROM v4__keyword_pairs")
+        kw_sources.append("SELECT keyword_b FROM v4__keyword_pairs")
+    if present["llm_extension_votes"]:
+        kw_sources.append("SELECT keyword_a FROM v4__llm_extension_votes")
+        kw_sources.append("SELECT keyword_b FROM v4__llm_extension_votes")
+    if present["keyword_counts"]:
+        kw_sources.append("SELECT term FROM v4__keyword_counts")
+    if present["keyword_sources"]:
+        kw_sources.append("SELECT keyword FROM v4__keyword_sources")
+    if kw_sources:
+        conn.execute(
+            "INSERT OR IGNORE INTO keywords(kw) "
+            + " UNION ".join(kw_sources)
+        )
+
+    # docs = distinct (directory, doc_path) across every table that carries
+    # a doc_path column. INSERT resolves ``directory`` → dir_id via join.
+    doc_sources: List[str] = []
+    if present["keyword_chunks"]:
+        doc_sources.append(
+            "SELECT DISTINCT directory, doc_path FROM v4__keyword_chunks"
+        )
+    if present["chunks"]:
+        doc_sources.append(
+            "SELECT DISTINCT directory, doc_path FROM v4__chunks"
+        )
+    if present["heading_docs"]:
+        doc_sources.append(
+            "SELECT DISTINCT directory, doc_path FROM v4__heading_docs"
+        )
+    if doc_sources:
+        conn.execute(
+            "INSERT OR IGNORE INTO docs(dir_id, doc_path) "
+            "SELECT dir.id, u.doc_path "
+            "FROM (" + " UNION ".join(doc_sources) + ") AS u "
+            "JOIN directories dir ON dir.path = u.directory"
+        )
+
+    # 4 + 5. Create each v5-shaped business table and populate it in one
+    # set-based INSERT.
+
+    if present["keyword_chunks"]:
+        conn.execute(
+            """
+            CREATE TABLE keyword_chunks (
+                kw_id INTEGER NOT NULL REFERENCES keywords(id),
+                doc_id INTEGER NOT NULL REFERENCES docs(id),
+                chunk_id INTEGER NOT NULL,
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (kw_id, doc_id, chunk_id)
+            ) WITHOUT ROWID
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO keyword_chunks
+                (kw_id, doc_id, chunk_id, occurrence_count)
+            SELECT k.id, d.id, sc.chunk_id, sc.occurrence_count
+            FROM v4__keyword_chunks sc
+            JOIN keywords k ON k.kw = sc.keyword
+            JOIN directories dir ON dir.path = sc.directory
+            JOIN docs d ON d.dir_id = dir.id AND d.doc_path = sc.doc_path
+            """
+        )
+        conn.execute("DROP TABLE v4__keyword_chunks")
+
+    if present["chunks"]:
+        conn.execute(
+            """
+            CREATE TABLE chunks (
+                doc_id INTEGER NOT NULL REFERENCES docs(id),
+                chunk_id INTEGER NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                char_count INTEGER NOT NULL,
+                PRIMARY KEY (doc_id, chunk_id)
+            ) WITHOUT ROWID
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO chunks
+                (doc_id, chunk_id, start_line, end_line, char_count)
+            SELECT d.id, sc.chunk_id, sc.start_line, sc.end_line, sc.char_count
+            FROM v4__chunks sc
+            JOIN directories dir ON dir.path = sc.directory
+            JOIN docs d ON d.dir_id = dir.id AND d.doc_path = sc.doc_path
+            """
+        )
+        conn.execute("DROP TABLE v4__chunks")
+
+    if present["keyword_pairs"]:
+        for stmt in _split_sql(_CREATE_KEYWORD_PAIRS):
+            conn.execute(stmt)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO keyword_pairs
+                (dir_id, kw_a_id, kw_b_id, source,
+                 cooccur_count, npmi, updated_at)
+            SELECT dir.id, ka.id, kb.id, sc.source,
+                   sc.cooccur_count, sc.npmi, sc.updated_at
+            FROM v4__keyword_pairs sc
+            JOIN directories dir ON dir.path = sc.directory
+            JOIN keywords ka ON ka.kw = sc.keyword_a
+            JOIN keywords kb ON kb.kw = sc.keyword_b
+            """
+        )
+        conn.execute("DROP TABLE v4__keyword_pairs")
+
+    if present["heading_docs"]:
+        conn.execute(
+            """
+            CREATE TABLE heading_docs (
+                doc_id INTEGER NOT NULL REFERENCES docs(id),
+                heading_path TEXT NOT NULL,
+                chapter_id TEXT NOT NULL DEFAULT '',
+                start_line INTEGER NOT NULL DEFAULT 0,
+                end_line INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                PRIMARY KEY (doc_id, heading_path, chapter_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO heading_docs
+                (doc_id, heading_path, chapter_id,
+                 start_line, end_line, updated_at)
+            SELECT d.id, sc.heading_path, sc.chapter_id,
+                   sc.start_line, sc.end_line, sc.updated_at
+            FROM v4__heading_docs sc
+            JOIN directories dir ON dir.path = sc.directory
+            JOIN docs d ON d.dir_id = dir.id AND d.doc_path = sc.doc_path
+            """
+        )
+        conn.execute("DROP TABLE v4__heading_docs")
+
+    if present["llm_extension_votes"]:
+        legacy_cols = _table_columns(conn, "v4__llm_extension_votes")
+        has_promoted_at = "promoted_at" in legacy_cols
+        conn.execute(
+            """
+            CREATE TABLE llm_extension_votes (
+                dir_id INTEGER NOT NULL REFERENCES directories(id),
+                kw_a_id INTEGER NOT NULL REFERENCES keywords(id),
+                kw_b_id INTEGER NOT NULL REFERENCES keywords(id),
+                vote_count REAL NOT NULL DEFAULT 0,
+                last_voted TEXT,
+                promoted_at TEXT,
+                PRIMARY KEY (dir_id, kw_a_id, kw_b_id)
+            )
+            """
+        )
+        promoted_expr = "sc.promoted_at" if has_promoted_at else "NULL"
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO llm_extension_votes
+                (dir_id, kw_a_id, kw_b_id, vote_count, last_voted, promoted_at)
+            SELECT dir.id, ka.id, kb.id, sc.vote_count, sc.last_voted,
+                   {promoted_expr}
+            FROM v4__llm_extension_votes sc
+            JOIN directories dir ON dir.path = sc.directory
+            JOIN keywords ka ON ka.kw = sc.keyword_a
+            JOIN keywords kb ON kb.kw = sc.keyword_b
+            """
+        )
+        conn.execute("DROP TABLE v4__llm_extension_votes")
+
+    if present["keyword_counts"]:
+        conn.execute(
+            """
+            CREATE TABLE keyword_counts (
+                scope TEXT NOT NULL DEFAULT '',
+                dir_id INTEGER NOT NULL REFERENCES directories(id),
+                kw_id INTEGER NOT NULL REFERENCES keywords(id),
+                count REAL NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                PRIMARY KEY (scope, dir_id, kw_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO keyword_counts
+                (scope, dir_id, kw_id, count, updated_at)
+            SELECT sc.scope, dir.id, k.id, sc.count, sc.updated_at
+            FROM v4__keyword_counts sc
+            JOIN directories dir ON dir.path = sc.directory
+            JOIN keywords k ON k.kw = sc.term
+            """
+        )
+        conn.execute("DROP TABLE v4__keyword_counts")
+
+    if present["keyword_sources"]:
+        conn.execute(
+            """
+            CREATE TABLE keyword_sources (
+                dir_id INTEGER NOT NULL REFERENCES directories(id),
+                kw_id INTEGER NOT NULL REFERENCES keywords(id),
+                path TEXT NOT NULL,
+                line_number INTEGER NOT NULL DEFAULT 0,
+                count REAL NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                PRIMARY KEY (dir_id, kw_id, path, line_number)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO keyword_sources
+                (dir_id, kw_id, path, line_number, count, updated_at)
+            SELECT dir.id, k.id, sc.path, sc.line_number, sc.count, sc.updated_at
+            FROM v4__keyword_sources sc
+            JOIN directories dir ON dir.path = sc.directory
+            JOIN keywords k ON k.kw = sc.keyword
+            """
+        )
+        conn.execute("DROP TABLE v4__keyword_sources")
+
+    # 7. Create any table that didn't exist in the source DB, plus all
+    # indexes (idempotent).
+    _create_current_tables(conn)
 
 
 def list_tables(conn: sqlite3.Connection) -> list[str]:
@@ -352,3 +872,33 @@ def list_tables(conn: sqlite3.Connection) -> list[str]:
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
     return [row[0] for row in rows]
+
+
+def vacuum_db(db_path: Union[str, Path]) -> Dict[str, int]:
+    """Run ``VACUUM`` on the graph DB and report the size delta.
+
+    ``VACUUM`` cannot run inside a transaction, so this opens its own
+    dedicated connection (in autocommit mode) and closes it when done. The
+    schema-v5 migration leaves ~240 MB of freelist pages on a large corpus;
+    this reclaims them. The operation is safe to run at any time.
+
+    Returns ``{"before_bytes": int, "after_bytes": int, "freed_bytes": int}``
+    for the caller to report. Freed bytes may be negative if the DB was
+    already tightly packed and VACUUM incurred small overhead.
+    """
+    resolved = Path(db_path).expanduser()
+    before = os.path.getsize(str(resolved)) if resolved.exists() else 0
+    # ``isolation_level=None`` puts the connection in autocommit mode, which
+    # is required by VACUUM. We do not go through :func:`connect` because
+    # that sets ``row_factory``; VACUUM does not need it.
+    conn = sqlite3.connect(str(resolved), timeout=60.0, isolation_level=None)
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+    after = os.path.getsize(str(resolved)) if resolved.exists() else 0
+    return {
+        "before_bytes": int(before),
+        "after_bytes": int(after),
+        "freed_bytes": int(before - after),
+    }

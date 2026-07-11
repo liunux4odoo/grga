@@ -38,6 +38,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
+from grga.graph.ids import IdInterner
 from grga.graph.schema import CHUNK_COOCCUR_SOURCE, connect, ensure_schema
 
 # The tokeniser deliberately allows CJK code points alongside ASCII words.
@@ -383,13 +384,30 @@ def build_graph_index(
     conn = connect(target_db)
     try:
         ensure_schema(conn)
+        interner = IdInterner(conn)
+        scope_dir_id = interner.dir_id(scope_key)
         if replace:
-            conn.execute("DELETE FROM chunks WHERE directory = ?", (scope_key,))
-            conn.execute("DELETE FROM keyword_chunks WHERE directory = ?", (scope_key,))
-            conn.execute("DELETE FROM heading_docs WHERE directory = ?", (scope_key,))
+            # Clear this scope's rows. ``keyword_chunks`` / ``chunks`` /
+            # ``heading_docs`` are keyed by ``doc_id`` which resolves through
+            # ``docs.dir_id``; delete via the docs belonging to this scope.
             conn.execute(
-                "DELETE FROM keyword_pairs WHERE directory = ? AND source = ?",
-                (scope_key, CHUNK_COOCCUR_SOURCE),
+                "DELETE FROM keyword_chunks WHERE doc_id IN "
+                "(SELECT id FROM docs WHERE dir_id = ?)",
+                (scope_dir_id,),
+            )
+            conn.execute(
+                "DELETE FROM chunks WHERE doc_id IN "
+                "(SELECT id FROM docs WHERE dir_id = ?)",
+                (scope_dir_id,),
+            )
+            conn.execute(
+                "DELETE FROM heading_docs WHERE doc_id IN "
+                "(SELECT id FROM docs WHERE dir_id = ?)",
+                (scope_dir_id,),
+            )
+            conn.execute(
+                "DELETE FROM keyword_pairs WHERE dir_id = ? AND source = ?",
+                (scope_dir_id, CHUNK_COOCCUR_SOURCE),
             )
             conn.commit()
 
@@ -430,24 +448,41 @@ def build_graph_index(
                 min_chars=chunk_min_chars,
             )
 
+            doc_id = interner.doc_id(scope_dir_id, rel_path)
+            # First pass: extract per-chunk keyword counts (Python-only) so
+            # we can batch-intern every distinct keyword in this file with
+            # one round-trip before touching the DB again. On corpora with
+            # hundreds of thousands of distinct keywords this is the
+            # difference between O(distinct-kw) synchronous
+            # ``INSERT + SELECT`` pairs and O(files) batched statements.
+            per_chunk_kw: List[Tuple[int, Dict[str, int]]] = []
+            file_distinct_kws: set = set()
+            for chunk in chunks:
+                kw_counts = extract_chunk_keywords(chunk.text)
+                if kw_counts:
+                    per_chunk_kw.append((chunk.chunk_id, kw_counts))
+                    file_distinct_kws.update(kw_counts.keys())
+                else:
+                    per_chunk_kw.append((chunk.chunk_id, {}))
+            kw_id_map = interner.kw_ids(sorted(file_distinct_kws)) if file_distinct_kws else {}
+
             chunk_rows = []
             kw_chunk_rows = []
             file_had_keywords = False
-            for chunk in chunks:
+            for chunk, (chunk_id_probe, kw_counts) in zip(chunks, per_chunk_kw):
                 chunk_rows.append(
                     (
-                        scope_key, scope_key, rel_path, chunk.chunk_id,
+                        doc_id, chunk.chunk_id,
                         chunk.start_line, chunk.end_line, chunk.char_count,
                     )
                 )
-                kw_counts = extract_chunk_keywords(chunk.text)
                 if not kw_counts:
                     continue
                 file_had_keywords = True
                 n_chunks_with_keywords += 1
                 for kw, occ in kw_counts.items():
                     kw_chunk_rows.append(
-                        (scope_key, kw, rel_path, chunk.chunk_id, int(occ))
+                        (kw_id_map[kw], doc_id, chunk.chunk_id, int(occ))
                     )
                     chunk_df[kw] += 1
                 # Pairwise chunk co-occurrence (canonical unordered pairs).
@@ -459,10 +494,9 @@ def build_graph_index(
                 conn.executemany(
                     """
                     INSERT INTO chunks
-                        (scope, directory, doc_path, chunk_id, start_line,
-                         end_line, char_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(directory, doc_path, chunk_id) DO UPDATE SET
+                        (doc_id, chunk_id, start_line, end_line, char_count)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(doc_id, chunk_id) DO UPDATE SET
                         start_line = excluded.start_line,
                         end_line = excluded.end_line,
                         char_count = excluded.char_count
@@ -474,9 +508,9 @@ def build_graph_index(
                 conn.executemany(
                     """
                     INSERT INTO keyword_chunks
-                        (directory, keyword, doc_path, chunk_id, occurrence_count)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(directory, keyword, doc_path, chunk_id) DO UPDATE SET
+                        (kw_id, doc_id, chunk_id, occurrence_count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(kw_id, doc_id, chunk_id) DO UPDATE SET
                         occurrence_count = excluded.occurrence_count
                     """,
                     kw_chunk_rows,
@@ -496,9 +530,8 @@ def build_graph_index(
                     heading_path_key = " > ".join(chapter.heading_path)
                     head_rows.append(
                         (
-                            scope_key,
+                            doc_id,
                             heading_path_key,
-                            rel_path,
                             chapter.chapter_id,
                             int(chapter.start_line),
                             int(chapter.end_line),
@@ -509,10 +542,10 @@ def build_graph_index(
                     conn.executemany(
                         """
                         INSERT INTO heading_docs
-                            (directory, heading_path, doc_path, chapter_id,
+                            (doc_id, heading_path, chapter_id,
                              start_line, end_line, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(directory, heading_path, doc_path, chapter_id)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(doc_id, heading_path, chapter_id)
                         DO UPDATE SET
                             start_line = excluded.start_line,
                             end_line = excluded.end_line,
@@ -530,22 +563,33 @@ def build_graph_index(
                 )
 
         # Materialise keyword_pairs (chunk_cooccur) from the accumulated
-        # pair counts + chunk-df, applying npmi and min_pair_count.
+        # pair counts + chunk-df, applying npmi and min_pair_count. Batch-
+        # intern every distinct keyword mentioned in a surviving pair with
+        # one call to ``kw_ids`` before materialising the row list, so this
+        # phase never blocks on N ``INSERT + SELECT`` round-trips.
         n_chunks = n_chunks_with_keywords
+        surviving_pairs = [
+            (a, b, c) for (a, b), c in pair_count.items()
+            if c >= min_pair_count
+        ]
         pair_rows = []
-        for (a, b), c in pair_count.items():
-            if c < min_pair_count:
-                continue
-            npmi = _npmi(c, chunk_df[a], chunk_df[b], n_chunks)
-            pair_rows.append((scope_key, a, b, float(c), npmi, now))
+        if surviving_pairs:
+            pair_kws = {kw for (a, b, _c) in surviving_pairs for kw in (a, b)}
+            pair_kw_ids = interner.kw_ids(sorted(pair_kws))
+            for a, b, c in surviving_pairs:
+                npmi = _npmi(c, chunk_df[a], chunk_df[b], n_chunks)
+                pair_rows.append(
+                    (scope_dir_id, pair_kw_ids[a], pair_kw_ids[b],
+                     float(c), npmi, now)
+                )
         if pair_rows:
             conn.executemany(
                 """
                 INSERT INTO keyword_pairs
-                    (scope, directory, keyword_a, keyword_b, source,
+                    (dir_id, kw_a_id, kw_b_id, source,
                      cooccur_count, npmi, updated_at)
-                VALUES ('', ?, ?, ?, 'chunk_cooccur', ?, ?, ?)
-                ON CONFLICT(directory, keyword_a, keyword_b, source) DO UPDATE SET
+                VALUES (?, ?, ?, 'chunk_cooccur', ?, ?, ?)
+                ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
                     cooccur_count = excluded.cooccur_count,
                     npmi = excluded.npmi,
                     updated_at = excluded.updated_at

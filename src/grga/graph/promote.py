@@ -15,14 +15,15 @@ Anti-pollution guarantees:
   rolled back by editing ``keyword_pairs`` directly.
 * **Idempotent**: promotion merges into ``keyword_pairs`` with an additive
   ``ON CONFLICT`` only for pairs that have not been promoted before. A
-  ``promoted_at`` marker column on the votes table records which pairs were
-  already merged, so re-running ``promote`` does not double-count.
+  ``promoted_at`` marker column on the votes table (present natively in
+  v5) records which pairs were already merged, so re-running ``promote``
+  does not double-count.
 * **Dry-run**: ``dry_run=True`` reports what *would* be promoted without
   writing anything.
 
-The ``keyword_pairs`` rows created here carry a distinct ``scope`` marker
-(``PROMOTE_SCOPE``) so operators can tell LLM-refed edges apart from the
-organically-learned deep-search co-occurrences.
+The ``keyword_pairs`` rows created here carry a distinct ``source`` marker
+(``LLM_PROMOTED_SOURCE``) so operators can tell LLM-refed edges apart from
+the organically-learned chunk co-occurrences.
 """
 from __future__ import annotations
 
@@ -86,16 +87,105 @@ class PromoteStats:
         }
 
 
-def _ensure_promoted_marker(conn: sqlite3.Connection) -> None:
-    """Add the ``promoted_at`` column to ``llm_extension_votes`` if absent.
+def _run_promote(
+    conn: sqlite3.Connection,
+    *,
+    threshold: float,
+    scope_key: Optional[str],
+    dry_run: bool,
+    repromote: bool,
+) -> "PromoteStats":
+    """Core promotion body. Extracted so ``promote_votes`` reads cleanly."""
+    ensure_schema(conn)
+    stats = PromoteStats(threshold=float(threshold), dry_run=dry_run)
 
-    Kept here (rather than in ``schema.ensure_schema``) so the base schema
-    stays minimal; the marker is only meaningful to the promotion path.
-    ``ALTER TABLE ... ADD COLUMN`` is additive and preserves existing rows.
-    """
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(llm_extension_votes)")}
-    if "promoted_at" not in cols:
-        conn.execute("ALTER TABLE llm_extension_votes ADD COLUMN promoted_at TEXT")
+    where = "v.vote_count >= ?"
+    params: List = [float(threshold)]
+    if scope_key is not None:
+        # Resolve the scope to a dir_id up front; if the scope has never
+        # been seen there are no candidate votes.
+        row = conn.execute(
+            "SELECT id FROM directories WHERE path = ?", (scope_key,)
+        ).fetchone()
+        if row is None:
+            return stats
+        where += " AND v.dir_id = ?"
+        params.append(int(row[0]))
+    rows = conn.execute(
+        f"""
+        SELECT v.dir_id AS dir_id,
+               v.kw_a_id AS kw_a_id,
+               v.kw_b_id AS kw_b_id,
+               dir.path AS directory,
+               ka.kw AS keyword_a,
+               kb.kw AS keyword_b,
+               v.vote_count AS vote_count,
+               v.promoted_at AS promoted_at
+        FROM llm_extension_votes v
+        JOIN directories dir ON dir.id = v.dir_id
+        JOIN keywords ka ON ka.id = v.kw_a_id
+        JOIN keywords kb ON kb.id = v.kw_b_id
+        WHERE {where}
+        ORDER BY v.vote_count DESC, ka.kw, kb.kw
+        """,
+        params,
+    ).fetchall()
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    for row in rows:
+        stats.candidates += 1
+        already = bool(row["promoted_at"])
+        pair = PromotedPair(
+            directory=row["directory"],
+            keyword_a=row["keyword_a"],
+            keyword_b=row["keyword_b"],
+            vote_count=float(row["vote_count"]),
+            already_promoted=already,
+        )
+        if already and not repromote:
+            stats.skipped_already_promoted += 1
+            stats.pairs.append(pair)
+            continue
+        stats.pairs.append(pair)
+        if dry_run:
+            stats.promoted += 1
+            continue
+        # v5 keyword_pairs: PK is (dir_id, kw_a_id, kw_b_id, source). We
+        # write source='llm_promoted' with a NULL npmi (chunk-level build
+        # owns the npmi channel; vote-derived pairs do not have an npmi
+        # to report). ``cooccur_count`` here reuses the vote count as an
+        # "how strong is the LLM signal" number.
+        conn.execute(
+            """
+            INSERT INTO keyword_pairs
+                (dir_id, kw_a_id, kw_b_id, source,
+                 cooccur_count, npmi, updated_at)
+            VALUES (?, ?, ?, ?, ?, NULL, ?)
+            ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+                cooccur_count = cooccur_count + excluded.cooccur_count,
+                updated_at = excluded.updated_at
+            """,
+            (
+                row["dir_id"],
+                row["kw_a_id"],
+                row["kw_b_id"],
+                LLM_PROMOTED_SOURCE,
+                float(row["vote_count"]),
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE llm_extension_votes SET promoted_at = ?
+            WHERE dir_id = ? AND kw_a_id = ? AND kw_b_id = ?
+            """,
+            (now, row["dir_id"], row["kw_a_id"], row["kw_b_id"]),
+        )
+        stats.promoted += 1
+
+    if not dry_run:
+        conn.commit()
+    return stats
 
 
 def promote_votes(
@@ -133,91 +223,20 @@ def promote_votes(
         A :class:`PromoteStats` describing candidates and what was written.
     """
     scope_key = resolve_scope_key(directory)
-
-    def _run(c: sqlite3.Connection) -> PromoteStats:
-        ensure_schema(c)
-        _ensure_promoted_marker(c)
-        stats = PromoteStats(threshold=float(threshold), dry_run=dry_run)
-
-        where = "vote_count >= ?"
-        params: List = [float(threshold)]
-        if scope_key is not None:
-            where += " AND directory = ?"
-            params.append(scope_key)
-        rows = c.execute(
-            f"""
-            SELECT directory, keyword_a, keyword_b, vote_count, promoted_at
-            FROM llm_extension_votes
-            WHERE {where}
-            ORDER BY vote_count DESC, keyword_a, keyword_b
-            """,
-            params,
-        ).fetchall()
-
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        for row in rows:
-            stats.candidates += 1
-            already = bool(row["promoted_at"])
-            pair = PromotedPair(
-                directory=row["directory"],
-                keyword_a=row["keyword_a"],
-                keyword_b=row["keyword_b"],
-                vote_count=float(row["vote_count"]),
-                already_promoted=already,
-            )
-            if already and not repromote:
-                stats.skipped_already_promoted += 1
-                stats.pairs.append(pair)
-                continue
-            stats.pairs.append(pair)
-            if dry_run:
-                stats.promoted += 1
-                continue
-            # v4 keyword_pairs: PK is (directory, keyword_a, keyword_b,
-            # source). We write source='llm_promoted' with a NULL npmi
-            # (chunk-level build owns the npmi channel; vote-derived pairs
-            # do not have an npmi to report). ``cooccur_count`` here reuses
-            # the vote count as an "how strong is the LLM signal" number.
-            c.execute(
-                """
-                INSERT INTO keyword_pairs
-                    (scope, directory, keyword_a, keyword_b, source,
-                     cooccur_count, npmi, updated_at)
-                VALUES ('', ?, ?, ?, ?, ?, NULL, ?)
-                ON CONFLICT(directory, keyword_a, keyword_b, source) DO UPDATE SET
-                    cooccur_count = cooccur_count + excluded.cooccur_count,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    row["directory"],
-                    row["keyword_a"],
-                    row["keyword_b"],
-                    LLM_PROMOTED_SOURCE,
-                    float(row["vote_count"]),
-                    now,
-                ),
-            )
-            c.execute(
-                """
-                UPDATE llm_extension_votes SET promoted_at = ?
-                WHERE directory = ? AND keyword_a = ? AND keyword_b = ?
-                """,
-                (now, row["directory"], row["keyword_a"], row["keyword_b"]),
-            )
-            stats.promoted += 1
-
-        if not dry_run:
-            c.commit()
-        return stats
-
     if conn is not None:
-        return _run(conn)
+        return _run_promote(
+            conn, threshold=threshold, scope_key=scope_key,
+            dry_run=dry_run, repromote=repromote,
+        )
 
     from grga.deep_search import DEFAULT_DB_PATH
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     owned = connect(target_db)
     try:
-        return _run(owned)
+        return _run_promote(
+            owned, threshold=threshold, scope_key=scope_key,
+            dry_run=dry_run, repromote=repromote,
+        )
     finally:
         owned.close()

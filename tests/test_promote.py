@@ -32,8 +32,13 @@ def _pairs(db: Path) -> list[dict]:
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT source, keyword_a, keyword_b, cooccur_count AS count "
-                "FROM keyword_pairs"
+                "SELECT p.source AS source, "
+                "       ka.kw AS keyword_a, "
+                "       kb.kw AS keyword_b, "
+                "       p.cooccur_count AS count "
+                "FROM keyword_pairs p "
+                "JOIN keywords ka ON ka.id = p.kw_a_id "
+                "JOIN keywords kb ON kb.id = p.kw_b_id"
             ).fetchall()
         ]
     finally:
@@ -47,7 +52,11 @@ def _vote_rows(db: Path) -> list[dict]:
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT keyword_a, keyword_b, vote_count FROM llm_extension_votes"
+                "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, "
+                "       v.vote_count AS vote_count "
+                "FROM llm_extension_votes v "
+                "JOIN keywords ka ON ka.id = v.kw_a_id "
+                "JOIN keywords kb ON kb.id = v.kw_b_id"
             ).fetchall()
         ]
     finally:

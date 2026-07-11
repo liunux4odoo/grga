@@ -174,20 +174,28 @@ def _docs_for_keywords_chunks(
 
     ``weight`` is the summed ``occurrence_count`` across chunks and the
     seed keywords. ``kws`` is the set of seed keywords that hit this doc.
+
+    Reads the normalized (v5) tables, joining ``keywords`` / ``docs`` /
+    ``directories`` back to text so the returned mapping stays keyed on the
+    scope path + relative doc path (contract-compatible).
     """
     if not keywords:
         return {}
     placeholders = ",".join("?" for _ in keywords)
     params: List = list(keywords)
-    where = f"keyword IN ({placeholders})"
+    where = f"k.kw IN ({placeholders})"
     if scope_key is not None:
-        where += " AND directory = ?"
+        where += " AND dir.path = ?"
         params.append(scope_key)
     rows = conn.execute(
-        f"SELECT directory, keyword, doc_path, "
-        f"SUM(occurrence_count) AS total, COUNT(*) AS chunks "
-        f"FROM keyword_chunks WHERE {where} "
-        f"GROUP BY directory, keyword, doc_path",
+        f"SELECT dir.path AS directory, k.kw AS keyword, d.doc_path AS doc_path, "
+        f"SUM(kc.occurrence_count) AS total, COUNT(*) AS chunks "
+        f"FROM keyword_chunks kc "
+        f"JOIN keywords k ON k.id = kc.kw_id "
+        f"JOIN docs d ON d.id = kc.doc_id "
+        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"WHERE {where} "
+        f"GROUP BY dir.path, k.kw, d.doc_path",
         params,
     ).fetchall()
     out: Dict[Tuple[str, str], Tuple[float, set]] = {}
@@ -210,13 +218,17 @@ def _seed_chunk_df(
         return {}
     placeholders = ",".join("?" for _ in keywords)
     params: List = list(keywords)
-    where = f"keyword IN ({placeholders})"
+    where = f"k.kw IN ({placeholders})"
     if scope_key is not None:
-        where += " AND directory = ?"
+        where += " AND d.dir_id = (SELECT id FROM directories WHERE path = ?)"
         params.append(scope_key)
     rows = conn.execute(
-        f"SELECT keyword, COUNT(*) AS df FROM keyword_chunks WHERE {where} "
-        f"GROUP BY keyword",
+        f"SELECT k.kw AS keyword, COUNT(*) AS df "
+        f"FROM keyword_chunks kc "
+        f"JOIN keywords k ON k.id = kc.kw_id "
+        f"JOIN docs d ON d.id = kc.doc_id "
+        f"WHERE {where} "
+        f"GROUP BY k.kw",
         params,
     ).fetchall()
     return {row["keyword"]: int(row["df"]) for row in rows}
@@ -229,7 +241,10 @@ def _total_chunks_in_scope(
     where = ""
     params: List = []
     if scope_key is not None:
-        where = " WHERE directory = ?"
+        where = (
+            " WHERE doc_id IN (SELECT d.id FROM docs d "
+            "JOIN directories dir ON dir.id = d.dir_id WHERE dir.path = ?)"
+        )
         params.append(scope_key)
     row = conn.execute(
         f"SELECT COUNT(*) AS n FROM chunks{where}", params
@@ -248,7 +263,8 @@ def _neighbor_edges_for_seeds(
 
     Each row carries ``a`` / ``b`` / ``npmi`` / ``cooccur_count`` /
     ``source``. Ordered by ``npmi DESC NULLS LAST`` then ``cooccur_count
-    DESC`` for determinism, capped at ``limit``.
+    DESC`` for determinism, capped at ``limit``. Joins ``keywords`` back
+    to text so ``a`` / ``b`` remain keyword strings (contract).
     """
     if not seeds or not neighbor_keywords or limit <= 0:
         return []
@@ -256,15 +272,19 @@ def _neighbor_edges_for_seeds(
     nbr_ph = ",".join("?" for _ in neighbor_keywords)
     params: List = [*seeds, *neighbor_keywords, *neighbor_keywords, *seeds]
     where = (
-        f"((keyword_a IN ({seed_ph}) AND keyword_b IN ({nbr_ph})) "
-        f" OR (keyword_a IN ({nbr_ph}) AND keyword_b IN ({seed_ph})))"
+        f"((ka.kw IN ({seed_ph}) AND kb.kw IN ({nbr_ph})) "
+        f" OR (ka.kw IN ({nbr_ph}) AND kb.kw IN ({seed_ph})))"
     )
     if scope_key is not None:
-        where += " AND directory = ?"
+        where += " AND p.dir_id = (SELECT id FROM directories WHERE path = ?)"
         params.append(scope_key)
     rows = conn.execute(
-        f"SELECT keyword_a, keyword_b, npmi, cooccur_count, source "
-        f"FROM keyword_pairs WHERE {where}",
+        f"SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, "
+        f"p.npmi AS npmi, p.cooccur_count AS cooccur_count, p.source AS source "
+        f"FROM keyword_pairs p "
+        f"JOIN keywords ka ON ka.id = p.kw_a_id "
+        f"JOIN keywords kb ON kb.id = p.kw_b_id "
+        f"WHERE {where}",
         params,
     ).fetchall()
     seed_set = set(seeds)
@@ -561,19 +581,23 @@ def _related_graph_impl(
     keyword_list = list(kw_score.keys())
     placeholders = ",".join("?" for _ in keyword_list)
     params: List = list(keyword_list)
-    where = f"keyword IN ({placeholders})"
+    where = f"k.kw IN ({placeholders})"
     if doc_scope_key is not None:
-        where += " AND directory = ?"
+        where += " AND dir.path = ?"
         params.append(doc_scope_key)
     # Aggregate at doc level via SUM/COUNT over keyword_chunks. The
     # ``log1p`` damping mirrors the doc-level fix (plan-2026-07-11 P0):
     # segment-level occurrence counts can still be dominated by a single
     # noisy chunk repeating the same low-PPR token thousands of times.
     rows = conn.execute(
-        f"SELECT directory, keyword, doc_path, "
-        f"SUM(occurrence_count) AS total, COUNT(*) AS chunk_count "
-        f"FROM keyword_chunks WHERE {where} "
-        f"GROUP BY directory, keyword, doc_path",
+        f"SELECT dir.path AS directory, k.kw AS keyword, d.doc_path AS doc_path, "
+        f"SUM(kc.occurrence_count) AS total, COUNT(*) AS chunk_count "
+        f"FROM keyword_chunks kc "
+        f"JOIN keywords k ON k.id = kc.kw_id "
+        f"JOIN docs d ON d.id = kc.doc_id "
+        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"WHERE {where} "
+        f"GROUP BY dir.path, k.kw, d.doc_path",
         params,
     ).fetchall()
 
@@ -635,10 +659,17 @@ def _related_dir(
     where = ""
     params: List = []
     if scope_key is not None:
-        where = " WHERE directory = ?"
+        where = " WHERE dir.path = ?"
         params.append(scope_key)
+    # dir-mode preserves the v4 semantics of "only docs that carry at
+    # least one indexed keyword" by joining through ``keyword_chunks``
+    # (the ``docs`` intern table also holds zero-keyword files).
     rows = conn.execute(
-        f"SELECT DISTINCT directory, doc_path FROM keyword_chunks{where}",
+        f"SELECT DISTINCT dir.path AS directory, d.doc_path AS doc_path "
+        f"FROM keyword_chunks kc "
+        f"JOIN docs d ON d.id = kc.doc_id "
+        f"JOIN directories dir ON dir.id = d.dir_id"
+        f"{where}",
         params,
     ).fetchall()
 
@@ -688,10 +719,15 @@ def _related_heading(
     seed_doc_paths = sorted({doc for _, doc in seed_doc_set})
     doc_ph = ",".join("?" for _ in seed_doc_paths)
     dir_ph = ",".join("?" for _ in seed_directories)
-    where = f"doc_path IN ({doc_ph}) AND directory IN ({dir_ph})"
+    where = f"d.doc_path IN ({doc_ph}) AND dir.path IN ({dir_ph})"
     params: List = [*seed_doc_paths, *sorted(seed_directories)]
     rows = conn.execute(
-        f"SELECT DISTINCT directory, doc_path, heading_path FROM heading_docs WHERE {where}",
+        f"SELECT DISTINCT dir.path AS directory, d.doc_path AS doc_path, "
+        f"hd.heading_path AS heading_path "
+        f"FROM heading_docs hd "
+        f"JOIN docs d ON d.id = hd.doc_id "
+        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"WHERE {where}",
         params,
     ).fetchall()
     if not rows:
@@ -716,23 +752,28 @@ def _related_heading(
     params = []
     if seed_full_paths:
         ph = ",".join("?" for _ in seed_full_paths)
-        where_parts.append(f"heading_path IN ({ph})")
+        where_parts.append(f"hd.heading_path IN ({ph})")
         params.extend(seed_full_paths)
     if seed_leaves:
         ph = ",".join("?" for _ in seed_leaves)
         leaf_clause = (
-            "heading_path IN (" + ph + ") OR "
-            + " OR ".join(["heading_path LIKE ?" for _ in seed_leaves])
+            "hd.heading_path IN (" + ph + ") OR "
+            + " OR ".join(["hd.heading_path LIKE ?" for _ in seed_leaves])
         )
         where_parts.append("(" + leaf_clause + ")")
         params.extend(seed_leaves)
         params.extend([f"% > {leaf}" for leaf in seed_leaves])
     combined = " OR ".join(f"({part})" for part in where_parts)
     if match_scope_key is not None:
-        combined = f"({combined}) AND directory = ?"
+        combined = f"({combined}) AND dir.path = ?"
         params.append(match_scope_key)
     rows = conn.execute(
-        f"SELECT directory, heading_path, doc_path FROM heading_docs WHERE {combined}",
+        f"SELECT dir.path AS directory, hd.heading_path AS heading_path, "
+        f"d.doc_path AS doc_path "
+        f"FROM heading_docs hd "
+        f"JOIN docs d ON d.id = hd.doc_id "
+        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"WHERE {combined}",
         params,
     ).fetchall()
 
@@ -794,10 +835,14 @@ def _preview_from_kw_score(
     params.append(scope_key)
     rows = conn.execute(
         f"""
-        SELECT directory, keyword, doc_path, SUM(occurrence_count) AS total
-        FROM keyword_chunks
-        WHERE keyword IN ({placeholders}) AND directory != ?
-        GROUP BY directory, keyword, doc_path
+        SELECT dir.path AS directory, k.kw AS keyword, d.doc_path AS doc_path,
+               SUM(kc.occurrence_count) AS total
+        FROM keyword_chunks kc
+        JOIN keywords k ON k.id = kc.kw_id
+        JOIN docs d ON d.id = kc.doc_id
+        JOIN directories dir ON dir.id = d.dir_id
+        WHERE k.kw IN ({placeholders}) AND dir.path != ?
+        GROUP BY dir.path, k.kw, d.doc_path
         """,
         params,
     ).fetchall()

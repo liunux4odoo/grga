@@ -26,7 +26,14 @@ def _rows(db: Path) -> list[dict]:
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT directory, keyword_a, keyword_b, vote_count FROM llm_extension_votes"
+                "SELECT dir.path AS directory, "
+                "       ka.kw AS keyword_a, "
+                "       kb.kw AS keyword_b, "
+                "       v.vote_count AS vote_count "
+                "FROM llm_extension_votes v "
+                "JOIN directories dir ON dir.id = v.dir_id "
+                "JOIN keywords ka ON ka.id = v.kw_a_id "
+                "JOIN keywords kb ON kb.id = v.kw_b_id"
             ).fetchall()
         ]
     finally:

@@ -34,13 +34,13 @@ print(f"[gen] 600 docs written in {t_gen:.2f}s")
 from grga.graph.build import build_graph_index
 t0 = time.perf_counter()
 for scope_name in ["alpha", "beta", "gamma"]:
-    build_graph_index(tmp / scope_name, db_path=db, min_term_count=1)
+    build_graph_index(tmp / scope_name, db_path=db, min_pair_count=1)
 t_build = time.perf_counter() - t0
 print(f"[index] 3 scopes built in {t_build:.2f}s")
 
 import sqlite3
 c = sqlite3.connect(db)
-print(f"[index] keyword_docs rows: {c.execute('SELECT COUNT(*) FROM keyword_docs').fetchone()[0]}")
+print(f"[index] keyword_chunks rows: {c.execute('SELECT COUNT(*) FROM keyword_chunks').fetchone()[0]}")
 print(f"[index] heading_docs rows: {c.execute('SELECT COUNT(*) FROM heading_docs').fetchone()[0]}")
 c.close()
 

@@ -29,6 +29,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
+from grga.graph.ids import IdInterner
 from grga.graph.schema import connect, ensure_schema, resolve_scope_key, scope_write_key
 
 
@@ -74,6 +75,8 @@ def _record_pairs(
     result = VoteResult()
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     seen: set = set()
+    interner = IdInterner(conn)
+    dir_id = interner.dir_id(directory)
     for raw_a, raw_b in pairs:
         result.pairs_seen += 1
         canonical = _canonical_pair(raw_a, raw_b)
@@ -85,16 +88,18 @@ def _record_pairs(
             continue
         seen.add(canonical)
         kw_a, kw_b = canonical
+        kw_a_id = interner.kw_id(kw_a)
+        kw_b_id = interner.kw_id(kw_b)
         conn.execute(
             """
             INSERT INTO llm_extension_votes
-                (directory, keyword_a, keyword_b, vote_count, last_voted)
+                (dir_id, kw_a_id, kw_b_id, vote_count, last_voted)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(directory, keyword_a, keyword_b) DO UPDATE SET
+            ON CONFLICT(dir_id, kw_a_id, kw_b_id) DO UPDATE SET
                 vote_count = vote_count + excluded.vote_count,
                 last_voted = excluded.last_voted
             """,
-            (directory, kw_a, kw_b, float(weight), now),
+            (dir_id, kw_a_id, kw_b_id, float(weight), now),
         )
         result.pairs_recorded += 1
         result.votes_added += float(weight)
@@ -221,17 +226,31 @@ def get_votes(
 
     def _query(c: sqlite3.Connection) -> List[dict]:
         ensure_schema(c)
-        where = "vote_count >= ?"
+        where = "v.vote_count >= ?"
         params: List = [float(min_votes)]
         if scope_key is not None:
-            where += " AND directory = ?"
-            params.append(scope_key)
+            # Resolve the scope path to a dir_id up front; an unknown
+            # directory can never have votes, so short-circuit.
+            row = c.execute(
+                "SELECT id FROM directories WHERE path = ?", (scope_key,)
+            ).fetchone()
+            if row is None:
+                return []
+            where += " AND v.dir_id = ?"
+            params.append(int(row[0]))
         rows = c.execute(
             f"""
-            SELECT directory, keyword_a, keyword_b, vote_count, last_voted
-            FROM llm_extension_votes
+            SELECT dir.path AS directory,
+                   ka.kw AS keyword_a,
+                   kb.kw AS keyword_b,
+                   v.vote_count AS vote_count,
+                   v.last_voted AS last_voted
+            FROM llm_extension_votes v
+            JOIN directories dir ON dir.id = v.dir_id
+            JOIN keywords ka ON ka.id = v.kw_a_id
+            JOIN keywords kb ON kb.id = v.kw_b_id
             WHERE {where}
-            ORDER BY vote_count DESC, keyword_a, keyword_b
+            ORDER BY v.vote_count DESC, ka.kw, kb.kw
             """,
             params,
         ).fetchall()

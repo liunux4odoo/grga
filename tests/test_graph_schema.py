@@ -1,14 +1,17 @@
-"""Tests for :mod:`grga.graph.schema` (chunk-level migration, schema v4).
+"""Tests for :mod:`grga.graph.schema` (normalized migration, schema v5).
 
 Focus: the current graph tables are created, the schema version is stamped
-at v4, and legacy databases (v1 KeywordLibrary, v2/v3 ``keyword_docs``) are
-migrated atomically:
+at v5, and legacy databases (v1 KeywordLibrary, v2/v3 ``keyword_docs``,
+v4 chunk-level TEXT-keyed) all converge on v5 in one atomic hop:
 
-* ``keyword_docs`` dropped.
-* ``keyword_pairs`` rebuilt with a ``source`` PK column; legacy promoted
-  rows salvaged as ``source='llm_promoted'``, doc-level rows cleared.
-* ``chunks`` / ``keyword_chunks`` created.
-* v1 counters (``keyword_counts`` / ``keyword_sources``) preserved.
+* Intern tables ``directories`` / ``keywords`` / ``docs`` populated from
+  the pre-existing TEXT columns.
+* Business tables (``keyword_chunks`` / ``chunks`` / ``keyword_pairs`` /
+  ``heading_docs`` / ``llm_extension_votes`` / ``keyword_counts`` /
+  ``keyword_sources``) rewritten to reference the intern tables by id.
+* ``keyword_docs`` dropped (v3 legacy).
+* ``keyword_pairs`` legacy promoted rows salvaged as
+  ``source='llm_promoted'``; every other legacy row cleared.
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ import pytest
 
 from grga.graph.schema import (
     GRAPH_TABLES,
+    INTERN_TABLES,
     LLM_PROMOTED_SOURCE,
     SCHEMA_VERSION,
     V1_TABLES,
@@ -121,9 +125,34 @@ def test_ensure_schema_on_empty_db(tmp_path: Path):
         tables = set(list_tables(conn))
         for name in GRAPH_TABLES:
             assert name in tables, f"missing graph table {name}"
+        for name in INTERN_TABLES:
+            assert name in tables, f"missing intern table {name}"
         assert "keyword_docs" not in tables
     finally:
         conn.close()
+
+
+def _insert_normalized_kw_chunk(conn: sqlite3.Connection, directory: str,
+                                keyword: str, doc_path: str, chunk_id: int,
+                                occ: int = 1) -> None:
+    """Helper: insert a row into ``keyword_chunks`` via the intern tables."""
+    conn.execute("INSERT OR IGNORE INTO directories(path) VALUES (?)", (directory,))
+    conn.execute("INSERT OR IGNORE INTO keywords(kw) VALUES (?)", (keyword,))
+    dir_id = conn.execute("SELECT id FROM directories WHERE path=?", (directory,)).fetchone()[0]
+    kw_id = conn.execute("SELECT id FROM keywords WHERE kw=?", (keyword,)).fetchone()[0]
+    conn.execute(
+        "INSERT OR IGNORE INTO docs(dir_id, doc_path) VALUES (?, ?)",
+        (dir_id, doc_path),
+    )
+    doc_id = conn.execute(
+        "SELECT id FROM docs WHERE dir_id=? AND doc_path=?",
+        (dir_id, doc_path),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT OR IGNORE INTO keyword_chunks(kw_id, doc_id, chunk_id, occurrence_count) "
+        "VALUES (?, ?, ?, ?)",
+        (kw_id, doc_id, chunk_id, occ),
+    )
 
 
 def test_ensure_schema_is_idempotent(tmp_path: Path):
@@ -131,10 +160,7 @@ def test_ensure_schema_is_idempotent(tmp_path: Path):
     try:
         ensure_schema(conn)
         ensure_schema(conn)  # second call must not raise or duplicate rows.
-        conn.execute(
-            "INSERT INTO keyword_chunks (directory, keyword, doc_path, chunk_id) "
-            "VALUES ('/d', 'k', 'a.md', 0)"
-        )
+        _insert_normalized_kw_chunk(conn, "/d", "k", "a.md", 0)
         conn.commit()
         assert conn.execute("SELECT COUNT(*) FROM keyword_chunks").fetchone()[0] == 1
         assert read_schema_version(conn) == SCHEMA_VERSION
@@ -142,7 +168,7 @@ def test_ensure_schema_is_idempotent(tmp_path: Path):
         conn.close()
 
 
-def test_keyword_pairs_has_source_column(tmp_path: Path):
+def test_keyword_pairs_has_id_and_source_columns(tmp_path: Path):
     conn = connect(tmp_path / "graph.db")
     try:
         ensure_schema(conn)
@@ -150,6 +176,9 @@ def test_keyword_pairs_has_source_column(tmp_path: Path):
         assert "source" in cols
         assert "cooccur_count" in cols
         assert "npmi" in cols
+        assert "dir_id" in cols
+        assert "kw_a_id" in cols
+        assert "kw_b_id" in cols
     finally:
         conn.close()
 
@@ -169,10 +198,15 @@ def test_migrate_v1_preserves_counts_and_salvages_promoted(tmp_path: Path):
             assert name in tables, f"v1 table {name} vanished"
         for name in GRAPH_TABLES:
             assert name in tables
+        for name in INTERN_TABLES:
+            assert name in tables
         assert "keyword_docs" not in tables
 
-        # keyword_counts preserved.
-        count = conn.execute("SELECT count, term FROM keyword_counts").fetchone()
+        # keyword_counts preserved (normalized: SELECT via joins).
+        count = conn.execute(
+            "SELECT c.count, k.kw AS term "
+            "FROM keyword_counts c JOIN keywords k ON k.id = c.kw_id"
+        ).fetchone()
         assert count["term"] == "alpha" and count["count"] == 5
 
         # Only llm_promoted rows survive; doc-level ('g') cleared.
@@ -182,7 +216,11 @@ def test_migrate_v1_preserves_counts_and_salvages_promoted(tmp_path: Path):
         }
         assert sources <= {LLM_PROMOTED_SOURCE}
         salvaged = conn.execute(
-            "SELECT keyword_a, keyword_b, cooccur_count, source FROM keyword_pairs"
+            "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, "
+            "       p.cooccur_count AS cooccur_count, p.source AS source "
+            "FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id"
         ).fetchall()
         assert len(salvaged) == 1
         assert salvaged[0]["keyword_a"] == "gamma"
@@ -190,7 +228,9 @@ def test_migrate_v1_preserves_counts_and_salvages_promoted(tmp_path: Path):
         assert salvaged[0]["source"] == LLM_PROMOTED_SOURCE
         # doc-level 'alpha'/'beta' pair is gone.
         assert conn.execute(
-            "SELECT COUNT(*) FROM keyword_pairs WHERE keyword_a='alpha'"
+            "SELECT COUNT(*) FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "WHERE ka.kw='alpha'"
         ).fetchone()[0] == 0
     finally:
         conn.close()
@@ -213,7 +253,10 @@ def test_migrate_v3_drops_keyword_docs(tmp_path: Path):
 
         # llm_promoted pair salvaged.
         rows = conn.execute(
-            "SELECT keyword_a, keyword_b, source FROM keyword_pairs"
+            "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, p.source AS source "
+            "FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id"
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["source"] == LLM_PROMOTED_SOURCE
@@ -222,19 +265,25 @@ def test_migrate_v3_drops_keyword_docs(tmp_path: Path):
         conn.close()
 
 
-def test_migration_is_idempotent_on_v4(tmp_path: Path):
+def test_migration_is_idempotent_on_current(tmp_path: Path):
     db = tmp_path / "v3.db"
     _make_v3_db(db)
 
     conn = connect(db)
     try:
-        ensure_schema(conn)  # migrate to v4
+        ensure_schema(conn)  # migrate to v5
         first = conn.execute(
-            "SELECT keyword_a, keyword_b, source FROM keyword_pairs ORDER BY 1,2,3"
+            "SELECT ka.kw, kb.kw, p.source FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id=p.kw_a_id "
+            "JOIN keywords kb ON kb.id=p.kw_b_id "
+            "ORDER BY 1,2,3"
         ).fetchall()
         ensure_schema(conn)  # no-op fast path
         second = conn.execute(
-            "SELECT keyword_a, keyword_b, source FROM keyword_pairs ORDER BY 1,2,3"
+            "SELECT ka.kw, kb.kw, p.source FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id=p.kw_a_id "
+            "JOIN keywords kb ON kb.id=p.kw_b_id "
+            "ORDER BY 1,2,3"
         ).fetchall()
         assert [tuple(r) for r in first] == [tuple(r) for r in second]
         assert read_schema_version(conn) == SCHEMA_VERSION
@@ -246,21 +295,38 @@ def test_graph_tables_writable_after_ensure(tmp_path: Path):
     conn = connect(tmp_path / "graph.db")
     try:
         ensure_schema(conn)
+        conn.execute("INSERT INTO directories(path) VALUES ('/d')")
+        conn.execute("INSERT INTO keywords(kw) VALUES ('alpha')")
+        conn.execute("INSERT INTO keywords(kw) VALUES ('beta')")
         conn.execute(
-            "INSERT INTO chunks (directory, doc_path, chunk_id, start_line, end_line, char_count) "
-            "VALUES ('/d', 'a.md', 0, 1, 1, 40)"
+            "INSERT INTO docs(dir_id, doc_path) VALUES "
+            "((SELECT id FROM directories WHERE path='/d'), 'a.md')"
+        )
+        dir_id = conn.execute("SELECT id FROM directories WHERE path='/d'").fetchone()[0]
+        doc_id = conn.execute(
+            "SELECT id FROM docs WHERE dir_id=? AND doc_path='a.md'", (dir_id,)
+        ).fetchone()[0]
+        alpha_id = conn.execute("SELECT id FROM keywords WHERE kw='alpha'").fetchone()[0]
+        beta_id = conn.execute("SELECT id FROM keywords WHERE kw='beta'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO chunks (doc_id, chunk_id, start_line, end_line, char_count) "
+            "VALUES (?, 0, 1, 1, 40)",
+            (doc_id,),
         )
         conn.execute(
-            "INSERT INTO keyword_chunks (directory, keyword, doc_path, chunk_id, occurrence_count) "
-            "VALUES ('/d', 'alpha', 'a.md', 0, 2)"
+            "INSERT INTO keyword_chunks (kw_id, doc_id, chunk_id, occurrence_count) "
+            "VALUES (?, ?, 0, 2)",
+            (alpha_id, doc_id),
         )
         conn.execute(
-            "INSERT INTO keyword_pairs (directory, keyword_a, keyword_b, source, cooccur_count, npmi) "
-            "VALUES ('/d', 'alpha', 'beta', 'chunk_cooccur', 3, 0.5)"
+            "INSERT INTO keyword_pairs (dir_id, kw_a_id, kw_b_id, source, "
+            "cooccur_count, npmi) VALUES (?, ?, ?, 'chunk_cooccur', 3, 0.5)",
+            (dir_id, alpha_id, beta_id),
         )
         conn.execute(
-            "INSERT INTO heading_docs (directory, heading_path, doc_path, chapter_id, start_line, end_line) "
-            "VALUES ('/d', 'Install > macOS', 'a.md', 'install/macos', 10, 20)"
+            "INSERT INTO heading_docs (doc_id, heading_path, chapter_id, start_line, end_line) "
+            "VALUES (?, 'Install > macOS', 'install/macos', 10, 20)",
+            (doc_id,),
         )
         conn.commit()
         assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
@@ -283,11 +349,8 @@ def test_ensure_schema_participates_in_caller_transaction(tmp_path: Path):
     db = tmp_path / "graph.db"
     conn = connect(db)
     try:
-        ensure_schema(conn)  # migrate to v4
-        conn.execute(
-            "INSERT INTO keyword_chunks (directory, keyword, doc_path, chunk_id, occurrence_count) "
-            "VALUES ('/d', 'kw1', 'a.md', 0, 1)"
-        )
+        ensure_schema(conn)  # migrate to current
+        _insert_normalized_kw_chunk(conn, "/d", "kw1", "a.md", 0)
         assert conn.in_transaction is True
 
         # Second ensure_schema (fast path) MUST NOT commit the pending INSERT.
@@ -314,14 +377,7 @@ def test_ensure_schema_participates_in_caller_transaction(tmp_path: Path):
 def test_migration_within_caller_transaction_succeeds(tmp_path: Path):
     """Regression: migration must not fail when caller already has a txn.
 
-    Prior to the review-followup fix, ``_migrate_to_v4`` unconditionally
-    issued ``BEGIN IMMEDIATE``. On the call path
-    ``KeywordLibrary.add_keywords`` → INSERT (autobegins caller txn) →
-    ``record_votes_from_keywords`` → ``ensure_schema`` → ``_migrate_to_v4``,
-    ``BEGIN`` inside the caller's already-open transaction raised
-    ``cannot start a transaction within a transaction``, was swallowed by
-    the outer ``except Exception: pass``, and the v4 schema was never
-    created — leaving deep-search permanently returning empty history.
+    Same scenario as the v4 test but converging on v5.
     """
     db = tmp_path / "legacy.db"
     # Seed a v3-shaped legacy DB.
@@ -344,13 +400,18 @@ def test_migration_within_caller_transaction_succeeds(tmp_path: Path):
     raw.execute(
         "INSERT INTO keyword_pairs VALUES ('llm_promoted', '/d', 'alpha', 'beta', 3, NULL)"
     )
+    raw.execute("INSERT INTO keyword_counts VALUES ('g', '/d', 'seed', 2, NULL)")
     raw.execute("PRAGMA user_version = 3")
     raw.commit()
     raw.close()
 
     conn = connect(db)
     try:
-        # Caller starts a write transaction (mimics add_keywords' INSERT).
+        # Caller starts a write transaction (mimics some ad-hoc INSERT). The
+        # legacy v3 keyword_counts still has TEXT columns pre-migration, so
+        # we open the txn with a harmless SELECT that autobegins nothing;
+        # instead we hold a savepoint-style lock via a real INSERT into a
+        # column-compatible legacy table.
         conn.execute(
             "INSERT INTO keyword_counts VALUES ('g', '/d', 'kw', 1, NULL)"
         )
@@ -360,14 +421,16 @@ def test_migration_within_caller_transaction_succeeds(tmp_path: Path):
         version = ensure_schema(conn)
         assert version == SCHEMA_VERSION
 
-        # v4 tables exist and legacy llm_promoted salvaged.
+        # v5 tables exist and legacy llm_promoted salvaged.
         tables = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
         assert "chunks" in tables and "keyword_chunks" in tables
         assert "keyword_docs" not in tables
+        assert "directories" in tables and "keywords" in tables and "docs" in tables
         pair = conn.execute(
-            "SELECT source FROM keyword_pairs WHERE keyword_a='alpha'"
+            "SELECT p.source FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id WHERE ka.kw = 'alpha'"
         ).fetchone()
         assert pair is not None and pair["source"] == LLM_PROMOTED_SOURCE
 
@@ -377,16 +440,7 @@ def test_migration_within_caller_transaction_succeeds(tmp_path: Path):
 
 
 def test_concurrent_migration_second_process_survives(tmp_path: Path):
-    """Regression: TOCTOU-safe migration re-checks version inside the txn.
-
-    Two processes hitting an unmigrated shared DB simultaneously used to
-    race: the loser cached ``legacy_pairs=True`` from the pre-lock probe,
-    unblocked after the winner migrated, and then ran the salvage SELECT
-    against the *new* schema — crashing with ``no such column: count``.
-    This test simulates the race by manually migrating the DB *between*
-    the loser's ``read_schema_version`` and the loser's ``_migrate_to_v4``
-    call — the fixed path re-reads under the lock and short-circuits.
-    """
+    """Regression: TOCTOU-safe migration re-checks version inside the txn."""
     db = tmp_path / "legacy.db"
     raw = sqlite3.connect(str(db))
     raw.executescript(
@@ -408,9 +462,8 @@ def test_concurrent_migration_second_process_survives(tmp_path: Path):
     finally:
         winner.close()
 
-    # "Loser" opens after winner committed. Version is now v4; ensure_schema
-    # must NOT try to migrate again (which would fail on the old-schema
-    # SELECT since keyword_pairs now has cooccur_count, not count).
+    # "Loser" opens after winner committed. Version is now current; ensure_schema
+    # must NOT try to migrate again.
     loser = connect(db)
     try:
         version = ensure_schema(loser)

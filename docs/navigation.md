@@ -73,13 +73,14 @@ grga v2 的检索原语，按 caller agent 的推理层级由轻到重排列。�
 
 | 模块 | 职责 |
 |---|---|
-| `schema.py` | v4 表建立 + 一次性迁移：`chunks` / `keyword_chunks` / `keyword_pairs`(带 `source` 列) / `heading_docs` / `llm_extension_votes`；从 doc-level(`keyword_docs`)迁移时原子 DROP + 重建 `keyword_pairs`，抢救 `llm_promoted` 行。v1 计数表(`keyword_counts` / `keyword_sources`)不动 |
-| `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk(line/chars)、写 `chunks` / `keyword_chunks` / `keyword_pairs[chunk_cooccur]`(npmi) |
-| `ppr.py` | Personalized PageRank 手写 power iteration；`load_edges` 从新 `keyword_pairs` 读边(`edge_weight` 映射 npmi / cooccur_count) |
+| `schema.py` | v5 表建立 + 两跳链式迁移 (v1/v3→v4→v5)：intern 表 (`directories` / `keywords` / `docs`) + 业务表 (`chunks` / `keyword_chunks` / `keyword_pairs`(带 `source` 列) / `heading_docs` / `llm_extension_votes` / `keyword_counts` / `keyword_sources`) 全部按 id 外键引用 intern；v3→v4 抢救 `llm_promoted` 行，v4→v5 折叠 TEXT 列到 intern。原子 BEGIN IMMEDIATE，caller-owned txn 兼容 |
+| `ids.py` | `IdInterner`：get-or-insert 三张 intern 表 + 反查文本；每个查询/写入路径通过它把用户串换成 id、把结果 id 换回串（守 --json 契约） |
+| `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk(line/chars)、通过 `IdInterner` 写 `chunks` / `keyword_chunks` / `keyword_pairs[chunk_cooccur]`(npmi) |
+| `ppr.py` | Personalized PageRank 手写 power iteration；`load_edges` 从 `keyword_pairs` JOIN `keywords` 读边（节点仍是 keyword 字符串，PPR 语义不变） |
 | `adjacency_cache.py` | 邻接表缓存，按 `(db_path, db_mtime, scope_key)` 失效 |
-| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图(反污染门)；deep-search 的 LLM pair 也走这里 |
-| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`(`source='llm_promoted'`) |
-| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_chunks`，跨 scope 展开前用 |
+| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图(反污染门)；通过 `IdInterner` 写 id，`get_votes` JOIN 回文本 |
+| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`(`source='llm_promoted'`)；`promoted_at` 列在 v5 静态建入，不再需要 ALTER |
+| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_chunks` JOIN 三张 intern 回文本 |
 
 **反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 →
 进入 `keyword_pairs`(`source='llm_promoted'`) → `related --mode graph` 免费拿到。
@@ -166,6 +167,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/trace-signals.md` | related/suggest 的 graph_actions 输出规范 |
 | `docs/design/release-0.2.0-plan.md` | 0.2.0 发版计划 |
 | `docs/adr/0001-md-parser.md` | 选用 markdown-it-py 的架构决策 |
+| `docs/design/plan-2026-07-11-schema-v5-normalization.md` | v5 规范化迁移设计 + 消费者/契约影响 |
 | `AGENTS.md` | 硬规则、路径约定、工作流偏好 |
 
 ---

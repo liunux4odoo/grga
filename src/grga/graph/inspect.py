@@ -177,9 +177,9 @@ def _cooccurrences(
     Returns ``(cooccur_weight, cooccur_scopes, per_scope_cooccur)`` where
     weights are the raw sum of ``occurrence_count`` for every neighbour
     keyword row that lives in a chunk the seed also occupies. The join is
-    on ``(directory, doc_path, chunk_id)`` — a doc-level aggregation would
-    lump together every seed-bearing document's entire keyword histogram
-    and yield the "identical top-N across unrelated seeds" pathology.
+    on ``(doc_id, chunk_id)`` — a doc-level aggregation would lump together
+    every seed-bearing document's entire keyword histogram and yield the
+    "identical top-N across unrelated seeds" pathology.
     Shared by :func:`_inspect` and :func:`compute_suspected_polysemy`.
     """
     cooccur_weight: Dict[str, float] = {}
@@ -187,17 +187,20 @@ def _cooccurrences(
     per_scope_cooccur: Dict[str, Dict[str, float]] = {}
     rows = conn.execute(
         """
-        SELECT other.directory   AS directory,
-               other.keyword     AS kw,
+        SELECT dir.path             AS directory,
+               other_k.kw           AS kw,
                SUM(other.occurrence_count) AS occurrence_count
         FROM keyword_chunks AS seed
+        JOIN keywords AS seed_k ON seed_k.id = seed.kw_id
         JOIN keyword_chunks AS other
-          ON other.directory = seed.directory
-         AND other.doc_path  = seed.doc_path
-         AND other.chunk_id  = seed.chunk_id
-        WHERE seed.keyword = ?
-          AND other.keyword <> seed.keyword
-        GROUP BY other.directory, other.keyword
+          ON other.doc_id  = seed.doc_id
+         AND other.chunk_id = seed.chunk_id
+        JOIN keywords AS other_k ON other_k.id = other.kw_id
+        JOIN docs AS d ON d.id = seed.doc_id
+        JOIN directories AS dir ON dir.id = d.dir_id
+        WHERE seed_k.kw = ?
+          AND other.kw_id <> seed.kw_id
+        GROUP BY dir.path, other_k.kw
         """,
         (folded,),
     ).fetchall()
@@ -228,9 +231,12 @@ def _seed_docs(
     """
     seed_rows = conn.execute(
         """
-        SELECT DISTINCT directory, doc_path
-        FROM keyword_chunks
-        WHERE keyword = ?
+        SELECT DISTINCT dir.path AS directory, d.doc_path AS doc_path
+        FROM keyword_chunks kc
+        JOIN keywords k ON k.id = kc.kw_id
+        JOIN docs d ON d.id = kc.doc_id
+        JOIN directories dir ON dir.id = d.dir_id
+        WHERE k.kw = ?
         """,
         (folded,),
     ).fetchall()
@@ -250,12 +256,10 @@ def _seed_docs_batch(
     """Batched :func:`_seed_docs` — one scan resolves many keywords at once.
 
     Used by :func:`compute_suspected_polysemy_batch` so annotating the top-N
-    preview bridge keywords costs a single ``keyword IN (...)`` query instead
+    preview bridge keywords costs a single ``kw IN (...)`` query instead
     of N separate full scans of ``keyword_chunks``. Returns
     ``{folded_keyword: docs_by_scope}`` for every requested keyword that has
-    at least one row. Only ``docs_by_scope`` is materialised — the polysemy
-    heuristic resolves per-scope co-occurrence via a separate chunk-level
-    self-join and never consumes the seed doc set.
+    at least one row.
     """
     uniq = [kw for kw in dict.fromkeys(folded_keywords) if kw]
     if not uniq:
@@ -263,10 +267,13 @@ def _seed_docs_batch(
     placeholders = ",".join("?" for _ in uniq)
     rows = conn.execute(
         f"""
-        SELECT keyword AS kw, directory, doc_path
-        FROM keyword_chunks
-        WHERE keyword IN ({placeholders})
-        GROUP BY keyword, directory, doc_path
+        SELECT k.kw AS kw, dir.path AS directory, d.doc_path AS doc_path
+        FROM keyword_chunks kc
+        JOIN keywords k ON k.id = kc.kw_id
+        JOIN docs d ON d.id = kc.doc_id
+        JOIN directories dir ON dir.id = d.dir_id
+        WHERE k.kw IN ({placeholders})
+        GROUP BY k.kw, dir.path, d.doc_path
         """,
         uniq,
     ).fetchall()
