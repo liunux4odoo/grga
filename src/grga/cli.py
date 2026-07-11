@@ -867,20 +867,34 @@ def index_build_command(
     chunk_min_chars: int = typer.Option(300, "--chunk-min-chars", help="Target lower bound on chars per chunk (chars mode)."),
     min_pair_count: int = typer.Option(3, "--min-pair-count", help="Minimum chunk co-occurrence count for a pair to be stored."),
     max_file_kb: int = typer.Option(0, "--max-file-kb", help="Skip files larger than this many KiB. 0 (default) = no size limit."),
+    ngram_iters: int = typer.Option(2, "--ngram-iters", help="Auto n-gram detection passes (default 2 = frozen convergence point). 1 seeds a bare jieba dict; 2+ iteratively refines. Each iter re-tokenises the whole scope."),
+    max_ngram_n: int = typer.Option(4, "--max-ngram-n", help="Longest n-gram considered by auto-phrase detection (default 4, covers e.g. 联合国行星防御理事会 / 赫尔辛根默斯肯 / PDC常任理事国)."),
     append: bool = typer.Option(False, "--append", help="Accumulate onto existing rows instead of replacing the scope."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Build chunk-level graph tables (``chunks`` / ``keyword_chunks`` /
-    ``keyword_pairs[chunk_cooccur]``) for a directory scope.
+    ``keyword_pairs[chunk_cooccur]`` / ``auto_ngram_dict``) for a scope.
+
+    Tokenisation is hybrid: ASCII code identifiers (``foo-bar`` /
+    ``v1.2.3`` / ``c++``) are preserved by regex; CJK runs are segmented
+    by jieba with a per-scope auto-discovered n-gram dictionary (frequency
+    + NPMI + branch entropy). See ``docs/design/tokenization.md``.
 
     ``keyword_counts`` (v1 heat table) is never modified. ``llm_promoted``
     rows in ``keyword_pairs`` are preserved; only ``chunk_cooccur`` rows
-    for this scope are rewritten.
+    for this scope are rewritten. ``--append`` keeps the existing auto
+    dictionary and merges new discoveries into it.
     """
     from grga.graph.build import VALID_CHUNK_MODES, build_graph_index
 
     if chunk_mode not in VALID_CHUNK_MODES:
         typer.echo(f"--chunk-mode must be one of: {', '.join(VALID_CHUNK_MODES)}", err=True)
+        raise typer.Exit(2)
+    if ngram_iters < 1:
+        typer.echo("--ngram-iters must be >= 1", err=True)
+        raise typer.Exit(2)
+    if max_ngram_n < 2:
+        typer.echo("--max-ngram-n must be >= 2", err=True)
         raise typer.Exit(2)
 
     stats = build_graph_index(
@@ -891,6 +905,8 @@ def index_build_command(
         chunk_min_chars=chunk_min_chars,
         min_pair_count=min_pair_count,
         max_file_bytes=max_file_kb * 1024,
+        ngram_iters=ngram_iters,
+        max_ngram_n=max_ngram_n,
         replace=not append,
         progress=(None if json_output else (lambda message: typer.echo(message, err=True))),
     )
@@ -903,7 +919,9 @@ def index_build_command(
         f"{stats.keyword_chunks_written} keyword-chunk rows, "
         f"{stats.pairs_written} pair rows, "
         f"{stats.heading_docs_written} heading rows "
-        f"({stats.md_files_indexed} md) in {stats.elapsed_seconds:.2f}s"
+        f"({stats.md_files_indexed} md), "
+        f"{stats.ngram_phrases_written} auto-ngram phrases "
+        f"({stats.ngram_iters_run} iters) in {stats.elapsed_seconds:.2f}s"
     )
     if stats.files_scanned == 0:
         reasons = stats.reasons

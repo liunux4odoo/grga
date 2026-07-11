@@ -32,8 +32,9 @@ from __future__ import annotations
 import math
 import re
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import combinations
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -41,8 +42,34 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 from grga.graph.ids import IdInterner
 from grga.graph.schema import CHUNK_COOCCUR_SOURCE, connect, ensure_schema
 
-# The tokeniser deliberately allows CJK code points alongside ASCII words.
+# Hybrid tokeniser (schema v6): ASCII code identifiers keep their original
+# regex shape (so ``foo-bar`` / ``v1.2.3`` / ``c++`` stay whole for code
+# search), while CJK runs are segmented by jieba + an auto-discovered n-gram
+# dictionary (so ``章北海`` / ``面壁者`` become single tokens instead of a
+# greedy 2-20 char blob). The two branches are matched in one pass and merged
+# in positional order; the ASCII branch is the *previous* mainline regex.
+_ASCII_TOKEN = r"[A-Za-z][A-Za-z0-9_+#.-]{0,38}[A-Za-z0-9_+#]"
+_CJK_RUN = r"[\u4e00-\u9fff]+"
+_COMBINED_RE = re.compile(_ASCII_TOKEN + "|" + _CJK_RUN)
+_CJK_ONLY_RE = re.compile(_CJK_RUN)
+# Back-compat: the old single-token regex (ASCII branch + bounded CJK run).
+# Retained for :func:`extract_chunk_keywords` callers that expect the pure
+# regex behaviour without a jieba dependency at call time.
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+#.-]{0,38}[A-Za-z0-9_+#]|[\u4e00-\u9fff]{2,20}")
+
+# Detection-only boundary set (26 structural particles, no 构词后缀 like
+# 者/人/号/家). Keeps 面壁者 / 破壁人 discoverable while still cutting
+# collocations like 罗辑说. Separate from _STOPWORDS (the index filter).
+_CORE_STOP_BOUNDARIES = frozenset(
+    "的了和与或是在这那有被把将从对为之其而且但也就都还只很才又已"
+)
+
+# Auto n-gram detection thresholds (frozen by experiments/autongram_2026_07_11).
+DEFAULT_NGRAM_ITERS = 2
+DEFAULT_MAX_NGRAM_N = 4
+_NGRAM_MIN_COUNT = 3
+_NGRAM_NPMI_THRESHOLD = 0.3
+_NGRAM_ENT_THRESHOLD = 1.0
 
 # Markdown ATX heading, e.g. ``## Title``.
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
@@ -95,6 +122,8 @@ class BuildStats:
     pairs_written: int = 0
     heading_docs_written: int = 0
     md_files_indexed: int = 0
+    ngram_phrases_written: int = 0
+    ngram_iters_run: int = 0
     elapsed_seconds: float = 0.0
     reasons: Dict[str, int] = field(default_factory=dict)
 
@@ -113,6 +142,8 @@ class BuildStats:
             "pairs_written": self.pairs_written,
             "heading_docs_written": self.heading_docs_written,
             "md_files_indexed": self.md_files_indexed,
+            "ngram_phrases_written": self.ngram_phrases_written,
+            "ngram_iters_run": self.ngram_iters_run,
             "elapsed_seconds": round(self.elapsed_seconds, 4),
             "reasons": dict(self.reasons),
         }
@@ -291,6 +322,316 @@ def extract_chunk_keywords(text: str) -> Counter:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Hybrid tokeniser (schema v6): ASCII regex + jieba-segmented CJK.
+# ---------------------------------------------------------------------------
+
+def _new_jieba_tokenizer(phrases: Iterable[str]):
+    """Return a fresh ``jieba.Tokenizer`` seeded with ``phrases``.
+
+    A per-build instance (not the module singleton) so concurrent builds and
+    repeated test runs never leak dictionary state into each other.
+    """
+    import jieba
+
+    tok = jieba.Tokenizer()
+    for phrase in phrases:
+        tok.add_word(phrase)
+    tok.initialize()
+    return tok
+
+
+def tokenize_hybrid(text: str, jieba_tok) -> List[str]:
+    """Tokenise ``text`` keeping ASCII identifiers whole, CJK via jieba.
+
+    ASCII / mixed code tokens (``foo-bar``, ``v1.2.3``, ``c++``) are emitted
+    verbatim by the regex branch. Each maximal CJK run is handed to
+    ``jieba_tok`` (which carries the auto n-gram dictionary), so ``章北海``
+    collapses to one token once discovered. Matches are merged in positional
+    order.
+    """
+    out: List[str] = []
+    for m in _COMBINED_RE.finditer(text):
+        piece = m.group(0)
+        if _CJK_ONLY_RE.fullmatch(piece):
+            for t in jieba_tok.cut(piece, cut_all=False):
+                if t and not t.isspace():
+                    out.append(t)
+        else:
+            out.append(piece)
+    return out
+
+
+# ASCII-shaped token pattern (matches the regex ASCII branch exactly).
+_ASCII_TOK_ONLY_RE = re.compile(_ASCII_TOKEN)
+
+
+def _is_ascii_tok(tok: str) -> bool:
+    return _ASCII_TOK_ONLY_RE.fullmatch(tok) is not None
+
+
+def _join_by_pair_rule(win: Tuple[str, ...]) -> str:
+    """Rejoin token tuple honouring CJK/ASCII adjacency conventions.
+
+    Rule (matches experiment F11):
+      - ASCII + ASCII: single space  ("nano", "center") -> "nano center"
+      - anything else: direct concat ("章", "北海") -> "章北海",
+                                    ("艾", "AA") -> "艾AA",
+                                    ("PDC", "主席") -> "PDC主席"
+    """
+    if not win:
+        return ""
+    parts = [win[0]]
+    for prev, cur in zip(win, win[1:]):
+        if _is_ascii_tok(prev) and _is_ascii_tok(cur):
+            parts.append(" ")
+        parts.append(cur)
+    return "".join(parts)
+
+
+def tokenize_hybrid_with_pos(text: str, jieba_tok) -> List[Tuple[str, int, int]]:
+    """Same as :func:`tokenize_hybrid` but yields ``(token, start, end)`` in
+    original-text character offsets. Consumers of
+    :func:`merge_auto_phrases` rely on positional adjacency to avoid merging
+    tokens that were separated by whitespace/punctuation in the source.
+    """
+    out: List[Tuple[str, int, int]] = []
+    for m in _COMBINED_RE.finditer(text):
+        piece = m.group(0)
+        base = m.start()
+        if _CJK_ONLY_RE.fullmatch(piece):
+            offset = 0
+            for t in jieba_tok.cut(piece, cut_all=False):
+                if t and not t.isspace():
+                    out.append((t, base + offset, base + offset + len(t)))
+                offset += len(t)
+        else:
+            out.append((piece, m.start(), m.end()))
+    return out
+
+
+def merge_auto_phrases(
+    tokens_with_pos: List[Tuple[str, int, int]],
+    phrase_set: set,
+    *,
+    max_n: int = DEFAULT_MAX_NGRAM_N,
+) -> List[str]:
+    """Greedy longest-match merge of adjacent tokens against ``phrase_set``.
+
+    Only merges when tokens are **positionally adjacent** in the source
+    (``prev.end == next.start``); this prevents ``"艾, AA"`` (comma between)
+    from being merged into ``"艾AA"``. Longest match wins; falls back to the
+    single token when no match. ``phrase_set`` should contain the rejoin
+    string form (see :func:`_join_by_pair_rule`).
+    """
+    if not phrase_set:
+        return [t[0] for t in tokens_with_pos]
+    out: List[str] = []
+    i = 0
+    L = len(tokens_with_pos)
+    while i < L:
+        merged = False
+        max_try = min(max_n, L - i)
+        for n in range(max_try, 1, -1):
+            win = tokens_with_pos[i:i + n]
+            adjacent = all(
+                win[k][2] == win[k + 1][1] for k in range(len(win) - 1)
+            )
+            if not adjacent:
+                continue
+            joined = _join_by_pair_rule(tuple(t[0] for t in win))
+            if joined in phrase_set:
+                out.append(joined)
+                i += n
+                merged = True
+                break
+        if not merged:
+            out.append(tokens_with_pos[i][0])
+            i += 1
+    return out
+
+
+def _keywords_from_tokens(tokens: Iterable[str]) -> Counter:
+    """Casefold + stopword-filter a token list into ``{keyword: count}``."""
+    counts: Counter = Counter()
+    for tok in tokens:
+        key = tok.casefold()
+        if key in _STOPWORDS:
+            continue
+        counts[key] += 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Unsupervised n-gram phrase detection (frequency + NPMI + branch entropy).
+# ---------------------------------------------------------------------------
+
+def detect_ngram_phrases(
+    line_tokens: List[List[str]],
+    *,
+    max_n: int = DEFAULT_MAX_NGRAM_N,
+    min_count: int = _NGRAM_MIN_COUNT,
+    npmi_threshold: float = _NGRAM_NPMI_THRESHOLD,
+    ent_threshold: float = _NGRAM_ENT_THRESHOLD,
+    stop_boundaries: frozenset = _CORE_STOP_BOUNDARIES,
+) -> List[dict]:
+    """Detect CJK compound phrases from tokenised lines.
+
+    Three pure-mathematical gates (no semantic prior, AGENTS.md 铁律 2):
+
+    * frequency: ``count >= min_count``
+    * solidity: ``min over splits { NPMI(left, right) }`` (Bouma 2009); a
+      single N (total token count) keeps NPMI bounded in ``[-1, 1]`` for
+      every split, including n>2 min-split.
+    * branch entropy: ``min(H_left, H_right) >= ent_threshold`` (nat).
+
+    Windows may mix ASCII and CJK tokens (so hybrid entities like 艾AA /
+    PDC主席 can be discovered). Detected phrases are rejoined by the
+    adjacent-pair rule (CJK+anything -> no separator; ASCII+ASCII -> single
+    space). Callers that use these phrases in a jieba user_dict only benefit
+    from CJK-only ones (jieba sees only CJK runs), so mixed phrases exist
+    for the post-tokenisation merge step (see :func:`merge_auto_phrases`).
+    """
+    uni: Counter = Counter()
+    for toks in line_tokens:
+        uni.update(toks)
+    total = sum(uni.values())
+    if total == 0:
+        return []
+    log_total = math.log(total)
+
+    @lru_cache(maxsize=None)
+    def _log_uni(t: str) -> float:
+        c = uni.get(t, 0)
+        return math.log(c) if c > 0 else math.nan
+
+    @lru_cache(maxsize=None)
+    def _log_c(c: int) -> float:
+        return math.log(c)
+
+    ngram_count: Counter = Counter()
+    left_ctx: "defaultdict[tuple, Counter]" = defaultdict(Counter)
+    right_ctx: "defaultdict[tuple, Counter]" = defaultdict(Counter)
+
+    for toks in line_tokens:
+        L = len(toks)
+        for i in range(L):
+            for n in range(2, max_n + 1):
+                if i + n > L:
+                    break
+                win = tuple(toks[i:i + n])
+                # No structural-particle boundary; mixed CJK/ASCII allowed
+                # so 艾AA / PDC主席 kind of hybrid entities get discovered.
+                if any(t in stop_boundaries for t in win):
+                    continue
+                ngram_count[win] += 1
+                if i > 0 and toks[i - 1] not in stop_boundaries:
+                    left_ctx[win][toks[i - 1]] += 1
+                if i + n < L and toks[i + n] not in stop_boundaries:
+                    right_ctx[win][toks[i + n]] += 1
+
+    def _entropy(counter: Counter) -> float:
+        tot = sum(counter.values())
+        if tot == 0:
+            return 0.0
+        h = 0.0
+        for c in counter.values():
+            pr = c / tot
+            h -= pr * math.log(pr)
+        return h
+
+    def _count(x) -> int:
+        return uni.get(x, 0) if isinstance(x, str) else ngram_count.get(x, 0)
+
+    def _log_count(x) -> float:
+        if isinstance(x, str):
+            return _log_uni(x)
+        c = ngram_count.get(x, 0)
+        return _log_c(c) if c > 0 else math.nan
+
+    def _npmi_pair(a, b, joint_c: int) -> float:
+        # Single-N NPMI: all P over ``total`` -> value stays in [-1, 1].
+        ca, cb = _count(a), _count(b)
+        if ca <= 0 or cb <= 0 or joint_c <= 0:
+            return -1.0
+        pmi = log_total + _log_c(joint_c) - _log_count(a) - _log_count(b)
+        denom = log_total - _log_c(joint_c)
+        if denom <= 0:
+            return 0.0
+        return pmi / denom
+
+    def _solidity(win: tuple, joint_c: int) -> float:
+        n = len(win)
+        if n < 2:
+            return 1.0
+        vals = []
+        for k in range(1, n):
+            left = win[0] if k == 1 else win[:k]
+            right = win[-1] if k == n - 1 else win[k:]
+            vals.append(_npmi_pair(left, right, joint_c))
+        return min(vals)
+
+    results: List[dict] = []
+    for win, c in ngram_count.items():
+        if c < min_count:
+            continue
+        sol = _solidity(win, c)
+        if sol < npmi_threshold:
+            continue
+        be = min(_entropy(left_ctx[win]), _entropy(right_ctx[win]))
+        if be < ent_threshold:
+            continue
+        results.append({
+            "phrase": _join_by_pair_rule(win),
+            "n": len(win),
+            "count": c,
+            "npmi": round(sol, 4),
+            "branch_ent": round(be, 4),
+        })
+    results.sort(key=lambda x: (-x["npmi"], -x["count"]))
+    return results
+
+
+def _load_auto_dict(conn, dir_id: int) -> Dict[str, dict]:
+    """Load a scope's persisted auto n-gram dictionary as ``{phrase: row}``."""
+    out: Dict[str, dict] = {}
+    for row in conn.execute(
+        "SELECT phrase, n, count, npmi, branch_ent FROM auto_ngram_dict "
+        "WHERE dir_id = ?",
+        (dir_id,),
+    ):
+        out[row["phrase"]] = {
+            "phrase": row["phrase"], "n": row["n"], "count": row["count"],
+            "npmi": row["npmi"], "branch_ent": row["branch_ent"],
+        }
+    return out
+
+
+def _persist_auto_dict(conn, dir_id: int, entries: Iterable[dict], now: str) -> None:
+    """Upsert ``entries`` into ``auto_ngram_dict`` for ``dir_id``."""
+    rows = [
+        (dir_id, e["phrase"], int(e["n"]), int(e["count"]),
+         float(e["npmi"]), float(e["branch_ent"]), now)
+        for e in entries
+    ]
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT INTO auto_ngram_dict
+            (dir_id, phrase, n, count, npmi, branch_ent, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(dir_id, phrase) DO UPDATE SET
+            n = excluded.n,
+            count = excluded.count,
+            npmi = excluded.npmi,
+            branch_ent = excluded.branch_ent,
+            updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+
+
 def _npmi(cooccur: int, df_a: int, df_b: int, n_chunks: int) -> Optional[float]:
     """Segment-level npmi (Bouma 2009); ``None`` when undefined.
 
@@ -341,6 +682,8 @@ def build_graph_index(
                                    "__pycache__", "dist", "build", "target",
                                    ".mypy_cache", ".pytest_cache"),
     replace: bool = True,
+    ngram_iters: int = DEFAULT_NGRAM_ITERS,
+    max_ngram_n: int = DEFAULT_MAX_NGRAM_N,
     progress: Optional[Callable[[str], None]] = None,
 ) -> BuildStats:
     """Build ``chunks`` / ``keyword_chunks`` / ``keyword_pairs`` for ``scope``.
@@ -409,17 +752,21 @@ def build_graph_index(
                 "DELETE FROM keyword_pairs WHERE dir_id = ? AND source = ?",
                 (scope_dir_id, CHUNK_COOCCUR_SOURCE),
             )
+            conn.execute(
+                "DELETE FROM auto_ngram_dict WHERE dir_id = ?",
+                (scope_dir_id,),
+            )
             conn.commit()
 
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-        # Scope-level co-occurrence accumulators. Chunk-df is the number of
-        # distinct chunks a keyword appears in; pair_count is the number of
-        # chunks two keywords co-occur in.
-        chunk_df: Counter = Counter()
-        pair_count: Counter = Counter()
-        n_chunks_with_keywords = 0
-
+        # ------------------------------------------------------------------
+        # Pass 0: enumerate files, split chunks, load chunk text into memory.
+        # The hybrid tokeniser needs corpus-global n-gram statistics, so we
+        # cannot stream chunk-by-chunk like the old regex path did. Each entry
+        # is (doc_id, rel_path, path, is_md, [(chunk, text), ...]).
+        # ------------------------------------------------------------------
+        docs: List[tuple] = []
         for path in iter_text_files(
             scope_path,
             max_file_bytes=max_file_bytes,
@@ -433,48 +780,93 @@ def build_graph_index(
                 stats.files_skipped += 1
                 stats.bump_reason("read_error")
                 continue
-
             try:
                 rel_path = str(path.resolve().relative_to(scope_path))
             except ValueError:
                 rel_path = str(path.resolve())
-
             is_md = path.suffix.lower() in _MARKDOWN_SUFFIXES
             chunks = split_chunks(
-                text,
-                mode=chunk_mode,
-                is_markdown=is_md,
-                max_chars=chunk_max_chars,
-                min_chars=chunk_min_chars,
+                text, mode=chunk_mode, is_markdown=is_md,
+                max_chars=chunk_max_chars, min_chars=chunk_min_chars,
             )
-
             doc_id = interner.doc_id(scope_dir_id, rel_path)
-            # First pass: extract per-chunk keyword counts (Python-only) so
-            # we can batch-intern every distinct keyword in this file with
-            # one round-trip before touching the DB again. On corpora with
-            # hundreds of thousands of distinct keywords this is the
-            # difference between O(distinct-kw) synchronous
-            # ``INSERT + SELECT`` pairs and O(files) batched statements.
+            docs.append((doc_id, rel_path, path, is_md, chunks))
+
+        # ------------------------------------------------------------------
+        # Pass 1: iterative auto n-gram dictionary refinement. Each iteration
+        # (a) builds a fresh jieba tokenizer seeded with the current dict,
+        # (b) tokenises every chunk (hybrid: ASCII regex + jieba CJK),
+        # (c) detects new CJK phrases and upserts them into the dict.
+        # Iterations converge fast (2 is the frozen default): iter 1 seeds the
+        # dict from a bare jieba, iter 2 re-tokenises with it so 章北海-type
+        # compounds collapse to single tokens. ``chunk_tokens`` from the LAST
+        # iteration feeds keyword_chunks materialisation.
+        # ------------------------------------------------------------------
+        auto_dict: Dict[str, dict] = {} if replace else _load_auto_dict(conn, scope_dir_id)
+        chunk_tokens: Dict[tuple, List[str]] = {}
+        iters = max(1, int(ngram_iters))
+        for iteration in range(iters):
+            jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
+            phrase_set = set(auto_dict.keys())
+            chunk_tokens = {}
+            line_token_lists: List[List[str]] = []
+            for doc_id, rel_path, path, is_md, chunks in docs:
+                for chunk in chunks:
+                    toks_pos = tokenize_hybrid_with_pos(chunk.text, jieba_tok)
+                    # Merge previously-discovered phrases (incl. mixed
+                    # CJK/ASCII like 艾AA that jieba alone cannot form).
+                    toks = merge_auto_phrases(
+                        toks_pos, phrase_set, max_n=max_ngram_n
+                    )
+                    chunk_tokens[(doc_id, chunk.chunk_id)] = toks
+                    if toks:
+                        line_token_lists.append(toks)
+            detected = detect_ngram_phrases(
+                line_token_lists, max_n=max_ngram_n,
+            )
+            for entry in detected:
+                auto_dict[entry["phrase"]] = entry
+            stats.ngram_iters_run = iteration + 1
+            if progress is not None:
+                progress(
+                    f"ngram iter {iteration + 1}/{iters}: "
+                    f"{len(auto_dict)} phrases, {len(chunk_tokens)} chunks tokenised"
+                )
+        _persist_auto_dict(conn, scope_dir_id, auto_dict.values(), now)
+        stats.ngram_phrases_written = len(auto_dict)
+
+        # ------------------------------------------------------------------
+        # Pass 2: materialise chunks / keyword_chunks / heading_docs and
+        # accumulate chunk-df + pair counts from the FINAL tokenisation.
+        # ------------------------------------------------------------------
+        chunk_df: Counter = Counter()
+        pair_count: Counter = Counter()
+        n_chunks_with_keywords = 0
+
+        for doc_id, rel_path, path, is_md, chunks in docs:
+            # Per-doc keyword counts derived from the FINAL chunk_tokens.
             per_chunk_kw: List[Tuple[int, Dict[str, int]]] = []
             file_distinct_kws: set = set()
             for chunk in chunks:
-                kw_counts = extract_chunk_keywords(chunk.text)
+                toks = chunk_tokens.get((doc_id, chunk.chunk_id), [])
+                kw_counts = _keywords_from_tokens(toks) if toks else Counter()
                 if kw_counts:
                     per_chunk_kw.append((chunk.chunk_id, kw_counts))
                     file_distinct_kws.update(kw_counts.keys())
                 else:
                     per_chunk_kw.append((chunk.chunk_id, {}))
-            kw_id_map = interner.kw_ids(sorted(file_distinct_kws)) if file_distinct_kws else {}
+            kw_id_map = (
+                interner.kw_ids(sorted(file_distinct_kws))
+                if file_distinct_kws else {}
+            )
 
             chunk_rows = []
             kw_chunk_rows = []
             file_had_keywords = False
-            for chunk, (chunk_id_probe, kw_counts) in zip(chunks, per_chunk_kw):
+            for chunk, (_probe, kw_counts) in zip(chunks, per_chunk_kw):
                 chunk_rows.append(
-                    (
-                        doc_id, chunk.chunk_id,
-                        chunk.start_line, chunk.end_line, chunk.char_count,
-                    )
+                    (doc_id, chunk.chunk_id,
+                     chunk.start_line, chunk.end_line, chunk.char_count)
                 )
                 if not kw_counts:
                     continue
@@ -485,7 +877,6 @@ def build_graph_index(
                         (kw_id_map[kw], doc_id, chunk.chunk_id, int(occ))
                     )
                     chunk_df[kw] += 1
-                # Pairwise chunk co-occurrence (canonical unordered pairs).
                 distinct_kws = sorted(kw_counts.keys())
                 for a, b in combinations(distinct_kws, 2):
                     pair_count[(a, b)] += 1
@@ -529,14 +920,8 @@ def build_graph_index(
                 for chapter in structure.chapters:
                     heading_path_key = " > ".join(chapter.heading_path)
                     head_rows.append(
-                        (
-                            doc_id,
-                            heading_path_key,
-                            chapter.chapter_id,
-                            int(chapter.start_line),
-                            int(chapter.end_line),
-                            now,
-                        )
+                        (doc_id, heading_path_key, chapter.chapter_id,
+                         int(chapter.start_line), int(chapter.end_line), now)
                     )
                 if head_rows:
                     conn.executemany(
@@ -556,9 +941,9 @@ def build_graph_index(
                     stats.heading_docs_written += len(head_rows)
                     stats.md_files_indexed += 1
 
-            if progress is not None and stats.files_scanned % 25 == 0:
+            if progress is not None and stats.files_indexed % 25 == 0 and stats.files_indexed:
                 progress(
-                    f"indexed {stats.files_indexed}/{stats.files_scanned} files "
+                    f"materialised {stats.files_indexed} files "
                     f"({stats.chunks_written} chunks, {stats.keyword_chunks_written} kw rows)"
                 )
 

@@ -30,7 +30,7 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
     "Topic :: Utilities",
 ]
-dependencies = ["typer>=0.9", "openai>=1.0"]
+dependencies = ["typer>=0.9", "openai>=1.0", "jieba>=0.42"]
 
 [project.urls]
 Homepage = "https://github.com/grga-tools/grga"

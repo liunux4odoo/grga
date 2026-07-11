@@ -279,3 +279,167 @@ def test_v1_counts_not_touched_by_build(sidecar_env, tmp_path):
         assert counts == 2
     finally:
         conn.close()
+
+
+
+# ---------------------------------------------------------------------------
+# Schema v6: hybrid tokeniser + auto n-gram detection tests
+# ---------------------------------------------------------------------------
+
+def test_tokenize_hybrid_preserves_ascii_code_idents():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    result = tokenize_hybrid(
+        "word. foo-bar, get_config. a.b.c... end- v1.2.3 c++ c#", tok
+    )
+    # Every ASCII code identifier survives whole (same as pre-v6 regex).
+    assert "foo-bar" in result
+    assert "get_config" in result
+    assert "a.b.c" in result
+    assert "v1.2.3" in result
+    assert "c++" in result
+    assert "c#" in result
+    # Trailing punctuation never sneaks in.
+    assert not any(t.endswith(".") or t.endswith("-") for t in result)
+
+
+def test_tokenize_hybrid_segments_cjk_via_jieba():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    result = tokenize_hybrid("章北海驾驶自然选择号", tok)
+    # Without an auto dict jieba splits 章北海 -> ['章', '北海'].
+    assert "章" in result
+    assert "北海" in result
+    # Function words are still emitted; kw filter drops them later.
+    assert "驾驶" in result
+    assert "自然选择" in result
+
+
+def test_tokenize_hybrid_honours_seeded_phrases():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer(["章北海", "自然选择号"])
+    result = tokenize_hybrid("章北海驾驶自然选择号", tok)
+    assert "章北海" in result
+    assert "自然选择号" in result
+    assert "章" not in result  # jieba now folds it into 章北海
+    assert "北海" not in result
+
+
+def test_join_by_pair_rule_all_four_adjacencies():
+    from grga.graph.build import _join_by_pair_rule
+    # CJK + CJK -> concat
+    assert _join_by_pair_rule(("章", "北海")) == "章北海"
+    # CJK + ASCII -> concat (Chinese typography puts them flush)
+    assert _join_by_pair_rule(("艾", "AA")) == "艾AA"
+    # ASCII + CJK -> concat
+    assert _join_by_pair_rule(("PDC", "主席")) == "PDC主席"
+    # ASCII + ASCII -> single space
+    assert _join_by_pair_rule(("nano", "center")) == "nano center"
+    # Mixed 3-gram
+    assert _join_by_pair_rule(("PDC", "主席", "说道")) == "PDC主席说道"
+    assert _join_by_pair_rule(("水滴", "V", "型")) == "水滴V型"
+    # 3 multi-char ASCII tokens -> two spaces (single-char ASCII never
+    # occurs: the regex ASCII branch requires >= 2 chars).
+    assert _join_by_pair_rule(("aa", "bb", "cc")) == "aa bb cc"
+
+
+def test_merge_auto_phrases_requires_positional_adjacency():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid_with_pos, merge_auto_phrases
+    tok = _new_jieba_tokenizer([])
+    phrases = {"艾AA"}
+    # Adjacent in source: 艾AA (no gap) -> should merge
+    pos = tokenize_hybrid_with_pos("维德对艾AA说", tok)
+    merged = merge_auto_phrases(pos, phrases)
+    assert "艾AA" in merged
+    # Separated by punctuation in source: "艾, AA" -> must NOT merge
+    pos2 = tokenize_hybrid_with_pos("艾, AA是谁", tok)
+    merged2 = merge_auto_phrases(pos2, phrases)
+    assert "艾AA" not in merged2
+    assert "艾" in merged2 and "AA" in merged2
+
+
+def test_detect_ngram_phrases_finds_repeated_compounds():
+    from grga.graph.build import detect_ngram_phrases
+    # Both left AND right contexts must vary so branch_entropy >= threshold.
+    lines = [
+        ["指挥官", "章", "北海", "驾驶", "飞船"],
+        ["士兵", "章", "北海", "看到", "地球"],
+        ["船员", "章", "北海", "登上", "舰桥"],
+        ["船长", "章", "北海", "开始", "训练"],
+        ["少校", "章", "北海", "命令", "开火"],
+    ]
+    out = detect_ngram_phrases(lines, max_n=3, ent_threshold=0.5)
+    phrases = {e["phrase"] for e in out}
+    assert "章北海" in phrases, f"expected phrase not detected: {phrases}"
+
+
+def test_detect_ngram_phrases_bounded_npmi():
+    from grga.graph.build import detect_ngram_phrases
+    # Perfect co-occurrence corpus — NPMI must stay in [-1, 1] for ALL n.
+    lines = [["甲", "乙", "丙"] for _ in range(5)]
+    out = detect_ngram_phrases(
+        lines, max_n=3, min_count=3,
+        npmi_threshold=-1.0, ent_threshold=-1.0,
+    )
+    for entry in out:
+        assert -1.0001 <= entry["npmi"] <= 1.0001, entry
+
+
+def test_build_populates_auto_ngram_dict(sidecar_env, tmp_path):
+    """End-to-end: enough repeated CJK compounds should land in auto_ngram_dict."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    # Build lines with 5 different left contexts and 5 different right contexts
+    # for "章北海" so both entropy sides clear the 1.0 nat gate.
+    body = (
+        "章北海驾驶飞船穿过战场\n"
+        "指挥官章北海命令开火射击\n"
+        "第二天章北海看到地球外面\n"
+        "船员章北海登上舰桥继续巡逻\n"
+        "士兵章北海开始训练新兵作战\n"
+    )
+    (scope / "santi.txt").write_text(body * 3, encoding="utf-8")
+    db = tmp_path / "graph.db"
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1, ngram_iters=2)
+    assert stats.ngram_iters_run == 2
+    assert stats.ngram_phrases_written >= 1
+
+    conn = connect(db)
+    try:
+        phrases = {r[0] for r in conn.execute(
+            "SELECT phrase FROM auto_ngram_dict")}
+    finally:
+        conn.close()
+    assert "章北海" in phrases, f"expected 章北海 in dict, got {sorted(phrases)}"
+
+
+def test_build_hybrid_keeps_code_identifiers(sidecar_env, tmp_path):
+    """Ensure the mainline switch to hybrid did not regress code search."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    (scope / "code.py").write_text(
+        "def foo_bar():\n"
+        "    return v1.2.3\n\n"
+        "def get_config():\n"
+        "    self.x = 'utf-8'\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "graph.db"
+    build_graph_index(scope, db_path=db, min_pair_count=1)
+
+    conn = connect(db)
+    try:
+        kws = {r[0] for r in conn.execute("SELECT kw FROM keywords")}
+    finally:
+        conn.close()
+    for ident in ("foo_bar", "v1.2.3", "get_config", "utf-8", "self.x"):
+        assert ident in kws, f"code identifier {ident!r} lost after hybrid switch"
+
+
+def test_build_ngram_iters_respected(sidecar_env, tmp_path):
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    (scope / "a.txt").write_text("hello world\n", encoding="utf-8")
+    db = tmp_path / "graph.db"
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1, ngram_iters=3)
+    assert stats.ngram_iters_run == 3

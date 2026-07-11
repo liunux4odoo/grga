@@ -44,7 +44,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Source markers for ``keyword_pairs`` rows. These are the *only* two
 # allowed values (plan HC4 / §3.3).
@@ -60,7 +60,7 @@ INTERN_TABLES = ("directories", "keywords", "docs")
 
 # Graph business tables owned by this module (post-migration shape).
 GRAPH_TABLES = ("chunks", "keyword_chunks", "keyword_pairs", "heading_docs",
-                "llm_extension_votes")
+                "llm_extension_votes", "auto_ngram_dict")
 
 
 def resolve_scope_key(directory: Optional[Union[str, Path]]) -> Optional[str]:
@@ -219,6 +219,16 @@ CREATE TABLE IF NOT EXISTS keyword_sources (
     updated_at TEXT,
     PRIMARY KEY (dir_id, kw_id, path, line_number)
 );
+CREATE TABLE IF NOT EXISTS auto_ngram_dict (
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    phrase TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    npmi REAL NOT NULL,
+    branch_ent REAL NOT NULL,
+    updated_at TEXT,
+    PRIMARY KEY (dir_id, phrase)
+);
 """
 
 _CREATE_INDEXES = """
@@ -238,6 +248,8 @@ CREATE INDEX IF NOT EXISTS idx_keyword_sources_kw
     ON keyword_sources (dir_id, kw_id);
 CREATE INDEX IF NOT EXISTS idx_votes_dir
     ON llm_extension_votes (dir_id, vote_count DESC);
+CREATE INDEX IF NOT EXISTS idx_auto_ngram_dir
+    ON auto_ngram_dict (dir_id);
 """
 
 
@@ -400,7 +412,7 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
             if os.path.getsize(db_path_str) >= 20 * 1024 * 1024:
                 _migration_announce(
                     db_path_str,
-                    "Upgrading index to schema v5 (one-time; typically a few seconds per 100 MB)",
+                    f"Upgrading index to schema v{SCHEMA_VERSION} (one-time; typically a few seconds per 100 MB)",
                 )
                 announced = True
         except OSError:
@@ -429,9 +441,16 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         if _needs_v3_to_v4(conn):
             _migrate_v3_to_v4_inplace(conn)
 
-        # Now v4 → v5 normalization. If the DB was already v4 (or we just
-        # brought it to v4), migrate to the intern-based layout.
-        _migrate_v4_to_v5_inplace(conn)
+        # v4 → v5 normalization. Only run when the DB is actually pre-v5 —
+        # running the intern-table rewrite on an already-v5 DB would fail
+        # on the pre-existing directories/keywords/docs tables.
+        if read_schema_version(conn) < 5:
+            _migrate_v4_to_v5_inplace(conn)
+
+        # v5 → v6 is purely additive (adds auto_ngram_dict + index). The
+        # ``_create_current_tables`` script uses ``IF NOT EXISTS`` throughout
+        # so it is idempotent on any post-v4 shape.
+        _create_current_tables(conn)
 
         # Stamp the version **inside** the transaction so shape + version
         # commit atomically.
@@ -442,7 +461,7 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         if announced:
             _migration_announce(
                 db_path_str,
-                "Schema v5 upgrade complete. Run `grga index vacuum` to reclaim disk space.",
+                f"Schema v{SCHEMA_VERSION} upgrade complete. Run `grga index vacuum` to reclaim disk space.",
             )
     except Exception:
         if owned_txn and conn.in_transaction:
