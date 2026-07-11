@@ -29,15 +29,19 @@ Segment boundary rules (plan §5.2, ``chars`` mode only):
 """
 from __future__ import annotations
 
+import hashlib
 import math
+import os
 import re
+import shutil
+import subprocess
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import combinations
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from grga.file_read import (
     RGA_SUPPORTED_SUFFIXES,
@@ -119,6 +123,10 @@ class BuildStats:
 
     scope: str
     chunk_mode: str = "line"
+    # ``mode`` = the incremental / full-scope mode this run executed.
+    # See docs/design/plan-2026-07-11-build-vs-rebuild.md §3.
+    mode: str = "rebuild"
+    refresh_ngram: str = "replace"
     files_scanned: int = 0
     files_indexed: int = 0
     files_skipped: int = 0
@@ -135,6 +143,23 @@ class BuildStats:
     md_files_indexed: int = 0
     ngram_phrases_written: int = 0
     ngram_iters_run: int = 0
+    # v7 incremental / life-cycle counters.
+    # In ``mode='build'`` these classify each on-disk file against the
+    # existing ``docs`` row (see :func:`_classify_doc`). In
+    # ``mode='rebuild'`` every scanned file counts as ``docs_added``
+    # because the index layer was cleared first.
+    docs_added: int = 0
+    docs_updated: int = 0
+    docs_metadata_only: int = 0
+    docs_removed: int = 0
+    docs_unchanged: int = 0
+    # ``ngram_dict_size`` is the total row count after the build;
+    # ``ngram_dict_added`` is the delta (rows first inserted this run).
+    ngram_dict_size: int = 0
+    ngram_dict_added: int = 0
+    ngram_dict_removed: int = 0  # always 0 for build/rebuild (only forget removes)
+    # Human-readable warnings surfaced in ``--json`` output.
+    warnings: List[str] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     reasons: Dict[str, int] = field(default_factory=dict)
 
@@ -145,6 +170,8 @@ class BuildStats:
         return {
             "scope": self.scope,
             "chunk_mode": self.chunk_mode,
+            "mode": self.mode,
+            "refresh_ngram": self.refresh_ngram,
             "files_scanned": self.files_scanned,
             "files_indexed": self.files_indexed,
             "files_skipped": self.files_skipped,
@@ -156,6 +183,15 @@ class BuildStats:
             "md_files_indexed": self.md_files_indexed,
             "ngram_phrases_written": self.ngram_phrases_written,
             "ngram_iters_run": self.ngram_iters_run,
+            "docs_added": self.docs_added,
+            "docs_updated": self.docs_updated,
+            "docs_metadata_only": self.docs_metadata_only,
+            "docs_removed": self.docs_removed,
+            "docs_unchanged": self.docs_unchanged,
+            "ngram_dict_size": self.ngram_dict_size,
+            "ngram_dict_added": self.ngram_dict_added,
+            "ngram_dict_removed": self.ngram_dict_removed,
+            "warnings": list(self.warnings),
             "elapsed_seconds": round(self.elapsed_seconds, 4),
             "reasons": dict(self.reasons),
         }
@@ -687,6 +723,179 @@ def _load_structure(path: Path):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Incremental build helpers (schema v7).
+# Design: docs/design/plan-2026-07-11-build-vs-rebuild.md
+# ---------------------------------------------------------------------------
+
+_HASH_DIGEST_SIZE = 16  # BLAKE2b-128 hex (32 chars) — collision-safe well beyond
+                        # per-scope doc counts we handle in practice.
+
+
+def _hash_output_lines(lines: List[str]) -> str:
+    """Return a stable BLAKE2b-128 hex digest of the joined rga output text.
+
+    Joins with a single ``\\n`` to match how the builder later reconstructs
+    ``text = "\\n".join(read_result.lines)`` before ``split_chunks``. The
+    hash is over the *rga output*, not the source bytes (see design doc
+    §4.1): the index consumes rga output, so change-detection must too.
+    """
+    h = hashlib.blake2b(digest_size=_HASH_DIGEST_SIZE)
+    h.update("\n".join(lines).encode("utf-8", errors="replace"))
+    return h.hexdigest()
+
+
+# Classification kinds returned by :func:`_classify_doc`. Kept as plain
+# strings so BuildStats reasons/counters can key on them without an enum
+# import cycle.
+DOC_UNCHANGED = "unchanged"
+DOC_METADATA_ONLY = "metadata_only"
+DOC_UPDATED = "updated"
+DOC_ADDED = "added"
+DOC_READ_ERROR = "read_error"
+
+
+def _classify_doc(
+    path: Path,
+    doc_row: Optional[Dict[str, object]],
+) -> Tuple[str, Optional["ReadResult"], Optional[str]]:  # noqa: F821 - forward ref
+    """Three-level change detection for a single file.
+
+    Returns ``(kind, read_result_or_none, new_hash_or_none)``:
+
+    * ``added`` — no prior row; caller must read + tokenise. Returns
+      ``(kind, read_result, hash)`` with rga already invoked.
+    * ``unchanged`` — size + mtime match the DB; skip everything.
+      ``read_result`` is ``None`` (rga never called).
+    * ``metadata_only`` — size/mtime moved but rga output hash matches
+      (touch / element-only metadata edit). Caller only refreshes
+      ``docs.mtime`` / ``docs.size``. Returns ``(kind, read_result, hash)``.
+    * ``updated`` — real content change; caller re-tokenises.
+      Returns ``(kind, read_result, hash)``.
+    * ``read_error`` — rga refused to read the file; caller skips.
+
+    Levels 1/2 correspond to the algorithm in design doc §5.
+    """
+    if doc_row is None:
+        # Level 3 direct: file is new, always read + hash.
+        read_result = read_file_lines_ex(path)
+        if read_result.source == ReadSource.FAILED:
+            return DOC_READ_ERROR, None, None
+        new_hash = _hash_output_lines(read_result.lines)
+        return DOC_ADDED, read_result, new_hash
+
+    # Level 1: cheapest. size + mtime match → skip.
+    try:
+        st = path.stat()
+    except OSError:
+        return DOC_READ_ERROR, None, None
+    prev_size = doc_row.get("size")
+    prev_mtime = doc_row.get("mtime")
+    if (prev_size is not None and prev_mtime is not None
+            and int(prev_size) == int(st.st_size)
+            and float(prev_mtime) == float(st.st_mtime)):
+        return DOC_UNCHANGED, None, None
+
+    # Level 2: metadata moved → read via rga, hash the OUTPUT.
+    read_result = read_file_lines_ex(path)
+    if read_result.source == ReadSource.FAILED:
+        return DOC_READ_ERROR, None, None
+    new_hash = _hash_output_lines(read_result.lines)
+    prev_hash = doc_row.get("content_hash")
+    if prev_hash is not None and str(prev_hash) == new_hash:
+        # Level 2 hit: touch / metadata change / stable rga output.
+        return DOC_METADATA_ONLY, read_result, new_hash
+
+    # Level 3: real content change.
+    return DOC_UPDATED, read_result, new_hash
+
+
+def _load_scope_doc_rows(
+    conn, scope_dir_id: int
+) -> Dict[str, Dict[str, object]]:
+    """Load ``{doc_path: {id, size, mtime, content_hash}}`` for a scope.
+
+    Used by ``mode='build'`` to classify each file on disk against the
+    stored record without an N+1 SELECT loop. ``id`` is included so
+    per-doc DELETEs (removed / updated) do not need a second lookup.
+    """
+    rows = conn.execute(
+        "SELECT id, doc_path, size, mtime, content_hash "
+        "FROM docs WHERE dir_id = ?",
+        (scope_dir_id,),
+    ).fetchall()
+    out: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        # sqlite3.Row supports dict-like access via keys.
+        out[str(row["doc_path"])] = {
+            "id": int(row["id"]),
+            "size": row["size"],
+            "mtime": row["mtime"],
+            "content_hash": row["content_hash"],
+        }
+    return out
+
+
+def _update_doc_metadata(
+    conn, doc_id: int, size: int, mtime: float, content_hash: str
+) -> None:
+    """Refresh the v7 change-detection columns for one doc."""
+    conn.execute(
+        "UPDATE docs SET size = ?, mtime = ?, content_hash = ? WHERE id = ?",
+        (int(size), float(mtime), str(content_hash), int(doc_id)),
+    )
+
+
+def _delete_doc_index_rows(conn, doc_ids: Sequence[int]) -> None:
+    """Delete every index-layer row for the given docs.
+
+    Wipes ``chunks`` / ``keyword_chunks`` / ``heading_docs`` for the doc
+    ids, then the ``docs`` rows themselves. Use this for the ``removed``
+    branch of incremental build (files gone from disk) and as the
+    "per-doc reset" step before re-inserting ``updated`` content (where
+    the docs row itself is kept, so pass an empty list to skip the last
+    stage or call :func:`_delete_doc_index_rows_keep_docs` instead).
+    """
+    if not doc_ids:
+        return
+    _delete_doc_index_rows_keep_docs(conn, doc_ids)
+    placeholders = ",".join("?" for _ in doc_ids)
+    conn.execute(
+        f"DELETE FROM docs WHERE id IN ({placeholders})",
+        list(doc_ids),
+    )
+
+
+def _delete_doc_index_rows_keep_docs(
+    conn, doc_ids: Sequence[int]
+) -> None:
+    """Wipe index-layer rows for ``doc_ids`` but keep the ``docs`` entries.
+
+    Used when a doc's content changed: we replace its chunks/keyword rows
+    but preserve the ``docs.id`` so all foreign keys remain valid.
+    """
+    if not doc_ids:
+        return
+    placeholders = ",".join("?" for _ in doc_ids)
+    ids = list(doc_ids)
+    conn.execute(
+        f"DELETE FROM keyword_chunks WHERE doc_id IN ({placeholders})",
+        ids,
+    )
+    conn.execute(
+        f"DELETE FROM chunks WHERE doc_id IN ({placeholders})",
+        ids,
+    )
+    conn.execute(
+        f"DELETE FROM heading_docs WHERE doc_id IN ({placeholders})",
+        ids,
+    )
+
+
+VALID_BUILD_MODES = ("build", "rebuild")
+VALID_REFRESH_NGRAM = ("never", "append", "replace")
+
+
 def build_graph_index(
     scope: Union[str, Path],
     *,
@@ -699,7 +908,9 @@ def build_graph_index(
     ignore_dirs: Iterable[str] = (".git", ".grga", ".venv", "node_modules",
                                    "__pycache__", "dist", "build", "target",
                                    ".mypy_cache", ".pytest_cache"),
-    replace: bool = True,
+    mode: str = "rebuild",
+    refresh_ngram: str = "replace",
+    replace: Optional[bool] = None,
     ngram_iters: int = DEFAULT_NGRAM_ITERS,
     max_ngram_n: int = DEFAULT_MAX_NGRAM_N,
     progress: Optional[Callable[[str], None]] = None,
@@ -707,42 +918,77 @@ def build_graph_index(
 ) -> BuildStats:
     """Build ``chunks`` / ``keyword_chunks`` / ``keyword_pairs`` for ``scope``.
 
+    Two top-level modes (design doc §3):
+
+    * ``mode="build"`` — incremental (schema v7). Uses the
+      ``docs.size/mtime/content_hash`` metadata to skip unchanged files,
+      re-tokenise only content-changed ones, and delete rows for files
+      that disappeared from disk. Vocabulary is monotonic-add.
+    * ``mode="rebuild"`` (default) — full-scope re-scan. Clears the
+      index + derived layers first, then re-indexes every file.
+
+    ``refresh_ngram`` controls the ``auto_ngram_dict`` asset layer:
+
+    * ``"never"`` — do not run n-gram detection; use whatever phrases
+      already live in ``auto_ngram_dict``.
+    * ``"append"`` — detect and union new phrases into the existing
+      dictionary. In ``mode="build"`` runs a single detection pass on
+      the changed files' tokens (per-doc local aggregate); in
+      ``mode="rebuild"`` runs the full multi-iter loop.
+    * ``"replace"`` — clear ``auto_ngram_dict`` for this scope first,
+      then run detection from scratch. Only meaningful with
+      ``mode="rebuild"``; combined with ``mode="build"`` this raises
+      ``ValueError``.
+
     Args:
         scope: root directory (or single file) to index.
         db_path: SQLite path; defaults to
-            ``grga.deep_search.DEFAULT_DB_PATH`` so v1 and v2 share the
-            same artefact.
-        chunk_mode: ``line`` (1 line = 1 chunk) or ``chars`` (multi-line
-            windows, see :func:`split_chunks`).
-        chunk_max_chars / chunk_min_chars: target char window for ``chars``.
-        min_pair_count: minimum chunk co-occurrence count for a pair to be
-            stored in ``keyword_pairs`` (sparsification, plan §5.4).
-        max_file_bytes: files larger than this are skipped. ``0`` (the
-            default) disables the size gate entirely; pass a positive value
-            for a defensive upper bound.
-        ignore_dirs: directory names pruned during the walk.
-        replace: when ``True`` (default) all pre-existing rows for this
-            scope in ``chunks`` / ``keyword_chunks`` / ``heading_docs`` and
-            the ``chunk_cooccur`` rows in ``keyword_pairs`` are cleared
-            first. ``llm_promoted`` pairs are never touched here.
-        progress: optional status callback (plain string, legacy).
-        on_event: optional structured progress callback. Emits dicts of
-            the form ``{"phase": <str>, ...}``. Phases: ``scan_start`` (no
-            total known), ``scan_advance`` (``current`` = files read so
-            far, ``path`` = current file), ``scan_end`` (``total_docs`` /
-            ``total_chunks``), ``ngram_iter_start`` (``iter`` / ``iters``
-            / ``chunks``), ``ngram_iter_end`` (same + ``phrases``),
-            ``materialise_start`` (``total_docs``), ``materialise_advance``
-            (``current`` = doc index just finished, ``total``, ``path``),
-            ``pairs_start`` (``candidate_pairs``), ``pairs_done``
-            (``pairs_written``), ``done`` (final ``BuildStats.to_dict()``).
-
-    Returns:
-        A :class:`BuildStats` describing the run.
+            ``grga.deep_search.DEFAULT_DB_PATH``.
+        chunk_mode / chunk_max_chars / chunk_min_chars / min_pair_count
+        / max_file_bytes / ignore_dirs: unchanged pre-refactor.
+        mode: ``"build"`` (incremental) or ``"rebuild"`` (full re-scan).
+        refresh_ngram: ``"never"`` / ``"append"`` / ``"replace"``.
+        replace: **deprecated**. Legacy compatibility flag: ``True``
+            maps to ``(mode="rebuild", refresh_ngram="replace")``,
+            ``False`` maps to ``(mode="rebuild",
+            refresh_ngram="append")``. When set, overrides both new
+            params. New callers should pass ``mode`` / ``refresh_ngram``
+            directly.
+        ngram_iters / max_ngram_n: detection tuning; ``ngram_iters`` is
+            capped to 1 automatically in ``mode="build"`` (see design
+            §3.1 step 3).
+        progress: optional status callback.
+        on_event: structured progress callback. Same phases as before
+            with two new fields on ``done``: ``mode``, ``refresh_ngram``.
     """
     if chunk_mode not in VALID_CHUNK_MODES:
         raise ValueError(
             f"unknown chunk_mode: {chunk_mode!r} (expected one of {VALID_CHUNK_MODES})"
+        )
+
+    # Back-compat: translate ``replace`` to the new params. This is the
+    # only path that emits a semantic change to legacy callers — they
+    # get the exact same behaviour they had before.
+    if replace is not None:
+        mode = "rebuild"
+        refresh_ngram = "replace" if replace else "append"
+
+    if mode not in VALID_BUILD_MODES:
+        raise ValueError(
+            f"unknown mode: {mode!r} (expected one of {VALID_BUILD_MODES})"
+        )
+    if refresh_ngram not in VALID_REFRESH_NGRAM:
+        raise ValueError(
+            f"unknown refresh_ngram: {refresh_ngram!r} "
+            f"(expected one of {VALID_REFRESH_NGRAM})"
+        )
+    if mode == "build" and refresh_ngram == "replace":
+        # "replace" on incremental would delete the vocabulary asset that
+        # incremental build depends on. Force the user to be explicit.
+        raise ValueError(
+            "mode='build' + refresh_ngram='replace' is not allowed. "
+            "Use `grga index forget --all` followed by `grga index build`, "
+            "or run `grga index rebuild --refresh-ngram=replace`."
         )
 
     from grga.deep_search import DEFAULT_DB_PATH
@@ -750,7 +996,10 @@ def build_graph_index(
     started = time.perf_counter()
     scope_path = Path(scope).expanduser().resolve()
     scope_key = str(scope_path)
-    stats = BuildStats(scope=scope_key, chunk_mode=chunk_mode)
+    stats = BuildStats(
+        scope=scope_key, chunk_mode=chunk_mode,
+        mode=mode, refresh_ngram=refresh_ngram,
+    )
 
     def _emit(phase: str, **fields) -> None:
         if on_event is None:
@@ -769,10 +1018,19 @@ def build_graph_index(
         ensure_schema(conn)
         interner = IdInterner(conn)
         scope_dir_id = interner.dir_id(scope_key)
-        if replace:
-            # Clear this scope's rows. ``keyword_chunks`` / ``chunks`` /
-            # ``heading_docs`` are keyed by ``doc_id`` which resolves through
-            # ``docs.dir_id``; delete via the docs belonging to this scope.
+
+        # ------------------------------------------------------------------
+        # Setup: load existing docs (build mode) and clear scope (rebuild).
+        # ------------------------------------------------------------------
+        existing_docs: Dict[str, Dict[str, object]] = {}
+        if mode == "build":
+            existing_docs = _load_scope_doc_rows(conn, scope_dir_id)
+
+        if mode == "rebuild":
+            # Full clear of index + derived layers for this scope.
+            # ``keyword_chunks`` / ``chunks`` / ``heading_docs`` are keyed
+            # by ``doc_id`` which resolves through ``docs.dir_id``; delete
+            # via the docs belonging to this scope.
             conn.execute(
                 "DELETE FROM keyword_chunks WHERE doc_id IN "
                 "(SELECT id FROM docs WHERE dir_id = ?)",
@@ -792,21 +1050,28 @@ def build_graph_index(
                 "DELETE FROM keyword_pairs WHERE dir_id = ? AND source = ?",
                 (scope_dir_id, CHUNK_COOCCUR_SOURCE),
             )
-            conn.execute(
-                "DELETE FROM auto_ngram_dict WHERE dir_id = ?",
-                (scope_dir_id,),
-            )
+            if refresh_ngram == "replace":
+                conn.execute(
+                    "DELETE FROM auto_ngram_dict WHERE dir_id = ?",
+                    (scope_dir_id,),
+                )
             conn.commit()
 
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         # ------------------------------------------------------------------
-        # Pass 0: enumerate files, split chunks, load chunk text into memory.
-        # The hybrid tokeniser needs corpus-global n-gram statistics, so we
-        # cannot stream chunk-by-chunk like the old regex path did. Each entry
-        # is (doc_id, rel_path, path, is_md, [(chunk, text), ...]).
+        # Pass 0: enumerate files. In build mode we also classify against
+        # existing docs and only read/tokenise the changed ones. The
+        # ``docs`` list entries are (doc_id, rel_path, path, is_md,
+        # chunks, kind, size, mtime, content_hash) — the last four are
+        # None for kinds we skip (unchanged). ``removed_doc_ids`` holds
+        # doc ids that must be deleted after Pass 2.
         # ------------------------------------------------------------------
-        docs: List[tuple] = []
+        docs: List[tuple] = []  # entries needing tokenisation
+        metadata_only_updates: List[Tuple[int, int, float, str]] = []
+        removed_doc_ids: List[int] = []
+        seen_rel_paths: set = set()
+
         _emit("scan_start")
         for path in iter_text_files(
             scope_path,
@@ -815,36 +1080,80 @@ def build_graph_index(
             on_skip=stats.bump_reason,
         ):
             stats.files_scanned += 1
-            # Dispatch on suffix inside :func:`read_file_lines_ex`: text
-            # files use plain open(), rga-supported binaries route through
-            # ``rga --passthru``. A ``FAILED`` source means we could not
-            # extract anything (missing rga, timeout, hard error) — treat
-            # it exactly like the legacy OSError branch.
-            read_result = read_file_lines_ex(path)
-            if read_result.source == ReadSource.FAILED:
-                stats.files_skipped += 1
-                stats.bump_reason("read_error")
-                continue
-            if read_result.source == ReadSource.RGA:
-                stats.rga_reads += 1
-            text = "\n".join(read_result.lines)
             try:
                 rel_path = str(path.resolve().relative_to(scope_path))
             except ValueError:
                 rel_path = str(path.resolve())
+            seen_rel_paths.add(rel_path)
+
+            prev_row = existing_docs.get(rel_path) if mode == "build" else None
+            kind, read_result, new_hash = _classify_doc(path, prev_row)
+
+            if kind == DOC_UNCHANGED:
+                stats.docs_unchanged += 1
+                continue
+            if kind == DOC_READ_ERROR:
+                stats.files_skipped += 1
+                stats.bump_reason("read_error")
+                continue
+            if kind == DOC_METADATA_ONLY:
+                # Content byte-identical (post-rga); refresh only the
+                # metadata columns so future Level 1 checks hit fast.
+                stats.docs_metadata_only += 1
+                try:
+                    st_size = path.stat().st_size
+                    st_mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_dir_id, rel_path)
+                metadata_only_updates.append(
+                    (doc_id, st_size, st_mtime, new_hash)
+                )
+                continue
+
+            # kind is DOC_ADDED or DOC_UPDATED — must tokenise.
+            assert read_result is not None
+            if read_result.source == ReadSource.RGA:
+                stats.rga_reads += 1
+            text = "\n".join(read_result.lines)
             is_md = path.suffix.lower() in _MARKDOWN_SUFFIXES
             chunks = split_chunks(
                 text, mode=chunk_mode, is_markdown=is_md,
                 max_chars=chunk_max_chars, min_chars=chunk_min_chars,
             )
-            doc_id = interner.doc_id(scope_dir_id, rel_path)
-            docs.append((doc_id, rel_path, path, is_md, chunks))
+            if kind == DOC_ADDED:
+                doc_id = interner.doc_id(scope_dir_id, rel_path)
+                stats.docs_added += 1
+            else:  # DOC_UPDATED
+                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_dir_id, rel_path)
+                stats.docs_updated += 1
+            try:
+                st_size = path.stat().st_size
+                st_mtime = path.stat().st_mtime
+            except OSError:
+                # Race: file went away between classify and stat. Treat
+                # as read_error so we neither insert stale rows nor break.
+                stats.files_skipped += 1
+                stats.bump_reason("read_error")
+                continue
+            docs.append((
+                doc_id, rel_path, path, is_md, chunks,
+                kind, st_size, st_mtime, new_hash,
+            ))
             _emit(
                 "scan_advance",
                 current=stats.files_scanned,
                 path=str(path),
                 chunks=len(chunks),
             )
+
+        # In build mode, detect removed files (in DB but not on disk).
+        if mode == "build":
+            for rel_path, row in existing_docs.items():
+                if rel_path in seen_rel_paths:
+                    continue
+                removed_doc_ids.append(int(row["id"]))
+            stats.docs_removed = len(removed_doc_ids)
 
         total_scanned_chunks = sum(len(entry[4]) for entry in docs)
         _emit(
@@ -854,18 +1163,33 @@ def build_graph_index(
         )
 
         # ------------------------------------------------------------------
-        # Pass 1: iterative auto n-gram dictionary refinement. Each iteration
-        # (a) builds a fresh jieba tokenizer seeded with the current dict,
-        # (b) tokenises every chunk (hybrid: ASCII regex + jieba CJK),
-        # (c) detects new CJK phrases and upserts them into the dict.
-        # Iterations converge fast (2 is the frozen default): iter 1 seeds the
-        # dict from a bare jieba, iter 2 re-tokenises with it so 章北海-type
-        # compounds collapse to single tokens. ``chunk_tokens`` from the LAST
-        # iteration feeds keyword_chunks materialisation.
+        # Pass 1: n-gram dictionary refinement.
+        # rebuild + append/replace: multi-iter as before.
+        # rebuild + never:          skip detection; tokenise once with
+        #                           current dict for Pass 2 consumption.
+        # build + append:           single detection iter on changed docs.
+        # build + never:            skip detection; tokenise changed docs.
         # ------------------------------------------------------------------
-        auto_dict: Dict[str, dict] = {} if replace else _load_auto_dict(conn, scope_dir_id)
+        prior_dict_size = int(conn.execute(
+            "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ?",
+            (scope_dir_id,),
+        ).fetchone()[0])
+
+        # Seed the working dict. ``refresh_ngram="replace"`` on rebuild
+        # already dropped the DB rows above, so this loads empty.
+        auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_dir_id)
+
         chunk_tokens: Dict[tuple, List[str]] = {}
-        iters = max(1, int(ngram_iters))
+        if mode == "rebuild" and refresh_ngram in ("append", "replace"):
+            iters = max(1, int(ngram_iters))
+        elif mode == "build" and refresh_ngram == "append":
+            iters = 1
+        else:
+            # ``refresh_ngram="never"`` for either mode. Still need one
+            # tokenisation pass so Pass 2 has ``chunk_tokens``.
+            iters = 1
+
+        run_detection = refresh_ngram in ("append", "replace")
         for iteration in range(iters):
             _emit(
                 "ngram_iter_start",
@@ -878,22 +1202,22 @@ def build_graph_index(
             phrase_set = set(auto_dict.keys())
             chunk_tokens = {}
             line_token_lists: List[List[str]] = []
-            for doc_id, rel_path, path, is_md, chunks in docs:
+            for entry in docs:
+                doc_id, rel_path, path, is_md, chunks = entry[:5]
                 for chunk in chunks:
                     toks_pos = tokenize_hybrid_with_pos(chunk.text, jieba_tok)
-                    # Merge previously-discovered phrases (incl. mixed
-                    # CJK/ASCII like 艾AA that jieba alone cannot form).
                     toks = merge_auto_phrases(
                         toks_pos, phrase_set, max_n=max_ngram_n
                     )
                     chunk_tokens[(doc_id, chunk.chunk_id)] = toks
                     if toks:
                         line_token_lists.append(toks)
-            detected = detect_ngram_phrases(
-                line_token_lists, max_n=max_ngram_n,
-            )
-            for entry in detected:
-                auto_dict[entry["phrase"]] = entry
+            if run_detection:
+                detected = detect_ngram_phrases(
+                    line_token_lists, max_n=max_ngram_n,
+                )
+                for d_entry in detected:
+                    auto_dict[d_entry["phrase"]] = d_entry
             stats.ngram_iters_run = iteration + 1
             if progress is not None:
                 progress(
@@ -907,20 +1231,29 @@ def build_graph_index(
                 chunks=len(chunk_tokens),
                 phrases=len(auto_dict),
             )
+        # Persist dictionary. In ``refresh_ngram="never"`` we still call
+        # this: the dict was loaded from DB unchanged and re-persisting
+        # is a no-op (INSERT OR REPLACE on the same rows).
         _persist_auto_dict(conn, scope_dir_id, auto_dict.values(), now)
         stats.ngram_phrases_written = len(auto_dict)
+        stats.ngram_dict_size = len(auto_dict)
+        stats.ngram_dict_added = max(0, len(auto_dict) - prior_dict_size)
 
         # ------------------------------------------------------------------
-        # Pass 2: materialise chunks / keyword_chunks / heading_docs and
-        # accumulate chunk-df + pair counts from the FINAL tokenisation.
+        # Pass 2: materialise chunks / keyword_chunks / heading_docs for
+        # the docs list. In build mode we replace the per-doc rows first
+        # (chunk counts can shrink on edit); rebuild already cleared the
+        # whole scope above.
         # ------------------------------------------------------------------
-        chunk_df: Counter = Counter()
-        pair_count: Counter = Counter()
-        n_chunks_with_keywords = 0
+        if mode == "build" and docs:
+            _delete_doc_index_rows_keep_docs(
+                conn, [entry[0] for entry in docs]
+            )
 
         _emit("materialise_start", total_docs=len(docs))
-        for doc_index, (doc_id, rel_path, path, is_md, chunks) in enumerate(docs, start=1):
-            # Per-doc keyword counts derived from the FINAL chunk_tokens.
+        for doc_index, entry in enumerate(docs, start=1):
+            doc_id, rel_path, path, is_md, chunks = entry[:5]
+            _, st_size, st_mtime, new_hash = entry[5:]
             per_chunk_kw: List[Tuple[int, Dict[str, int]]] = []
             file_distinct_kws: set = set()
             for chunk in chunks:
@@ -947,15 +1280,10 @@ def build_graph_index(
                 if not kw_counts:
                     continue
                 file_had_keywords = True
-                n_chunks_with_keywords += 1
                 for kw, occ in kw_counts.items():
                     kw_chunk_rows.append(
                         (kw_id_map[kw], doc_id, chunk.chunk_id, int(occ))
                     )
-                    chunk_df[kw] += 1
-                distinct_kws = sorted(kw_counts.keys())
-                for a, b in combinations(distinct_kws, 2):
-                    pair_count[(a, b)] += 1
 
             if chunk_rows:
                 conn.executemany(
@@ -1017,6 +1345,10 @@ def build_graph_index(
                     stats.heading_docs_written += len(head_rows)
                     stats.md_files_indexed += 1
 
+            # v7 metadata: refresh docs.size/mtime/content_hash so the
+            # next incremental build's Level 1 check can skip this file.
+            _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
+
             if progress is not None and stats.files_indexed % 25 == 0 and stats.files_indexed:
                 progress(
                     f"materialised {stats.files_indexed} files "
@@ -1029,46 +1361,58 @@ def build_graph_index(
                 path=str(path),
             )
 
-        # Materialise keyword_pairs (chunk_cooccur) from the accumulated
-        # pair counts + chunk-df, applying npmi and min_pair_count. Batch-
-        # intern every distinct keyword mentioned in a surviving pair with
-        # one call to ``kw_ids`` before materialising the row list, so this
-        # phase never blocks on N ``INSERT + SELECT`` round-trips.
-        n_chunks = n_chunks_with_keywords
-        surviving_pairs = [
-            (a, b, c) for (a, b), c in pair_count.items()
-            if c >= min_pair_count
-        ]
+        # Metadata-only refresh (touch / stable rga output).
+        for doc_id, st_size, st_mtime, new_hash in metadata_only_updates:
+            _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
+
+        # Remove docs that disappeared from disk.
+        if removed_doc_ids:
+            _delete_doc_index_rows(conn, removed_doc_ids)
+
+        # In rebuild mode, ``mode="rebuild"`` cleared everything and
+        # docs_added counts every scanned file. Populate the stats so
+        # the numbers make sense downstream. (For rebuild we do not
+        # know an "unchanged" concept; every file was reprocessed.)
+        if mode == "rebuild":
+            stats.docs_added = stats.files_indexed
+            # ``files_indexed`` excludes ``no_keywords`` docs. That is
+            # already reflected by ``docs.append``s above; keeping the
+            # numbers strictly by-classification.
+
+        # ------------------------------------------------------------------
+        # Pass 3: derived layer. Recompute keyword_pairs from the DB
+        # (single SQL scan + npmi arithmetic; see design §6). Uniform
+        # across both modes so unchanged docs' contributions are always
+        # accounted for.
+        # ------------------------------------------------------------------
+        candidate_count = int(conn.execute(
+            "SELECT COUNT(DISTINCT kw_id) FROM keyword_chunks kc "
+            "JOIN docs d ON d.id = kc.doc_id WHERE d.dir_id = ?",
+            (scope_dir_id,),
+        ).fetchone()[0])
         _emit(
             "pairs_start",
-            candidate_pairs=len(pair_count),
-            surviving_pairs=len(surviving_pairs),
+            candidate_pairs=candidate_count,
+            surviving_pairs=0,
         )
-        pair_rows = []
-        if surviving_pairs:
-            pair_kws = {kw for (a, b, _c) in surviving_pairs for kw in (a, b)}
-            pair_kw_ids = interner.kw_ids(sorted(pair_kws))
-            for a, b, c in surviving_pairs:
-                npmi = _npmi(c, chunk_df[a], chunk_df[b], n_chunks)
-                pair_rows.append(
-                    (scope_dir_id, pair_kw_ids[a], pair_kw_ids[b],
-                     float(c), npmi, now)
-                )
-        if pair_rows:
-            conn.executemany(
-                """
-                INSERT INTO keyword_pairs
-                    (dir_id, kw_a_id, kw_b_id, source,
-                     cooccur_count, npmi, updated_at)
-                VALUES (?, ?, ?, 'chunk_cooccur', ?, ?, ?)
-                ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
-                    cooccur_count = excluded.cooccur_count,
-                    npmi = excluded.npmi,
-                    updated_at = excluded.updated_at
-                """,
-                pair_rows,
+        stats.pairs_written = recompute_pairs(
+            conn, scope_dir_id, min_pair_count=min_pair_count, now=now,
+        )
+
+        # ------------------------------------------------------------------
+        # Toolchain fingerprint: emit a warning if it changed vs. the
+        # previous build recorded in ``meta``. Never a judgement input;
+        # design §7.
+        # ------------------------------------------------------------------
+        current_fp = _compute_toolchain_fingerprint()
+        prev_fp = _read_meta(conn, "toolchain_fingerprint")
+        if prev_fp is not None and prev_fp != current_fp:
+            stats.warnings.append(
+                "toolchain fingerprint changed since last build; "
+                "if rga-processed files show stale extractions, "
+                "run `grga index rebuild`."
             )
-            stats.pairs_written += len(pair_rows)
+        _write_meta(conn, "toolchain_fingerprint", current_fp)
 
         conn.commit()
     finally:
@@ -1078,3 +1422,376 @@ def build_graph_index(
     _emit("pairs_done", pairs_written=stats.pairs_written)
     _emit("done", stats=stats.to_dict())
     return stats
+
+
+# ---------------------------------------------------------------------------
+# keyword_pairs full recompute (schema v7 derived layer).
+#
+# Design: docs/design/plan-2026-07-11-build-vs-rebuild.md §6.
+# The pair table is derived (not asset): every build / rebuild / forget
+# rebuilds it from the current keyword_chunks + chunks contents so it stays
+# strictly consistent with the index layer.  ``llm_promoted`` rows are not
+# touched.
+# ---------------------------------------------------------------------------
+
+
+def recompute_pairs(
+    conn,
+    scope_dir_id: int,
+    *,
+    min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
+    now: Optional[str] = None,
+) -> int:
+    """Rematerialise ``keyword_pairs(chunk_cooccur)`` for one scope from DB.
+
+    Reads ``chunks`` / ``keyword_chunks`` for the scope, computes
+    ``chunk_df`` per keyword, ``n_chunks`` (denominator of segment NPMI),
+    and pair co-occurrence counts, filters by ``min_pair_count``, and
+    writes the rows back with ``INSERT OR REPLACE`` semantics.
+
+    Returns the number of pair rows written. Caller owns the transaction.
+    """
+    if now is None:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # 1. Clear chunk_cooccur rows for this scope (llm_promoted survives).
+    conn.execute(
+        "DELETE FROM keyword_pairs WHERE dir_id = ? AND source = ?",
+        (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+    )
+
+    # 2. Load per-chunk keyword membership. One row per (kw_id, chunk).
+    #    ``keyword_chunks`` PK is (kw_id, doc_id, chunk_id) so it is exactly
+    #    the "which kws live in which chunk" set we need.
+    rows = conn.execute(
+        "SELECT kc.kw_id, kc.doc_id, kc.chunk_id "
+        "FROM keyword_chunks kc "
+        "JOIN docs d ON d.id = kc.doc_id "
+        "WHERE d.dir_id = ?",
+        (scope_dir_id,),
+    ).fetchall()
+
+    # Group by chunk to enumerate pairs. This is the direct equivalent of
+    # the in-memory ``pair_count`` loop that lived inside build_graph_index
+    # Pass 2, but now sourced from DB so it is authoritative regardless
+    # of which docs were touched this build.
+    chunk_kw: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+    chunk_df_counter: Counter = Counter()
+    for row in rows:
+        kw_id = int(row["kw_id"])
+        doc_id = int(row["doc_id"])
+        chunk_id = int(row["chunk_id"])
+        chunk_kw[(doc_id, chunk_id)].append(kw_id)
+        chunk_df_counter[kw_id] += 1
+
+    pair_count: Counter = Counter()
+    for kws in chunk_kw.values():
+        distinct = sorted(set(kws))
+        if len(distinct) < 2:
+            continue
+        for a, b in combinations(distinct, 2):
+            pair_count[(a, b)] += 1
+
+    # 3. n_chunks = distinct chunks that contributed at least one keyword.
+    #    Matches the semantic used by build_graph_index (segment NPMI over
+    #    "chunks with a keyword") — see the pre-refactor code path where
+    #    ``n_chunks_with_keywords`` was the denominator.
+    n_chunks = len(chunk_kw)
+    if n_chunks == 0 or not pair_count:
+        return 0
+
+    surviving = [
+        (a, b, c) for (a, b), c in pair_count.items() if c >= min_pair_count
+    ]
+    if not surviving:
+        return 0
+
+    pair_rows = []
+    for a, b, c in surviving:
+        npmi = _npmi(c, chunk_df_counter[a], chunk_df_counter[b], n_chunks)
+        pair_rows.append(
+            (scope_dir_id, a, b, float(c), npmi, now)
+        )
+    conn.executemany(
+        """
+        INSERT INTO keyword_pairs
+            (dir_id, kw_a_id, kw_b_id, source,
+             cooccur_count, npmi, updated_at)
+        VALUES (?, ?, ?, 'chunk_cooccur', ?, ?, ?)
+        ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+            cooccur_count = excluded.cooccur_count,
+            npmi = excluded.npmi,
+            updated_at = excluded.updated_at
+        """,
+        pair_rows,
+    )
+    return len(pair_rows)
+
+
+# ---------------------------------------------------------------------------
+# forget() — asset-layer removal + cascade (schema v7).
+# Design: docs/design/plan-2026-07-11-build-vs-rebuild.md §2.1 + §3.3-3.4.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ForgetStats:
+    """Summary produced by :func:`forget_scope_phrases`."""
+
+    scope: str
+    ngram_dict_removed: int = 0
+    keyword_chunks_removed: int = 0
+    pairs_recomputed: int = 0
+    phrases_missing: List[str] = field(default_factory=list)
+    all_wiped: bool = False
+    elapsed_seconds: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "scope": self.scope,
+            "ngram_dict_removed": self.ngram_dict_removed,
+            "keyword_chunks_removed": self.keyword_chunks_removed,
+            "pairs_recomputed": self.pairs_recomputed,
+            "phrases_missing": list(self.phrases_missing),
+            "all_wiped": self.all_wiped,
+            "elapsed_seconds": round(self.elapsed_seconds, 4),
+        }
+
+
+def forget_scope_phrases(
+    scope: Union[str, Path],
+    *,
+    db_path: Union[str, Path, None] = None,
+    phrases: Optional[Sequence[str]] = None,
+    all_phrases: bool = False,
+    min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
+) -> ForgetStats:
+    """Remove entries from the asset layer with cascading cleanup.
+
+    Two modes (mutually exclusive):
+
+    * ``phrases=[...]`` — remove those specific phrases from
+      ``auto_ngram_dict``. For each phrase, delete the matching
+      ``keyword_chunks`` rows in this scope and the ``keyword_pairs``
+      edges with that phrase on either endpoint (``source='chunk_cooccur'``
+      only; ``llm_promoted`` is a separate asset). After cascades, rerun
+      :func:`recompute_pairs` because npmi depends on scope-global
+      ``chunk_df`` / ``n_chunks``.
+
+    * ``all_phrases=True`` — nuke every asset row for this scope:
+      the whole ``auto_ngram_dict`` + the index layer three tables +
+      ``chunk_cooccur`` pairs. Equivalent to the legacy
+      ``build --replace`` reset step (does NOT re-run a build). Follow
+      with ``grga index build`` to relearn from scratch.
+
+    ``phrases`` that do not exist in ``auto_ngram_dict`` for this scope
+    are collected into ``ForgetStats.phrases_missing`` and skipped
+    silently — this makes the CLI safe to run repeatedly.
+    """
+    if bool(phrases) == bool(all_phrases):
+        raise ValueError(
+            "forget_scope_phrases: pass either phrases=[...] or "
+            "all_phrases=True (exactly one)"
+        )
+
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    started = time.perf_counter()
+    scope_path = Path(scope).expanduser().resolve()
+    scope_key = str(scope_path)
+    stats = ForgetStats(scope=scope_key)
+    if all_phrases:
+        stats.all_wiped = True
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    conn = connect(target_db)
+    try:
+        ensure_schema(conn)
+        interner = IdInterner(conn)
+        scope_dir_id_ro = interner.dir_id_ro(scope_key)
+        if scope_dir_id_ro is None:
+            # Scope was never indexed; nothing to do. Return empty stats
+            # rather than raising so scripts are idempotent.
+            stats.elapsed_seconds = time.perf_counter() - started
+            return stats
+        scope_dir_id = scope_dir_id_ro
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if all_phrases:
+                # Wipe the whole asset + index + derived for this scope.
+                doc_ids = [
+                    int(row[0]) for row in conn.execute(
+                        "SELECT id FROM docs WHERE dir_id = ?",
+                        (scope_dir_id,),
+                    ).fetchall()
+                ]
+                # Count what we are about to delete for observability.
+                stats.keyword_chunks_removed = int(conn.execute(
+                    "SELECT COUNT(*) FROM keyword_chunks "
+                    "WHERE doc_id IN (SELECT id FROM docs WHERE dir_id = ?)",
+                    (scope_dir_id,),
+                ).fetchone()[0])
+                stats.ngram_dict_removed = int(conn.execute(
+                    "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ?",
+                    (scope_dir_id,),
+                ).fetchone()[0])
+                _delete_doc_index_rows(conn, doc_ids)
+                conn.execute(
+                    "DELETE FROM keyword_pairs "
+                    "WHERE dir_id = ? AND source = ?",
+                    (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+                )
+                conn.execute(
+                    "DELETE FROM auto_ngram_dict WHERE dir_id = ?",
+                    (scope_dir_id,),
+                )
+                stats.pairs_recomputed = 0
+            else:
+                # Per-phrase cascade. Resolve kw_ids in one batch.
+                phrase_list = list(dict.fromkeys(phrases or []))
+                if not phrase_list:
+                    conn.execute("COMMIT")
+                    stats.elapsed_seconds = time.perf_counter() - started
+                    return stats
+                # keywords are stored casefolded; auto_ngram_dict phrases
+                # are stored as-detected (mixed CJK + case). The kw
+                # lookup should follow the ``kw_ids_ro`` (casefold) path
+                # for keyword_chunks / keyword_pairs; ``auto_ngram_dict``
+                # DELETE keys on ``phrase`` verbatim. Both lookups need
+                # to be independent.
+                kw_lookup = interner.kw_ids_ro([p.casefold() for p in phrase_list])
+                # Detect phrases that exist in the dict for this scope.
+                placeholders = ",".join("?" for _ in phrase_list)
+                dict_present = {
+                    str(row[0]) for row in conn.execute(
+                        f"SELECT phrase FROM auto_ngram_dict "
+                        f"WHERE dir_id = ? AND phrase IN ({placeholders})",
+                        [scope_dir_id, *phrase_list],
+                    ).fetchall()
+                }
+                for phrase in phrase_list:
+                    if phrase not in dict_present and (
+                        phrase.casefold() not in kw_lookup
+                    ):
+                        stats.phrases_missing.append(phrase)
+                # Cascade delete keyword_chunks rows for the matching kw
+                # ids in this scope.
+                target_kw_ids = [
+                    kw_lookup[p.casefold()] for p in phrase_list
+                    if p.casefold() in kw_lookup
+                ]
+                if target_kw_ids:
+                    kw_placeholders = ",".join("?" for _ in target_kw_ids)
+                    stats.keyword_chunks_removed = int(conn.execute(
+                        f"SELECT COUNT(*) FROM keyword_chunks "
+                        f"WHERE kw_id IN ({kw_placeholders}) "
+                        f"AND doc_id IN (SELECT id FROM docs WHERE dir_id = ?)",
+                        [*target_kw_ids, scope_dir_id],
+                    ).fetchone()[0])
+                    conn.execute(
+                        f"DELETE FROM keyword_chunks "
+                        f"WHERE kw_id IN ({kw_placeholders}) "
+                        f"AND doc_id IN (SELECT id FROM docs WHERE dir_id = ?)",
+                        [*target_kw_ids, scope_dir_id],
+                    )
+                    conn.execute(
+                        f"DELETE FROM keyword_pairs "
+                        f"WHERE dir_id = ? AND source = ? "
+                        f"AND (kw_a_id IN ({kw_placeholders}) "
+                        f"OR kw_b_id IN ({kw_placeholders}))",
+                        [scope_dir_id, CHUNK_COOCCUR_SOURCE,
+                         *target_kw_ids, *target_kw_ids],
+                    )
+                # Delete the asset-layer rows.
+                if dict_present:
+                    dict_list = sorted(dict_present)
+                    dp = ",".join("?" for _ in dict_list)
+                    conn.execute(
+                        f"DELETE FROM auto_ngram_dict "
+                        f"WHERE dir_id = ? AND phrase IN ({dp})",
+                        [scope_dir_id, *dict_list],
+                    )
+                    stats.ngram_dict_removed = len(dict_list)
+                # Recompute pairs (n_chunks / chunk_df changed).
+                stats.pairs_recomputed = recompute_pairs(
+                    conn, scope_dir_id, min_pair_count=min_pair_count,
+                )
+
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+            raise
+    finally:
+        conn.close()
+
+    stats.elapsed_seconds = time.perf_counter() - started
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Toolchain fingerprint (schema v7 meta table).
+# Design: docs/design/plan-2026-07-11-build-vs-rebuild.md §4.2 + §7.
+# Only ever produces a warning; never a judgement input.
+# ---------------------------------------------------------------------------
+
+
+def _binary_version(binary: str, args: Sequence[str] = ("--version",)) -> str:
+    """Return the first-line version output of ``binary``, or ``''``.
+
+    Best-effort: any exception (missing binary, timeout, non-zero exit)
+    resolves to the empty string so ``toolchain_fingerprint`` degrades to
+    "ignore this component" rather than crashing the build.
+    """
+    path = shutil.which(binary)
+    if not path:
+        return ""
+    try:
+        result = subprocess.run(
+            [path, *args],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except Exception:
+        return ""
+    first_line = (result.stdout or result.stderr or "").splitlines()
+    return first_line[0].strip() if first_line else ""
+
+
+def _compute_toolchain_fingerprint() -> str:
+    """Return a stable digest over the versions of every external tool.
+
+    Included: ``rga``, ``pandoc``, ``pdftotext``, ``rga-preproc``. Order
+    is fixed so a re-run on the same machine yields the same hash. Any
+    binary that is missing contributes an empty string, which is still
+    stable across runs. See design §4.2.
+    """
+    parts = [
+        _binary_version("rga"),
+        _binary_version("pandoc"),
+        _binary_version("pdftotext", args=("-v",)),
+        _binary_version("rga-preproc"),
+    ]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _read_meta(conn, key: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (key,)
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def _write_meta(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+

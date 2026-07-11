@@ -44,7 +44,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Source markers for ``keyword_pairs`` rows. These are the *only* two
 # allowed values (plan HC4 / §3.3).
@@ -151,7 +151,21 @@ CREATE TABLE IF NOT EXISTS docs (
     id INTEGER PRIMARY KEY,
     dir_id INTEGER NOT NULL REFERENCES directories(id),
     doc_path TEXT NOT NULL,
+    size INTEGER,
+    mtime REAL,
+    content_hash TEXT,
     UNIQUE(dir_id, doc_path)
+);
+"""
+
+# Global key/value metadata (schema v7). Currently holds
+# ``toolchain_fingerprint`` used by ``grga index build`` to emit a
+# "toolchain changed, consider rebuild" warning. Never a judgement input —
+# see docs/design/plan-2026-07-11-build-vs-rebuild.md §7.
+_CREATE_META_TABLE = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 """
 
@@ -277,11 +291,35 @@ def _create_current_tables(conn: sqlite3.Connection) -> None:
     """
     for stmt in _split_sql(
         _CREATE_INTERN_TABLES
+        + _CREATE_META_TABLE
         + _CREATE_KEYWORD_PAIRS
         + _CREATE_GRAPH_TABLES
         + _CREATE_INDEXES
     ):
         conn.execute(stmt)
+
+
+def _ensure_docs_v7_columns(conn: sqlite3.Connection) -> None:
+    """Add the schema v7 ``docs`` incremental-build columns if missing.
+
+    ``size`` / ``mtime`` / ``content_hash`` back the three-level change
+    detection in ``grga index build`` (see
+    docs/design/plan-2026-07-11-build-vs-rebuild.md §4-5). On a v6 database
+    the ``docs`` table predates them; add them idempotently. SQLite's
+    ``ALTER TABLE ADD COLUMN`` has no portable ``IF NOT EXISTS``, so probe
+    ``PRAGMA table_info`` first. New columns default to NULL, which the
+    builder reads as "no prior record" → full processing on first pass.
+    """
+    if not _table_exists(conn, "docs"):
+        return
+    cols = _table_columns(conn, "docs")
+    for name, decl in (
+        ("size", "INTEGER"),
+        ("mtime", "REAL"),
+        ("content_hash", "TEXT"),
+    ):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE docs ADD COLUMN {name} {decl}")
 
 
 def _migration_announce(db_path: Optional[str], stage: str) -> None:
@@ -447,10 +485,15 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         if read_schema_version(conn) < 5:
             _migrate_v4_to_v5_inplace(conn)
 
-        # v5 → v6 is purely additive (adds auto_ngram_dict + index). The
-        # ``_create_current_tables`` script uses ``IF NOT EXISTS`` throughout
-        # so it is idempotent on any post-v4 shape.
+        # v5 → v6 was purely additive (auto_ngram_dict + its index).
+        # v6 → v7 is also additive: docs gains size/mtime/content_hash
+        # incremental-build metadata, plus a global meta key/value table.
+        # The ``_create_current_tables`` script uses ``IF NOT EXISTS``
+        # throughout so it is idempotent on any post-v4 shape; the docs
+        # column adds need a separate helper because ``ALTER TABLE`` has
+        # no portable ``IF NOT EXISTS`` clause.
         _create_current_tables(conn)
+        _ensure_docs_v7_columns(conn)
 
         # Stamp the version **inside** the transaction so shape + version
         # commit atomically.

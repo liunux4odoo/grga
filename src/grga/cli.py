@@ -982,28 +982,124 @@ def index_build_command(
     chunk_min_chars: int = typer.Option(300, "--chunk-min-chars", help="Target lower bound on chars per chunk (chars mode)."),
     min_pair_count: int = typer.Option(3, "--min-pair-count", help="Minimum chunk co-occurrence count for a pair to be stored."),
     max_file_kb: int = typer.Option(0, "--max-file-kb", help="Skip files larger than this many KiB. 0 (default) = no size limit."),
-    ngram_iters: int = typer.Option(2, "--ngram-iters", help="Auto n-gram detection passes (default 2 = frozen convergence point). 1 seeds a bare jieba dict; 2+ iteratively refines. Each iter re-tokenises the whole scope."),
+    ngram_iters: int = typer.Option(2, "--ngram-iters", help="Auto n-gram detection passes (used only by `rebuild`; `build` ignores this and does at most one detection iteration on changed files)."),
     max_ngram_n: int = typer.Option(4, "--max-ngram-n", help="Longest n-gram considered by auto-phrase detection (default 4, covers e.g. 联合国行星防御理事会 / 赫尔辛根默斯肯 / PDC常任理事国)."),
-    append: bool = typer.Option(False, "--append", help="Accumulate onto existing rows instead of replacing the scope."),
+    refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy for build: `append` runs single-iter detection on changed files and unions new phrases into the dict; `never` skips detection and reuses the existing dict as-is."),
+    append: bool = typer.Option(False, "--append", help="[deprecated] Same effect as the new default (`build` is incremental and never clears the vocabulary). Prints a deprecation warning."),
+    replace: bool = typer.Option(False, "--replace", help="[deprecated] Wipe the scope's asset + index + derived layers and rebuild from scratch. Use `grga index forget --all` followed by `grga index build`, or `grga index rebuild --refresh-ngram=replace` instead."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
-    """Build chunk-level graph tables (``chunks`` / ``keyword_chunks`` /
-    ``keyword_pairs[chunk_cooccur]`` / ``auto_ngram_dict``) for a scope.
+    """Incrementally update the graph index for a scope.
 
-    Tokenisation is hybrid: ASCII code identifiers (``foo-bar`` /
-    ``v1.2.3`` / ``c++``) are preserved by regex; CJK runs are segmented
-    by jieba with a per-scope auto-discovered n-gram dictionary (frequency
-    + NPMI + branch entropy). See ``docs/design/tokenization.md``.
+    Only files whose ``(size, mtime)`` differ from the DB metadata are
+    read; among those, only ones whose rga output hash actually changed
+    are re-tokenised. Files that disappeared from disk have their rows
+    removed. The n-gram vocabulary (``auto_ngram_dict``) is
+    monotonic-add — nothing here removes phrases. Use ``grga index
+    forget`` for that. See ``docs/design/plan-2026-07-11-build-vs-rebuild.md``.
 
-    ``keyword_counts`` (v1 heat table) is never modified. ``llm_promoted``
-    rows in ``keyword_pairs`` are preserved; only ``chunk_cooccur`` rows
-    for this scope are rewritten. ``--append`` keeps the existing auto
-    dictionary and merges new discoveries into it.
+    ``keyword_pairs`` is always fully recomputed from the current
+    ``keyword_chunks`` (cheap: single SQL scan + npmi arithmetic).
     """
-    from grga.graph.build import VALID_CHUNK_MODES, build_graph_index
+    from grga.graph.build import (
+        VALID_CHUNK_MODES, VALID_REFRESH_NGRAM, build_graph_index,
+    )
 
     if chunk_mode not in VALID_CHUNK_MODES:
         typer.echo(f"--chunk-mode must be one of: {', '.join(VALID_CHUNK_MODES)}", err=True)
+        raise typer.Exit(2)
+    if refresh_ngram not in ("append", "never"):
+        typer.echo(
+            f"--refresh-ngram for `build` must be one of: append, never "
+            f"(got {refresh_ngram!r}); use `grga index rebuild --refresh-ngram=replace` "
+            "to clear the vocabulary.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if max_ngram_n < 2:
+        typer.echo("--max-ngram-n must be >= 2", err=True)
+        raise typer.Exit(2)
+
+    # Deprecated flag translation.
+    mode = "build"
+    if append:
+        typer.echo(
+            "[deprecated] --append is now the default `build` behaviour; the "
+            "flag is a no-op and will be removed in a future release.",
+            err=True,
+        )
+    if replace:
+        typer.echo(
+            "[deprecated] `build --replace` is replaced by "
+            "`grga index rebuild --refresh-ngram=replace`. Falling back to "
+            "the equivalent rebuild for now.",
+            err=True,
+        )
+        mode = "rebuild"
+        refresh_ngram = "replace"
+
+    rich_on_event = None
+    rich_close = None
+    text_progress = None
+    if not json_output:
+        rich_on_event, rich_close = _make_index_build_progress()
+        if rich_on_event is None:
+            text_progress = lambda message: typer.echo(message, err=True)
+
+    try:
+        stats = build_graph_index(
+            scope,
+            db_path=str(db_path) if db_path else None,
+            chunk_mode=chunk_mode,
+            chunk_max_chars=chunk_max_chars,
+            chunk_min_chars=chunk_min_chars,
+            min_pair_count=min_pair_count,
+            max_file_bytes=max_file_kb * 1024,
+            ngram_iters=ngram_iters,
+            max_ngram_n=max_ngram_n,
+            mode=mode,
+            refresh_ngram=refresh_ngram,
+            progress=text_progress,
+            on_event=rich_on_event,
+        )
+    finally:
+        if rich_close is not None:
+            rich_close()
+    if json_output:
+        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        return
+    _echo_build_summary(stats, max_file_kb=max_file_kb)
+
+
+@index_app.command("rebuild")
+def index_rebuild_command(
+    scope: Path = typer.Option(Path("."), "--scope", "-s", "--directory", "-d", exists=True, resolve_path=True, help="Directory (or file) to rebuild. Same scope semantics as `grga index build`."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    chunk_mode: str = typer.Option("line", "--chunk-mode", help="Chunk granularity."),
+    chunk_max_chars: int = typer.Option(600, "--chunk-max-chars"),
+    chunk_min_chars: int = typer.Option(300, "--chunk-min-chars"),
+    min_pair_count: int = typer.Option(3, "--min-pair-count"),
+    max_file_kb: int = typer.Option(0, "--max-file-kb"),
+    ngram_iters: int = typer.Option(2, "--ngram-iters", help="Full-scope detection passes. Default 2 (the frozen convergence point from experiments/autongram_2026_07_11)."),
+    max_ngram_n: int = typer.Option(4, "--max-ngram-n"),
+    refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy: `append` keeps the existing dict and adds newly detected phrases (default); `never` skips detection and uses the current dict as-is; `replace` clears the dict first, then relearns from the full scope."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
+):
+    """Full-scope re-scan: clear the index + derived layers, then rebuild.
+
+    The n-gram vocabulary (asset layer) is preserved by default and
+    refreshed with newly detected phrases. Use ``--refresh-ngram=replace``
+    to also clear the vocabulary. See design doc §3.2.
+    """
+    from grga.graph.build import (
+        VALID_CHUNK_MODES, VALID_REFRESH_NGRAM, build_graph_index,
+    )
+
+    if chunk_mode not in VALID_CHUNK_MODES:
+        typer.echo(f"--chunk-mode must be one of: {', '.join(VALID_CHUNK_MODES)}", err=True)
+        raise typer.Exit(2)
+    if refresh_ngram not in VALID_REFRESH_NGRAM:
+        typer.echo(f"--refresh-ngram must be one of: {', '.join(VALID_REFRESH_NGRAM)}", err=True)
         raise typer.Exit(2)
     if ngram_iters < 1:
         typer.echo("--ngram-iters must be >= 1", err=True)
@@ -1018,7 +1114,6 @@ def index_build_command(
     if not json_output:
         rich_on_event, rich_close = _make_index_build_progress()
         if rich_on_event is None:
-            # Non-TTY / rich unavailable: keep the legacy plain-text log lines.
             text_progress = lambda message: typer.echo(message, err=True)
 
     try:
@@ -1032,7 +1127,8 @@ def index_build_command(
             max_file_bytes=max_file_kb * 1024,
             ngram_iters=ngram_iters,
             max_ngram_n=max_ngram_n,
-            replace=not append,
+            mode="rebuild",
+            refresh_ngram=refresh_ngram,
             progress=text_progress,
             on_event=rich_on_event,
         )
@@ -1042,8 +1138,73 @@ def index_build_command(
     if json_output:
         typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
         return
+    _echo_build_summary(stats, max_file_kb=max_file_kb)
+
+
+@index_app.command("forget")
+def index_forget_command(
+    scope: Path = typer.Option(Path("."), "--scope", "-s", "--directory", "-d", exists=True, resolve_path=True, help="Scope whose asset layer to touch. The resolved absolute path must match a previously indexed scope key; missing scopes are a no-op."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    phrase: List[str] = typer.Option([], "--phrase", "-p", help="Phrase to forget from `auto_ngram_dict`. Repeatable. Cascades: removes `keyword_chunks` rows for the matching keyword id in this scope and `keyword_pairs` edges with the phrase on either endpoint, then re-derives `keyword_pairs` (npmi depends on scope-global n_chunks / chunk_df)."),
+    all_phrases: bool = typer.Option(False, "--all", help="Wipe the whole scope: `auto_ngram_dict` + index layer three tables + `keyword_pairs.chunk_cooccur`. `llm_promoted` pairs are preserved. Follow with `grga index build` to rebuild from scratch."),
+    min_pair_count: int = typer.Option(3, "--min-pair-count", help="Passed to the pair re-derivation step."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
+):
+    """Remove phrases from the vocabulary (asset layer) with cascading cleanup.
+
+    This is the manual, minimum-viable form of the future decay mechanism.
+    Design doc §3.3-3.4.
+    """
+    from grga.graph.build import forget_scope_phrases
+
+    if bool(phrase) == bool(all_phrases):
+        typer.echo(
+            "forget: pass either --phrase <X> (repeatable) or --all "
+            "(exactly one)",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    try:
+        stats = forget_scope_phrases(
+            scope,
+            db_path=str(db_path) if db_path else None,
+            phrases=phrase if phrase else None,
+            all_phrases=all_phrases,
+            min_pair_count=min_pair_count,
+        )
+    except ValueError as exc:
+        typer.echo(f"forget: {exc}", err=True)
+        raise typer.Exit(2)
+
+    if json_output:
+        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        return
+    if stats.all_wiped:
+        typer.echo(
+            f"forget --all: cleared {stats.ngram_dict_removed} phrases + "
+            f"{stats.keyword_chunks_removed} keyword_chunks rows for "
+            f"{stats.scope} in {stats.elapsed_seconds:.2f}s"
+        )
+    else:
+        typer.echo(
+            f"forget: removed {stats.ngram_dict_removed} phrases, "
+            f"{stats.keyword_chunks_removed} keyword_chunks rows, "
+            f"re-derived {stats.pairs_recomputed} pair rows "
+            f"in {stats.elapsed_seconds:.2f}s"
+        )
+        if stats.phrases_missing:
+            typer.echo(
+                f"  {len(stats.phrases_missing)} phrase(s) not found: "
+                + ", ".join(stats.phrases_missing[:5])
+                + (" ..." if len(stats.phrases_missing) > 5 else "")
+            )
+
+
+def _echo_build_summary(stats, *, max_file_kb: int) -> None:
+    """Shared human-readable summary for `build` / `rebuild`."""
     typer.echo(
-        f"indexed {stats.files_indexed}/{stats.files_scanned} files, "
+        f"[{stats.mode}] indexed {stats.files_indexed}/{stats.files_scanned} files, "
         f"{stats.chunks_written} chunks, "
         f"{stats.keyword_chunks_written} keyword-chunk rows, "
         f"{stats.pairs_written} pair rows, "
@@ -1052,6 +1213,21 @@ def index_build_command(
         f"{stats.ngram_phrases_written} auto-ngram phrases "
         f"({stats.ngram_iters_run} iters) in {stats.elapsed_seconds:.2f}s"
     )
+    if stats.mode == "build":
+        typer.echo(
+            f"  incremental: +{stats.docs_added} added, "
+            f"~{stats.docs_updated} updated, "
+            f"={stats.docs_unchanged} unchanged, "
+            f"-{stats.docs_removed} removed, "
+            f"{stats.docs_metadata_only} metadata-only"
+        )
+    if stats.ngram_dict_added:
+        typer.echo(
+            f"  vocabulary: +{stats.ngram_dict_added} new phrases "
+            f"(dict size: {stats.ngram_dict_size})"
+        )
+    for warning in stats.warnings:
+        typer.echo(f"warning: {warning}", err=True)
     if stats.files_scanned == 0:
         reasons = stats.reasons
         too_large = reasons.get("too_large", 0)
