@@ -122,20 +122,102 @@ The experiment tried two whole-window rules (`"".join` and `" ".join`) and
 both failed; **only** the pair-by-pair rule handles all four adjacencies
 correctly. See `experiments/.../FINDINGS.md` F11.
 
-## 5. Per-scope dictionary contract
+## 5. Per-scope dictionary contract & the three-layer model
 
-`auto_ngram_dict` is keyed by `(dir_id, phrase)`. Two implications callers
-must be aware of:
+> **Update 2026-07-11**: this section supersedes the earlier `--append` /
+> `--replace` framing. The dictionary is now the **only** asset in the
+> system; co-occurrence data is derived. Full design in
+> `docs/design/plan-2026-07-11-build-vs-rebuild.md`.
 
-1. **Scope determines both search scope AND vocabulary.** Indexing a
-   Chinese novel and a Rust codebase into the same scope will mix their
-   dictionaries; index them under different scopes to keep vocabularies
-   apart. The post-mortem 2026-07-10 §4.2 established that "hub is a
-   sub-corpus attribute" — the dictionary follows the same reasoning.
-2. `--append` preserves the current dictionary and merges new discoveries
-   in (`INSERT OR REPLACE` on `(dir_id, phrase)`, so stats freshen on
-   re-detection). `--replace` (the default) wipes the scope's dict rows
-   along with its `keyword_chunks` / `chunks` rows.
+### 5.1 What "knowledge" means in grga
+
+The graph does **not** try to be a 1:1 record of the corpus. It records
+two things:
+
+- **The ability to recognise domain entities** (`auto_ngram_dict`) — a
+  learned resource, persistent across corpus churn.
+- **Observations of how those entities co-occur in the current corpus**
+  (`keyword_pairs`) — a derived read of the ability applied to whatever
+  files exist right now.
+
+Human analogy: knowing that "面壁计划" is a proper noun (ability, keep)
+vs. counting how often it appears in this book (observation, recompute).
+
+### 5.2 Three layers, three lifetimes
+
+| Layer | Tables | Lifetime |
+|---|---|---|
+| **Asset** | `auto_ngram_dict` | Monotonic-add. Only `grga index forget` removes rows (see §5.4). |
+| **Index** | `chunks` / `keyword_chunks` / `heading_docs` | Strictly synced with disk. File removed → its rows removed. |
+| **Derived** | `keyword_pairs` (`source='chunk_cooccur'`) | Rematerialised in full on every `build` / `rebuild` from the current index layer. |
+
+**Why `keyword_pairs` cannot be a stored asset**: `npmi` normalises by
+`n_chunks`, which is a scope-global count. Any chunk add/remove shifts
+`n_chunks` → every pair's `npmi` needs to move. Storing snapshots would
+mean "judging new facts with a stale world model". The derived layer
+pays this cost cheaply because a full recompute is one SQL `GROUP BY`
+plus a batch npmi computation — **no re-tokenisation involved**.
+
+### 5.3 Scope determines both search scope AND vocabulary
+
+`auto_ngram_dict` is keyed by `(dir_id, phrase)`. Indexing a Chinese
+novel and a Rust codebase into the same scope mixes their vocabularies;
+index them under different scopes to keep vocabularies apart. The
+post-mortem 2026-07-10 §4.2 established that "hub is a sub-corpus
+attribute" — the dictionary follows the same reasoning.
+
+### 5.4 Verbs that touch the asset layer
+
+| Verb | Effect on dictionary | Effect on index + derived |
+|---|---|---|
+| `grga index build` (default = incremental) | Union-add newly detected phrases (`--refresh-ngram=append`, default). `never` skips detection. | Only files that changed are re-tokenised; `keyword_pairs` full-recomputed. |
+| `grga index rebuild` | `--refresh-ngram=append` (default) reruns full multi-iteration detection and unions; `replace` clears first; `never` keeps as-is. | Index + derived cleared and rebuilt from disk. |
+| `grga index forget --phrase X [--phrase Y ...]` | Removes named phrases from the dictionary (see cascade below). | Cascaded: rows in `keyword_chunks` (matching kw) and `keyword_pairs.chunk_cooccur` (with X on either side) deleted in the same transaction; pairs recomputed. |
+| `grga index forget --all` | Wipes the whole dictionary for the scope. | Also clears index + derived (equivalent to the old `build --replace`). |
+
+**Cascade rule**: removing phrase `X` from `auto_ngram_dict` in scope
+`dir_id` triggers, in the same `BEGIN IMMEDIATE` transaction:
+
+```sql
+DELETE FROM keyword_chunks
+WHERE kw_id = (SELECT id FROM keywords WHERE kw = ?)
+  AND doc_id IN (SELECT id FROM docs WHERE dir_id = ?);
+
+DELETE FROM keyword_pairs
+WHERE dir_id = ? AND source = 'chunk_cooccur'
+  AND (kw_a_id = ? OR kw_b_id = ?);
+
+DELETE FROM auto_ngram_dict WHERE dir_id = ? AND phrase = ?;
+```
+
+`llm_promoted` pairs are **not** touched — they are a separate asset
+maintained by `grga index promote`.
+
+### 5.5 Incremental-build acceptable costs
+
+Under incremental `build`, n-gram detection only sees tokens from the
+**changed files** (per-doc local aggregate), not the whole scope. This
+is a deliberate cost:
+
+- **Cost A** — samples on the changed subset can miss phrases that
+  need scope-wide counts to pass `min_count` / `branch_entropy`. Because
+  the dictionary is monotonic-add, a missed phrase means "not learned
+  yet, will be picked up by the next rebuild" — never "existing good
+  phrase deleted".
+- **Cost B** — when the dictionary gains new phrases, only *changed*
+  files get re-tokenised with the new dictionary; unchanged files keep
+  their old `keyword_chunks`. If a new phrase also occurs in unchanged
+  files, edge distributions have a local, monotone inconsistency until
+  `rebuild`.
+
+Both are bounded and healed by any `rebuild --refresh-ngram=append`.
+
+### 5.6 The old `--append` / `--replace` flags
+
+- `build --append` → default `build` (increment).
+- `build --replace` → `forget --all` + `build`. During transition a
+  `build --replace` alias may map to this composition with a deprecation
+  warning; do not add new callers.
 
 ## 6. Iteration count
 

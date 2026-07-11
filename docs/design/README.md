@@ -9,6 +9,10 @@
 | [`v2-design.md`](./v2-design.md) | **设计规范**（North Star） | 想理解"为什么这样设计" / 决策依据 / API 契约 |
 | [`v2-plan.md`](./v2-plan.md) | **开发计划**（可执行） | 想知道"现在做什么" / 任务分解 / 风险防护 |
 | [`decisions.md`](./decisions.md) | **决策日志** | 想知道具体功能/接口的决策依据（含拒绝的候选） |
+| [`tokenization.md`](./tokenization.md) | **分词与 auto n-gram 契约** | 改分词管线 / 加自动短语检测 / 讨论 stop-word 或 n-gram 门槛前必读 |
+| [`plan-2026-07-11-build-vs-rebuild.md`](./plan-2026-07-11-build-vs-rebuild.md) | **增量 build / rebuild / forget 规范** | 改 `grga index` 生命周期 / 改 `auto_ngram_dict` 或 `keyword_pairs` 语义前必读；含知识资产三层分工与决策推理链 |
+| [`plan-2026-07-11-chunk-migration.md`](./plan-2026-07-11-chunk-migration.md) | Schema v4 chunk 迁移记录 | 追溯 chunk 级共现模型来源 |
+| [`plan-2026-07-11-schema-v5-normalization.md`](./plan-2026-07-11-schema-v5-normalization.md) | Schema v5 规范化记录 | 追溯 `docs`/`keywords`/`directories` intern 表来源 |
 | [`graph-l2-postmortem-2026-07-10.md`](./graph-l2-postmortem-2026-07-10.md) | **L2 hub 处理复盘 + 三个心智模型** | 想改共现图 hub / df 接口 / 加评价性字段前必读;含"能力诚实 vs 道德选择"reframe |
 
 ## 🎯 快速上手（Code Agent 阅读顺序）

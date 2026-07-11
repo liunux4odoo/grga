@@ -4,6 +4,66 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-11 · 增量 build / rebuild / forget + 知识资产分层
+
+**Plan step**：`grga index build` 的增量化需求 + `auto_ngram_dict` /
+`keyword_pairs` 生命周期定性。完整规范见
+`docs/design/plan-2026-07-11-build-vs-rebuild.md`。
+
+**Decision**：
+
+1. **本体论**：知识 = 识别专名的能力（词汇表），不是语料的一比一记忆。
+   `auto_ngram_dict` 是系统里**唯一资产**；`keyword_pairs` 共现关系是
+   能力作用于当前语料的**观察记录**，属派生层。
+2. **三层分工**：资产层 `auto_ngram_dict`（只增不减，仅 `forget` 可删）/
+   索引层 `chunks`+`keyword_chunks`+`heading_docs`（与磁盘严格同步）/
+   派生层 `keyword_pairs`（每次 build/rebuild 全量重算，cooccur+npmi 同步
+   物化，查询直读）。
+3. **四动词**：`build`（默认增量，词汇表只增，`--refresh-ngram=append`）/
+   `rebuild`（保留词汇表校准索引，`--refresh-ngram` 默认 append）/
+   `forget --phrase X`（遗忘短语 + 级联清理，衰减最简版）/
+   `forget --all`（核弹，= 旧 `build --replace`）。
+4. **文件变化三级判定**：`(size,mtime)` 快过 → rga 输出 `content_hash`
+   慢过 → 变了才重分词。`docs` 表加 `size/mtime/content_hash`，
+   `SCHEMA_VERSION` 6→7。
+5. **mtime 以原文件为准、content_hash 以 rga 输出为准**：索引层消费的是
+   rga 输出，判定基准必须是输出而非原字节（PDF 改元数据但抽取文本不变 →
+   正确跳过）。
+6. **工具链变化只提醒不强制重验**：`toolchain_fingerprint` 变化时 emit
+   warning，用户自行 rebuild。强制重验成本确定、收益概率性，杠杆反了。
+7. **npmi 是派生层不是快照**：归一化基线 `n_chunks` 随语料漂移，每次全量
+   重算保证与索引层一致，避免"用过期世界模型判新事实"。
+
+**Rationale**：
+
+- **杠杆方向**：往共用基础库加负担、给 N 个 caller 减负是反杠杆。共现关系
+  可从 `keyword_chunks` 纯 SQL 派生，不必存为独立资产（存储零增量）。
+- **心智模型最简**：只有一个资产（词汇表），其他都是当前状态的派生。C4
+  立场（rebuild 只保留词汇表）避免了 C1/C2/C3 的幽灵证据与 counter 桶
+  存储代价。
+- **拒绝 per-doc 检测的理由被修正**：三条理由两条不成立（见主文档 §13.1）；
+  增量 build 用 per-doc 局部聚合是有意识的代价，被"词汇表只增不减"吸收。
+- **未来衰减机制**作用点在资产层，复用 `forget` 级联路径，与 rebuild 正交。
+
+**Impact**：
+
+- 新增 `docs/design/plan-2026-07-11-build-vs-rebuild.md`（633 行完整规范
+  含 §13 决策推理链）。
+- `docs/design/tokenization.md` §5 重写为三层模型（资产/索引/派生）+ 级联
+  规则 + 增量代价 A/B。
+- `experiments/autongram_2026_07_11/QUESTIONS.md` NQ4 部分限定（全 scope
+  聚合退居 rebuild 路径，增量 build 用局部聚合）。
+- 代码层待落地：`schema.py`（v7 迁移）、`build.py`（增量核心 + 级联 +
+  pair 重算）、`cli.py`（build 增量默认 + rebuild/forget 子命令）。
+
+**Files**：
+- `docs/design/plan-2026-07-11-build-vs-rebuild.md`（新增）
+- `docs/design/tokenization.md`（§5 重写）
+- `experiments/autongram_2026_07_11/QUESTIONS.md`（NQ4 更新）
+- `docs/design/README.md`（索引更新）
+
+---
+
 ## 2026-07-11 · Caller-first 定位精修与 `related` API 契约扩展
 
 **Plan step**:2026-07-10 postmortem 之后与外部旁观者(小Q agent)对话

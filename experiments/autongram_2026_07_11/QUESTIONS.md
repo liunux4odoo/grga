@@ -36,6 +36,23 @@ topk_usability_santi.md v1 用严判据得 60%（临界），v2 修复后用宽�
 
 多文件场景（代码库）下正确性 OK。**主干迁移时保持此口径**。
 
+> **更新 2026-07-11（部分限定，非撤销）**：全量重扫路径下本结论依然正确。
+> 但 `docs/design/plan-2026-07-11-build-vs-rebuild.md` 引入了**增量 build**
+> 新语义：`grga index build`（默认增量）时 detection 只对*变化文件*的 token
+> 跑（per-doc 局部聚合），以换取文件级增量。这不是推翻 NQ4——**全 scope
+> 聚合退居 `grga index rebuild --refresh-ngram=append`（默认）/ `replace`**，
+> 是校准路径的口径；增量 build 是新增的次级路径。
+>
+> 之所以能接受增量 build 的局部聚合：词汇表**只增不减**（C4 立场），局部
+> 检测漏掉的短语最多"这次没学"，不会破坏已有好词，下次 rebuild 用全 scope
+> 聚合兜底。决策链见该文档 §13.1（"曾拒绝 per-doc 的三条理由两条不成立"）
+> 与 §13.7。
+>
+> 附带修正：当初"拒绝 per-doc 检测"给的理由里，"`min_count=3` 单文件过严"
+> 与"三体拆章样本不足"两条不成立——前者是绝对计数门槛的固有问题（全 scope
+> 下同样无通用值），后者前提错误（三体是单文件，per-doc≡per-scope）。真正
+> 成立的只有"大量小文件目录下 NPMI 方差大"，且被词汇表只增的性质吸收。
+
 ### NQ5：ASCII 短语拼接分隔符 —— **已修复 ✅**
 
 **问题**：原实现 `phrase = "".join(win)` 对 CJK 正确但 ASCII 会拼错（`nano` + `center` → `nanocenter`，jieba 认不出）。
