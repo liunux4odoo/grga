@@ -61,6 +61,26 @@ def test_extract_chunk_keywords_drops_stopwords():
     assert "grga" in counts
 
 
+def test_extract_chunk_keywords_strips_trailing_punctuation():
+    counts = extract_chunk_keywords(
+        "word. foo-bar, get_config. a.b.c... end- v1.2.3 c++ c#"
+    )
+    # Trailing '.' / '-' are no longer glued onto tokens.
+    assert counts["word"] == 1
+    assert counts["foo-bar"] == 1
+    assert counts["get_config"] == 1
+    assert counts["a.b.c"] == 1
+    assert counts["end"] == 1
+    # Legit '+' / '#' endings still preserved; internal '.' still allowed.
+    assert counts["v1.2.3"] == 1
+    assert counts["c++"] == 1
+    assert counts["c#"] == 1
+    # No polluted variants leak through.
+    assert "word." not in counts
+    assert "end-" not in counts
+    assert "a.b.c..." not in counts
+
+
 def test_split_chunks_line_mode():
     text = "line one here\nline two here\n\nline four here"
     chunks = split_chunks(text, mode="line")

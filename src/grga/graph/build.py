@@ -41,7 +41,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 from grga.graph.schema import CHUNK_COOCCUR_SOURCE, connect, ensure_schema
 
 # The tokeniser deliberately allows CJK code points alongside ASCII words.
-_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+#.-]{1,39}|[\u4e00-\u9fff]{2,20}")
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+#.-]{0,38}[A-Za-z0-9_+#]|[\u4e00-\u9fff]{2,20}")
 
 # Markdown ATX heading, e.g. ``## Title``.
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
