@@ -246,14 +246,16 @@ def _seed_docs(
 def _seed_docs_batch(
     conn: sqlite3.Connection,
     folded_keywords: Sequence[str],
-) -> Dict[str, tuple[Dict[str, int], Dict[str, set]]]:
+) -> Dict[str, Dict[str, int]]:
     """Batched :func:`_seed_docs` — one scan resolves many keywords at once.
 
     Used by :func:`compute_suspected_polysemy_batch` so annotating the top-N
     preview bridge keywords costs a single ``keyword IN (...)`` query instead
     of N separate full scans of ``keyword_chunks``. Returns
-    ``{folded_keyword: (docs_by_scope, seed_docs_by_scope)}`` for every
-    requested keyword that has at least one row.
+    ``{folded_keyword: docs_by_scope}`` for every requested keyword that has
+    at least one row. Only ``docs_by_scope`` is materialised — the polysemy
+    heuristic resolves per-scope co-occurrence via a separate chunk-level
+    self-join and never consumes the seed doc set.
     """
     uniq = [kw for kw in dict.fromkeys(folded_keywords) if kw]
     if not uniq:
@@ -268,13 +270,12 @@ def _seed_docs_batch(
         """,
         uniq,
     ).fetchall()
-    out: Dict[str, tuple[Dict[str, int], Dict[str, set]]] = {}
+    out: Dict[str, Dict[str, int]] = {}
     for row in rows:
         kw = _fold(row["kw"])
-        docs_by_scope, seed_docs_by_scope = out.setdefault(kw, ({}, {}))
+        docs_by_scope = out.setdefault(kw, {})
         directory = row["directory"]
         docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
-        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
     return out
 
 
@@ -320,7 +321,7 @@ def compute_suspected_polysemy_batch(
     for kw in dict.fromkeys(folded):
         if not kw:
             continue
-        docs_by_scope, seed_docs_by_scope = seed_map.get(kw, ({}, {}))
+        docs_by_scope = seed_map.get(kw, {})
         if not docs_by_scope:
             out[kw] = False
             continue
