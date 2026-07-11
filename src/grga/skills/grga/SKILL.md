@@ -90,7 +90,10 @@ breaking change; `--implicit-or` restores OR). `--max-total N` (default
 1000) caps total hits and sets `truncated`.
 
 Use when: the caller has a concrete query string (keywords, boolean
-expression, or a phrase). The always-first verb in any grga workflow.
+expression, or a phrase). The first **evidence-fetching** verb — but
+note that for open-ended queries a **T2-bookend `related` sweep on the
+raw seed keywords precedes T1** (see the workflow section below); T1 is
+"first to fetch text", not "first thing that runs."
 
 ### 2. `grga expand <path>:<line> --level <lines|paragraph|chapter|document> --json`
 
@@ -149,24 +152,52 @@ adjust / escalate*, and only pay for the next tier when the current one
 is genuinely insufficient. grga verbs never loop on their own — the
 caller owns every decision.
 
+**T2 has two distinct roles**, and conflating them is the single most
+common way callers defeat the loop:
+
+- **T2-bookend `related`** — a mandatory cheap sweep at *session open*
+  and *pre-answer*. Not conditional on any signal. See "T2 bookends"
+  below for the exact rules.
+- **T2-escalate expand/related** — reactive widening triggered from
+  inside T1 by a stuck signal or a specific caller judgment.
+
 ```
-T0 probe  → (evaluate size)   → tighten/loosen  or  proceed
-T1 search → (evaluate hits)   → T2 or T3        or  answer
-T2 expand + related → (evaluate coverage) → answer  or  T3
-T3 suggest → (evaluate LLM output) → loop back to T0/T1
+[session open]
+    T2-bookend related  ← MANDATORY, from raw seed keywords
+         │
+         ▼
+    T0 probe  → (evaluate size)   → tighten/loosen  or  proceed
+    T1 search → (evaluate hits)   → T2-escalate or T3  or  candidate answer
+    T2-escalate expand/related    → (as needed, signal-driven)
+    T3 suggest                    → (evaluate LLM output) → loop back to T0/T1
+         │
+         ▼
+[pre-answer]
+    T2-bookend related  ← MANDATORY, from final seed set
+         │
+         ▼
+    return answer
 ```
 
 Cost order: **probe ≪ search ≪ expand ≪ related ≪ suggest**. Exhaust the
-cheaper tiers before spending on the next.
+cheaper *escalation* tiers before spending on the next; the two
+**T2-bookends are not part of that cost trade-off** — they are the
+scaffolding around the whole loop, and a T2-bookend `related` is still
+cheaper than one wrong-vocabulary T1 or a false-completeness answer.
 
 Per-tier purpose:
 
 - **T0 probe** — size the query cheaply; decide tighten / loosen /
   proceed before paying for `search`.
 - **T1 search** — get real evidence with position + structure metadata;
-  most tasks end here.
-- **T2 expand + related** — widen: more text around a hit (`expand`) or
-  other documents on the same topic (`related`).
+  T1 alone is not a terminal state — the pre-answer T2-bookend still
+  runs before any answer is committed.
+- **T2-escalate expand + related** — widen mid-session: more text around
+  a hit (`expand`) or other documents on the same topic (`related`).
+  Signal-driven; see the escalation table.
+- **T2-bookend `related`** — mandatory cheap sweeps at session-open (raw
+  seeds) and pre-answer (final seeds). Not signal-driven; runs on every
+  open-ended task. See "T2 bookends" below.
 - **T3 suggest** — LLM reflection; only tier that costs tokens, capped
   at 1-2 escalations per task.
 - **Refeed** — at task boundary, `grga index promote` graduates
@@ -181,25 +212,122 @@ Guardrail across tiers: **always re-probe an LLM-reformulated query
 before searching it** — it is unvalidated and can be either empty or
 explosive.
 
-### T2 loop-shape: three touchpoints in a caller session
+### T2 bookends: two mandatory sweeps + one reactive touchpoint
 
-The tier ladder above describes each verb's per-call role. Orthogonal to
-that, **T2 `related`** tends to fire at three moments in a caller
-session:
+The tier ladder above shows *where* the two T2-bookends sit. This section
+is their **binding definition**. The two bookends are **not optional and
+not signal-gated** — they run on every open-ended search task regardless
+of how good T1 looked.
 
-1. **Session open** — before the first T1 `search`, run one T2 from the
-   caller's raw seed keywords to expand into a working seed set. Cheapest
-   place to catch alias / vocabulary gaps before they compound.
-2. **Mid-session** — T1-driven. T2 stays reactive:
+1. **Session-open bookend (MANDATORY).** Before the first T1 `search`,
+   run one T2 `related` from the caller's raw seed keywords to expand
+   into a working seed set. This is the cheapest place to catch alias /
+   vocabulary gaps before they compound through every downstream probe.
+   Skip **only** when the corpus is tiny and hand-familiar (a handful of
+   your own notes) — and say so explicitly when you skip.
+
+2. **Mid-session touchpoint (reactive, this is T2-escalate).** T1-driven,
+   not mandatory:
    - On stuck signal V (Vocabulary-mismatch, see below) → escalate to T2.
-   - Caller may invoke T2 anytime by judgment (e.g. a suspected alias
-     surfacing in hits, a topic shift widening the seed set).
-3. **Pre-commit** — before committing an answer, run one T2 from the
-   final seed set to catch missed aliases or adjacent evidence. This is
-   the last cheap defense against false-completeness.
+   - Caller may invoke T2 anytime by judgment (a suspected alias in hits,
+     a topic shift widening the seed set).
+
+3. **Pre-answer bookend (MANDATORY).** Before committing *any* answer,
+   run one T2 `related` from the final seed set to catch missed aliases
+   or adjacent evidence. This is the last cheap defense against
+   false-completeness. **A T1 that "looks sufficient" does not waive this
+   sweep** — that exact feeling is the failure mode this bookend exists
+   to catch. See the pre-answer checklist at the end of this section.
 
 Each T2 call is one hop from the current seeds; whether to chain further
 calls is the caller's judgment, not a workflow rule.
+
+#### Pre-answer checklist (do not return an answer until all pass)
+
+Before emitting a final answer to the caller, confirm:
+
+- [ ] The **session-open** T2-bookend `related` ran (or was explicitly
+      waived as tiny/familiar corpus, with the reason stated).
+- [ ] The **pre-answer** T2-bookend `related` just ran on the final seed
+      set, and its `results` / `neighbor_edges` were read — not merely
+      invoked.
+- [ ] Any new document or alias surfaced by that pre-answer sweep was
+      either folded into the answer or explicitly dismissed as
+      off-topic.
+
+If you cannot tick all three, you are not done — run the missing sweep
+before answering. "T1 already gave me enough" is **not** a valid reason
+to skip; it is the precise trigger for the pre-answer bookend.
+
+### T2 is `related`, not `graph inspect`
+
+Both verbs read the co-occurrence graph, but they answer different
+questions and are **not interchangeable** for T2 exploration:
+
+| Verb | Answers | Output | When to reach for it |
+|---|---|---|---|
+| `related <seed> --mode graph` | "What **documents** are conceptually near this seed?" | Ranked doc paths (PPR) + `neighbor_edges` (npmi-weighted) | **T2-bookend**: session-open + pre-answer (mandatory). **T2-escalate**: mid-session widening. |
+| `graph inspect <keyword>` | "What is this **keyword** like in the graph — its scope distribution, top co-occurring words, polysemy signal?" | Metadata on the *keyword*, no documents | Diagnostic only: seed-quality check, cross-scope pollution audit, "why is my `related` empty?" |
+
+**Failure mode observed in practice**: caller runs `graph inspect` on a
+hub word (protagonist name, framework name, top-level concept) early,
+sees the co-occurring column dominated by stopwords / discourse markers
+("不过", "什么", "the", "would"), concludes *"the graph has no signal
+here"*, and skips T2 entirely for the whole session. This is a misread:
+the empty signal was a **seed-quality problem** (see next subsection),
+not a graph-quality problem, and `graph inspect` on the wrong seed is
+not a substitute for `related` on a right seed.
+
+Rule of thumb: **if you catch yourself running `graph inspect` and then
+*not* running `related` immediately after, you probably wanted `related`
+all along.**
+
+### Choosing seeds for `related`
+
+`related` faithfully amplifies whatever seed you hand it. A well-chosen
+seed returns a compact on-topic neighbourhood; a poorly-chosen seed
+returns `[]`, an irrelevant list, or noise. Seed choice is the single
+biggest lever the caller controls at T2 — **grga will not reject bad
+seeds**, it will compute PPR on whatever you provide.
+
+**Prefer as seeds**:
+
+- **Low-DF specific nouns** — proper names of techniques, entities, APIs,
+  chapter titles. Check `graph_signals.seed_chunk_df` in the returned
+  JSON: single-digit to low-hundreds DF on a large corpus is the sweet
+  spot.
+- **Names surfaced by T1 `search`** — T1 hits carry the corpus's actual
+  vocabulary; harvest 2–3 low-DF specifics from `matches[i].text` and
+  feed them back as T2 seeds.
+- **Multi-seed passes** — 2–4 diverse specifics beat one hub. PPR fuses
+  across seeds, concentrating signal on the shared neighbourhood.
+
+**Avoid as sole seed**:
+
+- **Hub words** — the protagonist, the framework name, the top-level
+  concept. High DF (thousands, or `graph inspect` shows stopword-like
+  top co-occurring keywords) means the seed co-occurs with *everything*
+  and PPR degenerates.
+- **Generic descriptors** — "main technique", "the API", "the config".
+  Too many contexts, no coherent neighbourhood.
+- **Terms not in the index** — `results: []` with empty `seed_chunk_df`
+  means the seed isn't a keyword at all. Confirm via T1 `search` that
+  the term appears in the corpus, then pick a nearby low-DF surrogate.
+
+**Self-check signals** (read from the JSON, not gut feel):
+
+- `graph_signals.seed_chunk_df[seed] == 0` → seed not indexed
+- `graph_signals.seed_chunk_df[seed]` in the thousands → hub, expect noise
+- `neighbor_edges[].npmi > 0.5` → strong semantic link
+- `neighbor_edges[].npmi < 0.2` → weak, treat with suspicion
+- Empty `results` with non-zero `seed_chunk_df` → seed indexed but
+  isolated; swap for a co-appearing term
+
+**Meta-rule**: seed selection is a **caller judgment**, not a grga
+policy. The verb surfaces the numbers (`seed_chunk_df`, `npmi`); the
+caller decides whether the current seed is worth another T2 round or
+whether to swap. Extended DF / npmi decision table lives in
+`references/reflection-loop.md` under the T2 section.
 
 ### Stuck signals & escalation
 
@@ -268,14 +396,15 @@ if the cheaper one also fails to unblock.
 
 | Signal | First choice | Rationale |
 |---|---|---|
-| Vocabulary-mismatch | **T2 `related`** (build index inline if absent) | The corpus uses a term you have not guessed yet. Structural neighbours (co-occurrence graph) route around the vocabulary you got wrong. |
+| Vocabulary-mismatch | **T2-escalate `related`** (build index inline if absent) | The corpus uses a term you have not guessed yet. Structural neighbours (co-occurrence graph) route around the vocabulary you got wrong. |
 | Literal-fixation | **T3 `suggest --intent reformulate`** | You are stuck in a literal spelling of the concept. The LLM's job is precisely to break the literal frame. |
 | Wandering | **T3 `suggest --intent expand`** | The keyword space is under-expanded; more probing inside the same family will not help. |
 | Hit-paradox | **T3 `suggest --intent rerank`** | Hits exist but the ordering is wrong; ask the LLM to re-rank the already-fetched matches. |
 
-If T2 `related` requires an index that is not yet built, **build it
-inline** — see the next subsection. Do not treat a missing index as a
-reason to skip T2.
+If T2-escalate `related` requires an index that is not yet built,
+**build it inline** — see the next subsection. Do not treat a missing
+index as a reason to skip T2 (this applies equally to the mandatory
+T2-bookends: a missing index is a build-inline trigger, never a waiver).
 
 #### `index build` is part of the reflection path, not just infra
 

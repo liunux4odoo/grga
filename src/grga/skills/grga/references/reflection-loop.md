@@ -49,10 +49,16 @@ Decide:
 |---|---|
 | `matches` empty | Back to **T0** to loosen; if already loose, jump to **T3** `intent=reformulate` |
 | `truncated: true` | Tighten (back to T0) or raise `--max-total`; do not act on a biased slice |
-| Hits concentrated in 1-2 files, but topic likely covered elsewhere | **T2** `related --mode dir` or `--mode heading` for breadth |
+| Hits concentrated in 1-2 files, but topic likely covered elsewhere | **T2-escalate** `related --mode dir` or `--mode heading` for breadth |
 | < ~5 hits and unsatisfactory | **T3** `intent=expand` for more angles, then loop to T1 |
-| Hits sufficient and well-labelled | Answer directly, or **T2** `expand` if you need quotable prose |
-| Individual hit text already answers the question | Quote `matches[i].text` and stop — skip T2 |
+| Hits sufficient and well-labelled | Proceed toward answer — but the **pre-answer T2-bookend `related` still runs** before you commit (SKILL.md "T2 bookends"); optionally **T2-escalate** `expand` first if you need quotable prose |
+| Individual hit text already answers the question | Quote `matches[i].text`; you may skip **T2-escalate expand**, but the **pre-answer T2-bookend `related` is still mandatory** |
+
+> The two T2-bookends (session-open, pre-answer) are **not** on this
+> table because they are not T1-observation-driven — they run
+> unconditionally per SKILL.md "T2 bookends". This table only governs
+> **T2-escalate** (reactive widening). Never read "skip T2" here as
+> "skip the pre-answer bookend."
 
 Key metadata idioms:
 
@@ -81,11 +87,54 @@ headings back into `related --mode heading` to find sibling chapters.
 
 Decide:
 
-- Coverage now sufficient → answer.
+- Coverage now sufficient → proceed toward answer, **then run the
+  pre-answer T2-bookend `related` on the final seed set** (SKILL.md
+  "T2 bookends") before committing.
 - Corpus genuinely lacks the material → **T3** `intent=reformulate`
   (maybe the concept is named differently).
 - Coverage okay but need prioritisation → **T3** `intent=rerank` on the
   current hits.
+
+### `related` vs `graph inspect`: verb-choice reminder
+
+SKILL.md covers the rule in full ("T2 is `related`, not `graph inspect`");
+the one-line reminder here: **T2 exploration is always `related`.**
+`graph inspect` is a *diagnostic* verb that answers questions about a
+single keyword's shape in the graph, not a substitute for the
+document-ranking that `related` does. If a first `related` call returns
+`[]`, the correct next move is a **seed change**, not a switch to
+`graph inspect`.
+
+### Seed-quality decision table for `related --mode graph`
+
+Read the `graph_signals` block off the `related` JSON, then decide:
+
+| Signal | Reading | Action |
+|---|---|---|
+| `seed_chunk_df[seed] == 0` | Seed is not a keyword in the index | Run T1 `search` to confirm the term exists in corpus text; if yes, the tokenizer skipped it — pick a co-appearing indexed term as surrogate |
+| `seed_chunk_df[seed]` 1-few | Rare seed; usually strong signal | Proceed; check `neighbor_edges` for npmi > 0.5 |
+| `seed_chunk_df[seed]` tens - low hundreds | **Sweet spot on a large corpus** | Proceed; expect a tight neighbourhood |
+| `seed_chunk_df[seed]` thousands+ | Hub word — co-occurs with everything | Swap seed; use `graph inspect <seed>` to *confirm* stopword-dominated `top_cooccurring_keywords`, then pick a low-DF specific surrogate |
+| `results: []` with non-zero `seed_chunk_df` | Seed indexed but isolated (no chunk-cooccur edges above threshold) | Add another co-appearing seed; or fall back to `--mode dir` / `--mode heading` |
+| `neighbor_edges[].npmi > 0.5` | Strong semantic link | Trust; consider adding the neighbour as a follow-up seed |
+| `neighbor_edges[].npmi` 0.2-0.5 | Weak-to-moderate | Cross-check the neighbour with T1 `search` before trusting |
+| `neighbor_edges[].npmi < 0.2` | Noise-adjacent | Ignore unless corroborated by other signals |
+| Neighbours dominated by discourse markers / stopwords | Seed is a hub (even if DF looks modest) | Swap seed for a low-DF specific noun; multi-seed passes help |
+
+**Multi-seed rule of thumb**: 2–4 diverse specifics fused into one call
+concentrate PPR on the shared neighbourhood better than any single hub.
+When in doubt about which specific to pick, run a T1 `search` on the
+task topic first and harvest low-DF nouns from `matches[i].text`.
+
+**Self-diagnosis loop when T2 returns nothing useful**:
+
+1. `graph_signals.seed_chunk_df` empty → seed not indexed → switch seed
+2. `seed_chunk_df` high, `neighbor_edges` = stopword-adjacent → hub →
+   switch to a specific noun
+3. `seed_chunk_df` reasonable, `results: []` → isolated seed → try
+   multi-seed or `--mode dir`/`heading`
+4. Everything looks fine but neighbours are off-topic → run one T3
+   `suggest --intent expand` to break the vocabulary frame
 
 ## T3 — suggest: LLM reflection
 
