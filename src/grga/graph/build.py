@@ -1421,6 +1421,7 @@ def build_graph_index(
             )
             stats.pairs_written = recompute_pairs(
                 conn, scope_dir_id, min_pair_count=min_pair_count, now=now,
+                on_event=on_event,
             )
         else:
             # No index-layer change: keep the existing pairs untouched and
@@ -1473,6 +1474,7 @@ def recompute_pairs(
     *,
     min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
     now: Optional[str] = None,
+    on_event: Optional[Callable[[dict], None]] = None,
 ) -> int:
     """Rematerialise ``keyword_pairs(chunk_cooccur)`` for one scope from DB.
 
@@ -1485,10 +1487,25 @@ def recompute_pairs(
     into Python — the old in-Python path was O(rows) memory and had a
     quadratic per-chunk pair enumeration in pure Python.
 
+    ``on_event`` (optional) receives fine-grained sub-phase events:
+    ``pairs_scan_start`` / ``pairs_scan_end`` bracket the heavy
+    self-join; ``pairs_advance`` fires during NPMI computation +
+    insert with ``current`` / ``total`` fields.
+
     Returns the number of pair rows written. Caller owns the transaction.
     """
     if now is None:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _emit(phase: str, **fields) -> None:
+        if on_event is None:
+            return
+        payload = {"phase": phase}
+        payload.update(fields)
+        try:
+            on_event(payload)
+        except Exception:
+            pass
 
     # 1. Clear chunk_cooccur rows for this scope (llm_promoted survives).
     conn.execute(
@@ -1528,6 +1545,7 @@ def recompute_pairs(
     #    exactly once, aggregate + sparsify in SQL. This keeps peak
     #    memory bounded by the surviving pair count, not the raw
     #    keyword_chunks row count.
+    _emit("pairs_scan_start")
     surviving = conn.execute(
         "SELECT a.kw_id, b.kw_id, COUNT(*) AS cooccur "
         "FROM keyword_chunks a "
@@ -1540,16 +1558,25 @@ def recompute_pairs(
         "HAVING COUNT(*) >= ?",
         (scope_dir_id, int(min_pair_count)),
     ).fetchall()
+    _emit("pairs_scan_end", surviving=len(surviving))
     if not surviving:
         return 0
 
+    total_surviving = len(surviving)
     pair_rows = []
-    for row in surviving:
+    step = max(1, total_surviving // 200)
+    for idx, row in enumerate(surviving, start=1):
         a = int(row[0])
         b = int(row[1])
         c = int(row[2])
         npmi = _npmi(c, chunk_df.get(a, 0), chunk_df.get(b, 0), n_chunks)
         pair_rows.append((scope_dir_id, a, b, float(c), npmi, now))
+        if idx == total_surviving or idx % step == 0:
+            _emit(
+                "pairs_advance",
+                current=idx,
+                total=total_surviving,
+            )
 
     conn.executemany(
         """

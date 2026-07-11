@@ -965,11 +965,31 @@ def _make_index_build_progress():
         elif phase == "pairs_start":
             state["pairs"] = progress.add_task(
                 "[yellow]生成共现对",
-                total=event.get("candidate_pairs") or None,
-                note=f"{event.get('surviving_pairs', 0)} 保留",
+                total=None,
+                note=f"{event.get('candidate_pairs', 0)} 关键词 · 扫描自连接…",
             )
-            task = state["pairs"]
-            progress.update(task, completed=event.get("candidate_pairs") or 0)
+        elif phase == "pairs_scan_start":
+            task = state.get("pairs")
+            if task is not None:
+                progress.update(task, total=None, note="扫描 keyword_chunks 自连接…")
+        elif phase == "pairs_scan_end":
+            task = state.get("pairs")
+            if task is not None:
+                progress.update(
+                    task,
+                    total=event["surviving"] or None,
+                    completed=0,
+                    note=f"{event['surviving']} 候选对",
+                )
+        elif phase == "pairs_advance":
+            task = state.get("pairs")
+            if task is not None:
+                progress.update(
+                    task,
+                    total=event["total"] or None,
+                    completed=event["current"],
+                    note=f"{event['current']}/{event['total']} 对",
+                )
         elif phase == "pairs_done":
             task = state.get("pairs")
             if task is not None:
