@@ -1,7 +1,13 @@
-"""Personalized PageRank over the keyword co-occurrence graph (Phase 4.3).
+"""Personalized PageRank over the keyword co-occurrence graph.
 
-The graph nodes are keywords sourced from ``keyword_pairs`` (v1) plus
-optional edges from ``keyword_docs`` (v2, co-occurrence within a document).
+The graph nodes are keywords; edges come from ``keyword_pairs`` (schema
+v4), which after the chunk-level migration carries two row kinds:
+
+* ``source='chunk_cooccur'`` — segment co-occurrence with a ``cooccur_count``
+  and an ``npmi`` (Bouma 2009);
+* ``source='llm_promoted'`` — pairs graduated from the vote buffer by
+  ``grga index promote`` (``npmi`` may be NULL).
+
 Given a small seed set (typically 1-5 keywords from the user query) PPR
 returns the keywords most closely related on the graph, without ever
 touching an LLM.
@@ -13,6 +19,7 @@ dependency. Weights are kept as Python floats.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -44,84 +51,64 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def edge_weight(source: str, cooccur_count: float, npmi: Optional[float]) -> float:
+    """Map a ``keyword_pairs`` row to a non-negative PPR edge weight.
+
+    * ``chunk_cooccur``: weight = ``max(npmi, 0) + 0.01 * log1p(cooccur_count)``.
+      npmi is the primary segment-level association strength (V5_npmi
+      experiment). The small ``log1p(cooccur_count)`` floor keeps a real
+      co-occurrence edge from collapsing to zero when npmi degenerates to
+      exactly ``0`` on tiny corpora / ubiquitous keywords — a pure
+      mathematical safeguard, no corpus-specific priors (HC2).
+    * ``llm_promoted`` (npmi usually NULL): weight = ``log1p(cooccur_count)``
+      — monotone in the LLM vote strength.
+
+    Pure mathematical mapping — no corpus-specific priors (HC2).
+    """
+    from grga.graph.schema import CHUNK_COOCCUR_SOURCE
+
+    count_w = math.log1p(max(float(cooccur_count), 0.0))
+    if source == CHUNK_COOCCUR_SOURCE:
+        npmi_w = max(float(npmi), 0.0) if npmi is not None else 0.0
+        return npmi_w + 0.01 * count_w
+    return count_w
+
+
 def load_edges(
     conn: sqlite3.Connection,
     *,
     directory: Optional[str] = None,
     include_pairs: bool = True,
-    include_docs: bool = True,
     min_weight: float = 0.0,
 ) -> List[Edge]:
-    """Load undirected edges from the SQLite graph tables.
+    """Load undirected edges from ``keyword_pairs`` (schema v4).
 
-    ``keyword_pairs`` (v1) contributes co-occurrence counts directly.
-    ``keyword_docs`` (v2) is used to synthesise pairwise weights when two
-    keywords share a document; the synthetic weight is the minimum
-    per-doc occurrence count (a cheap co-occurrence proxy).
+    All sources contribute; :func:`edge_weight` maps each row to a
+    non-negative PPR weight.
     """
     ensure_schema(conn)
     edges: Dict[Tuple[str, str], float] = {}
 
-    if include_pairs:
+    if include_pairs and _table_exists(conn, "keyword_pairs"):
         where = ""
         params: List = []
         if directory is not None:
             where = " WHERE directory = ?"
             params.append(directory)
-        if _table_exists(conn, "keyword_pairs"):
-            rows = conn.execute(
-                f"SELECT keyword_a, keyword_b, count FROM keyword_pairs{where}",
-                params,
-            ).fetchall()
-            for row in rows:
-                a, b = _fold(row["keyword_a"]), _fold(row["keyword_b"])
-                if not a or not b or a == b:
-                    continue
-                key = tuple(sorted((a, b)))
-                edges[key] = edges.get(key, 0.0) + float(row["count"])
-
-    if include_docs:
-        params = []
-        if directory is not None:
-            params.append(directory)
-        # Aggregate intra-document keyword pairs in SQL via a self-join. This
-        # keeps the O(D * K^2) work inside SQLite's C engine and returns one
-        # row per (kw_a, kw_b) pair, instead of materialising millions of
-        # transient Python tuples on every call. ``keyword_docs`` stores one
-        # row per (folded keyword, doc), so ``LOWER(...)`` ordering yields
-        # canonical unordered pairs without self-pairs or duplicates.
-        # ``keyword_docs`` stores casefolded keyword strings (schema v3),
-        # so the self-join comparison is a direct column compare — no
-        # ``LOWER(...)`` wrapper needed. The ``+`` unary prefix on the
-        # keyword comparison is a deliberate SQLite optimiser barrier: it
-        # stops the planner from range-scanning ``idx_keyword_docs_kw``
-        # (``keyword > ?``, a huge fan-out) and forces the selective
-        # ``(directory, doc_path)`` join instead. Dropping ``LOWER`` had let
-        # the planner "see" the keyword index and pick the ~30x slower plan;
-        # the barrier keeps the join on doc_path where each doc has only a
-        # handful of keywords.
-        where_clause = "WHERE a.directory = ?" if directory is not None else ""
         rows = conn.execute(
-            f"""
-            SELECT a.keyword AS kw_a,
-                   b.keyword AS kw_b,
-                   SUM(MIN(a.occurrence_count, b.occurrence_count)) AS weight
-            FROM keyword_docs a
-            JOIN keyword_docs b
-              ON a.doc_path = b.doc_path
-             AND a.directory = b.directory
-             AND +a.keyword < +b.keyword
-            {where_clause}
-            GROUP BY kw_a, kw_b
-            """,
+            f"SELECT keyword_a, keyword_b, source, cooccur_count, npmi "
+            f"FROM keyword_pairs{where}",
             params,
         ).fetchall()
         for row in rows:
-            a, b = _fold(row["kw_a"]), _fold(row["kw_b"])
+            a, b = _fold(row["keyword_a"]), _fold(row["keyword_b"])
             if not a or not b or a == b:
                 continue
+            w = edge_weight(row["source"], row["cooccur_count"], row["npmi"])
+            if w <= 0:
+                continue
             key = tuple(sorted((a, b)))
-            edges[key] = edges.get(key, 0.0) + float(row["weight"])
+            edges[key] = edges.get(key, 0.0) + w
 
     return [
         Edge(a=k[0], b=k[1], weight=w)

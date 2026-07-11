@@ -60,6 +60,58 @@ All notable changes to `grga` are recorded here.
 
 ## Unreleased
 
+### Breaking changes (chunk-level graph migration, schema v4)
+
+- **The L2 graph moved from document-level to segment (chunk) level.**
+  `related --mode graph` now runs Personalized PageRank over segment
+  co-occurrence instead of whole-document co-occurrence. The doc-level graph
+  was structurally unable to produce signal on large single-file corpora
+  (a 22 MB novel collapsed every keyword into one `doc_path`, giving PPR no
+  real edges). See `docs/design/plan-2026-07-11-chunk-migration.md`.
+
+  The CLI surface is unchanged: `related --mode graph|dir|heading` keeps its
+  name and parameters, so existing caller skills need no edits.
+
+- **`keyword_docs` table dropped.** The doc-level inverted index is gone.
+  `related` / `graph inspect` now read the new `keyword_chunks` table.
+
+- **`keyword_pairs` schema rebuilt.** Primary key is now
+  `(directory, keyword_a, keyword_b, source)`. New columns: `source`
+  (`'chunk_cooccur'` | `'llm_promoted'`), `cooccur_count`, `npmi`. The old
+  `(scope, directory, keyword_a, keyword_b)` / `count` shape is gone.
+
+- **One-shot v3 → v4 migration.** `ensure_schema` detects a legacy database
+  and, in a single atomic transaction: drops `keyword_docs`; rebuilds
+  `keyword_pairs`; salvages old promotion rows (`scope='llm_promoted'`) as
+  `source='llm_promoted'`; clears every other legacy (doc-level) pair — the
+  segment build recomputes it. `PRAGMA user_version` bumps 3 → 4. Failure
+  rolls back; no half-migrated state is left on disk.
+
+- **`grga index build` gains chunk knobs.** `--chunk-mode {line,chars}`
+  (default `line`), `--chunk-max-chars` (600), `--chunk-min-chars` (300),
+  `--min-pair-count` (3). The old `--min-count` / `--max-terms` flags are
+  removed. `chars` mode splits on `heading > blank line > hard char cut`.
+
+- **`deep_search` LLM pairs route through votes.** `KeywordLibrary` no
+  longer writes `keyword_pairs` directly; deep-search co-mentions accumulate
+  in `llm_extension_votes` and graduate via `grga index promote` — the same
+  anti-pollution gate the `suggest` flow already used. `keyword_counts`
+  (self-evolving heat table) is unchanged.
+
+### Added (chunk migration)
+
+- **`graph_signals` metadata on `related --mode graph --json`.** Each result
+  carries `seed_chunk_df` (per-seed segment df), `total_chunks_in_scope`, and
+  `neighbor_edges` (PPR neighbour edges with `npmi` / `cooccur_count` /
+  `source`). Callers can classify seeds (hub / domain / rare) and re-rank
+  neighbours themselves — grga does no filtering / rerank / warning on top.
+  `--graph-signals-limit N` caps `neighbor_edges` (default 30). The block is
+  emitted only under `--json`; human-readable output stays terse.
+
+- **`chunks` / `keyword_chunks` tables.** `chunks` records each chunk's line
+  range + char count; `keyword_chunks` is the keyword → chunk inverted index
+  (segment df is derivable via `COUNT(*) GROUP BY keyword`, no extra column).
+
 ### Performance
 
 - **`related --mode graph` is 2–5× faster across every corpus size.** Five

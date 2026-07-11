@@ -71,7 +71,7 @@
       "step": 3,
       "family": "sqlite3-detour",
       "kind": "antipattern",
-      "cmd": "SELECT scope FROM keyword_docs",
+      "cmd": "SELECT directory FROM keyword_chunks",
       "signal": "empty",
       "decision": "❌ 直查图内容",
       "insight": "schema 是内部实现会漂；应走 graph inspect 公开接口"

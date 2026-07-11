@@ -52,7 +52,7 @@ Use grga when the task involves any of the following on a local directory:
 - Turning a single hit into a **wider textual context**: nearby lines, a paragraph, a Markdown chapter, or the whole file.
 - Answering "**what else is related to this?**" — either through the keyword co-occurrence graph (PPR), through directory proximity, or through shared Markdown heading paths across files.
 - Asking an LLM to **expand keywords, rerank hits, or reformulate a vague query** — but only after cheaper layers (search + expand + related) have been tried and found insufficient.
-- Building or refreshing the offline **L2 graph index** (`keyword_docs` / `heading_docs`) that powers `related` graph / heading modes.
+- Building or refreshing the offline **L2 graph index** (`chunks` / `keyword_chunks` / `keyword_pairs` / `heading_docs`) that powers `related` graph / heading modes.
 - Promoting well-voted LLM keyword pairs (`llm_extension_votes`) into the permanent `keyword_pairs` graph.
 
 Do **not** use this skill for:
@@ -134,7 +134,7 @@ cold-start / testing contexts.
 
 ### Supporting commands (offline / infra)
 
-- `grga index build -s <scope> --db <path> --json` — index a scope's `keyword_docs` / `heading_docs` into the shared graph. Prerequisite for `related`. **Also valid inline** during a stuck-signal escalation — see `## Stuck signals & escalation`; do not treat "offline / infra" as "must be pre-built before the session."
+- `grga index build -s <scope> --db <path> --json` — index a scope's segments (`chunks` / `keyword_chunks` / `keyword_pairs[chunk_cooccur]`) and `heading_docs` into the shared graph. Prerequisite for `related`. **Also valid inline** during a stuck-signal escalation — see `## Stuck signals & escalation`; do not treat "offline / infra" as "must be pre-built before the session."
 - `grga index promote --threshold N --db <path> [--dry-run] --json` — merge high-vote pairs from `llm_extension_votes` into `keyword_pairs`. Idempotent.
 - `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope`, `top_cooccurring_keywords`, and `suspected_polysemy`.
 
@@ -350,7 +350,7 @@ iterate. `grga` for anything you plan to refine, expand, or navigate.**
 
 `~/.config/grga/deep_keywords.db` is grga's **internal storage**, not a
 caller-facing interface. Reaching for `sqlite3 <db>` — even for a
-harmless-looking `.tables` or `SELECT DISTINCT scope FROM keyword_docs` —
+harmless-looking `.tables` or `SELECT DISTINCT directory FROM keyword_chunks` —
 couples your workflow to a schema that is free to change between grga
 releases (columns get renamed, tables get split, indices get replaced).
 
@@ -382,7 +382,7 @@ looks harmless but has three real costs:
 - **Silent staleness** — the copy diverges when the original is edited,
   and nothing warns you.
 - **Broken partition keys for the L2 graph.** The `directory` column in
-  `keyword_docs` / `heading_docs` is a **partition key**. If you later
+  `keyword_chunks` / `heading_docs` is a **partition key**. If you later
   run `grga index build -s /tmp/clean --db ...`, the index is bound to
   a path that vanishes on the next `/tmp` sweep — orphan rows that
   cannot be found through the original directory. Even if you skip
@@ -447,7 +447,7 @@ you never need them for basic search, but they help when a specific job comes up
 Common failure modes and their fixes live in
 `references/troubleshooting.md`:
 
-- **`related` returns `[]`** — index missing, seed not in `keyword_docs`,
+- **`related` returns `[]`** — index missing, seed not in `keyword_chunks`,
   wrong `--db`, stopword seed, or scope too narrow.
 - **`expand` gave `level="lines"` instead of `chapter`** — the documented
   degrade chain; sidecar missing or paragraph too short.

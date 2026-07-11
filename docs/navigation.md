@@ -73,16 +73,16 @@ grga v2 的检索原语，按 caller agent 的推理层级由轻到重排列。�
 
 | 模块 | 职责 |
 |---|---|
-| `schema.py` | v2 表建立：`keyword_docs` / `heading_docs` / `llm_extension_votes`；只 CREATE IF NOT EXISTS，不动 v1 表 |
-| `build.py` | 离线索引构建入口 `build_graph_index`；对应 CLI `grga index build` |
-| `ppr.py` | Personalized PageRank 手写 power iteration；`related --mode graph` 的算力核心 |
+| `schema.py` | v4 表建立 + 一次性迁移：`chunks` / `keyword_chunks` / `keyword_pairs`(带 `source` 列) / `heading_docs` / `llm_extension_votes`；从 doc-level(`keyword_docs`)迁移时原子 DROP + 重建 `keyword_pairs`，抢救 `llm_promoted` 行。v1 计数表(`keyword_counts` / `keyword_sources`)不动 |
+| `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk(line/chars)、写 `chunks` / `keyword_chunks` / `keyword_pairs[chunk_cooccur]`(npmi) |
+| `ppr.py` | Personalized PageRank 手写 power iteration；`load_edges` 从新 `keyword_pairs` 读边(`edge_weight` 映射 npmi / cooccur_count) |
 | `adjacency_cache.py` | 邻接表缓存，按 `(db_path, db_mtime, scope_key)` 失效 |
-| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图（反污染门） |
-| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 v1 `keyword_pairs` |
-| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，跨 scope 展开前用 |
+| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图(反污染门)；deep-search 的 LLM pair 也走这里 |
+| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`(`source='llm_promoted'`) |
+| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_chunks`，跨 scope 展开前用 |
 
-**反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 → 进入
-v1 `keyword_pairs` → `related --mode graph` 免费拿到。
+**反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 →
+进入 `keyword_pairs`(`source='llm_promoted'`) → `related --mode graph` 免费拿到。
 
 ---
 

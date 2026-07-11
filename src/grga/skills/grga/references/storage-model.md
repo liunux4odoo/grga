@@ -52,7 +52,7 @@ grga index build -s ~/code    --db ~/.config/grga/deep_keywords.db --json
   heuristic `grga graph inspect` applies), so the preview already tells you
   whether a bridge word is ambient jargon. Since v2.3 the preview shares
   the main query's PPR pass (no separate full-graph walk) so it costs at
-  most one extra `keyword_docs` scan on top of a regular scoped query —
+  most one extra `keyword_chunks` scan on top of a regular scoped query —
   cheap enough to pass routinely when the isolated result looks thin.
 - `grga graph inspect <keyword>` reports `docs_by_scope`,
   `top_cooccurring_keywords`, and a `suspected_polysemy` heuristic. Use it

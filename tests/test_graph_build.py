@@ -1,11 +1,15 @@
-"""Tests for :mod:`grga.graph.build` (Phase 4.2)."""
+"""Tests for :mod:`grga.graph.build` (chunk-level migration, schema v4)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
 
-from grga.graph.build import build_graph_index, extract_keywords
+from grga.graph.build import (
+    build_graph_index,
+    extract_chunk_keywords,
+    split_chunks,
+)
 from grga.graph.schema import connect
 
 
@@ -36,68 +40,106 @@ def _write_scope(root: Path) -> None:
     )
 
 
-def test_extract_keywords_basic():
-    text = "grga grga ripgrep pandoc\ngrga usage"
-    result = extract_keywords(text, min_count=2)
-    terms = [item[0] for item in result]
-    assert "grga" in [t.lower() for t in terms]
-    grga_row = next(item for item in result if item[0].lower() == "grga")
-    assert grga_row[1] == 3  # three occurrences
-    assert grga_row[2] == 1  # first line
+def test_extract_chunk_keywords_basic():
+    counts = extract_chunk_keywords("grga grga ripgrep pandoc")
+    assert counts["grga"] == 2
+    assert counts["ripgrep"] == 1
+    assert counts["pandoc"] == 1
 
 
-def test_extract_keywords_stores_folded_form_v3():
-    """Schema v3: extract_keywords emits casefolded keywords (PERF plan §P1-2).
-
-    Prior to v3 the tokeniser preserved the original casing of the first
-    occurrence so ``keyword_docs.keyword`` held mixed-case strings. Read
-    paths then had to wrap every lookup in ``LOWER(keyword)``, which is
-    non-sargable and forced a full-table SCAN when the query lacked a
-    ``directory`` predicate. v3 stores the folded form so lookups can use
-    the ``(directory, keyword, ...)`` index directly.
-    """
-    text = "the and Foo\nBar Bar Bar\nBaz Baz Baz\n"
-    terms = [term for term, _, _ in extract_keywords(text, min_count=2)]
-    # Every term is its casefolded form; no mixed-case leakage.
-    for term in terms:
-        assert term == term.casefold(), (
-            f"v3 must emit folded keywords, got {term!r}"
-        )
-    # And the actual folded contents are preserved.
-    fold_set = set(terms)
-    assert "bar" in fold_set
-    assert "baz" in fold_set
+def test_extract_chunk_keywords_stores_folded_form():
+    counts = extract_chunk_keywords("Foo Bar Bar Baz")
+    # Every stored key is casefolded.
+    for key in counts:
+        assert key == key.casefold()
+    assert counts["bar"] == 2
 
 
-def test_build_populates_both_tables(sidecar_env, tmp_path):
+def test_extract_chunk_keywords_drops_stopwords():
+    counts = extract_chunk_keywords("the and for grga")
+    assert "the" not in counts
+    assert "grga" in counts
+
+
+def test_split_chunks_line_mode():
+    text = "line one here\nline two here\n\nline four here"
+    chunks = split_chunks(text, mode="line")
+    assert len(chunks) == 4  # incl. the blank line
+    assert chunks[0].start_line == 1 and chunks[0].end_line == 1
+    assert chunks[2].char_count == 0  # blank line
+
+
+def test_split_chunks_chars_mode_respects_min_max():
+    # 10 lines of ~40 chars each => several multi-line chunks.
+    lines = [f"sentence number {i} with some filler words here" for i in range(20)]
+    text = "\n".join(lines)
+    chunks = split_chunks(text, mode="chars", min_chars=100, max_chars=200)
+    assert len(chunks) > 1
+    for ch in chunks:
+        # No chunk wildly exceeds max (allow overshoot by one line).
+        assert ch.char_count <= 260
+
+
+def test_split_chunks_chars_mode_never_splits_single_long_line():
+    long_line = "x" * 5000
+    chunks = split_chunks(long_line, mode="chars", min_chars=100, max_chars=200)
+    assert len(chunks) == 1
+    assert chunks[0].char_count == 5000  # oversized chunk allowed
+
+
+def test_split_chunks_chars_mode_heading_boundary():
+    text = (
+        "# Title\n"
+        "some intro text that is quite short\n"
+        "## Section\n"
+        "more content in the section here\n"
+    )
+    chunks = split_chunks(text, mode="chars", is_markdown=True, min_chars=500, max_chars=1000)
+    # Headings force a cut even below min_chars: at least 2 chunks.
+    assert len(chunks) >= 2
+    # Each heading starts a fresh chunk.
+    starts = [c.text.splitlines()[0] if c.text else "" for c in chunks]
+    assert any(s.startswith("# Title") for s in starts)
+    assert any(s.startswith("## Section") for s in starts)
+
+
+def test_build_populates_chunk_tables(sidecar_env, tmp_path):
     scope = tmp_path / "corpus"
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    stats = build_graph_index(scope, db_path=db, min_term_count=1)
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1)
     assert stats.files_scanned >= 3
     assert stats.files_indexed >= 3
-    assert stats.keyword_docs_written > 0
+    assert stats.chunks_written > 0
+    assert stats.keyword_chunks_written > 0
+    assert stats.pairs_written > 0
     assert stats.heading_docs_written > 0
     assert stats.md_files_indexed == 2
 
     conn = connect(db)
     try:
         kw_rows = conn.execute(
-            "SELECT keyword, doc_path, occurrence_count FROM keyword_docs ORDER BY doc_path, keyword"
+            "SELECT keyword, doc_path, occurrence_count FROM keyword_chunks "
+            "ORDER BY doc_path, keyword"
         ).fetchall()
         assert kw_rows
-        # Every stored keyword should be reachable via its doc.
         docs = {row["doc_path"] for row in kw_rows}
         assert "install.md" in docs
         assert "usage.md" in docs
+
+        # chunk_cooccur pairs carry npmi.
+        pair_rows = conn.execute(
+            "SELECT COUNT(*) FROM keyword_pairs "
+            "WHERE source='chunk_cooccur' AND npmi IS NOT NULL"
+        ).fetchone()[0]
+        assert pair_rows > 0
 
         head_rows = conn.execute(
             "SELECT heading_path, doc_path FROM heading_docs"
         ).fetchall()
         paths = {row["heading_path"] for row in head_rows}
         assert any("Install" in p for p in paths)
-        # Shared heading across docs (Phase 4 heading mode relies on it):
         macos_docs = {
             row["doc_path"]
             for row in head_rows
@@ -108,34 +150,78 @@ def test_build_populates_both_tables(sidecar_env, tmp_path):
         conn.close()
 
 
-def test_replace_flag_clears_previous_rows(sidecar_env, tmp_path):
+def test_replace_flag_clears_previous_chunk_rows(sidecar_env, tmp_path):
     scope = tmp_path / "corpus"
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, min_term_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1)
     (scope / "install.md").unlink()
 
-    stats = build_graph_index(scope, db_path=db, min_term_count=1)
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1)
     assert stats.files_indexed == 2  # usage.md + code.py
 
     conn = connect(db)
     try:
         remaining = [
             row["doc_path"]
-            for row in conn.execute("SELECT DISTINCT doc_path FROM keyword_docs").fetchall()
+            for row in conn.execute("SELECT DISTINCT doc_path FROM chunks").fetchall()
         ]
         assert "install.md" not in remaining
+        # chunk_cooccur pairs for the removed doc's exclusive keywords cleared.
+        kw_remaining = [
+            row["doc_path"]
+            for row in conn.execute("SELECT DISTINCT doc_path FROM keyword_chunks").fetchall()
+        ]
+        assert "install.md" not in kw_remaining
     finally:
         conn.close()
 
 
-def test_v1_tables_are_not_touched_by_build(sidecar_env, tmp_path):
+def test_build_preserves_llm_promoted_pairs(sidecar_env, tmp_path):
+    """``build`` clears only ``chunk_cooccur`` rows; ``llm_promoted`` survives."""
     scope = tmp_path / "corpus"
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    # Seed v1 rows first.
+    from grga.graph.schema import LLM_PROMOTED_SOURCE, ensure_schema
+
+    build_graph_index(scope, db_path=db, min_pair_count=1)
+
+    # Insert an llm_promoted pair for this scope.
+    conn = connect(db)
+    try:
+        ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO keyword_pairs (scope, directory, keyword_a, keyword_b, "
+            "source, cooccur_count, npmi, updated_at) "
+            "VALUES ('', ?, 'llmx', 'llmy', ?, 5, NULL, '2026-01-01')",
+            (str(scope.resolve()), LLM_PROMOTED_SOURCE),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Rebuild: chunk_cooccur is replaced, llm_promoted preserved.
+    build_graph_index(scope, db_path=db, min_pair_count=1)
+
+    conn = connect(db)
+    try:
+        survived = conn.execute(
+            "SELECT COUNT(*) FROM keyword_pairs WHERE source=? "
+            "AND keyword_a='llmx' AND keyword_b='llmy'",
+            (LLM_PROMOTED_SOURCE,),
+        ).fetchone()[0]
+        assert survived == 1
+    finally:
+        conn.close()
+
+
+def test_v1_counts_not_touched_by_build(sidecar_env, tmp_path):
+    scope = tmp_path / "corpus"
+    _write_scope(scope)
+    db = tmp_path / "graph.db"
+
     from grga.deep_search import KeywordLibrary
 
     lib = KeywordLibrary(db)
@@ -143,14 +229,10 @@ def test_v1_tables_are_not_touched_by_build(sidecar_env, tmp_path):
     lib.commit()
     lib.close()
 
-    build_graph_index(scope, db_path=db, min_term_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1)
 
     conn = connect(db)
     try:
-        pair = conn.execute(
-            "SELECT count FROM keyword_pairs WHERE keyword_a = 'alpha' AND keyword_b = 'beta'"
-        ).fetchone()
-        assert pair is not None and pair["count"] == 1
         counts = conn.execute(
             "SELECT COUNT(*) FROM keyword_counts WHERE term IN ('alpha', 'beta')"
         ).fetchone()[0]

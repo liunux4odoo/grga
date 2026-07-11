@@ -32,10 +32,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Union
 
-from grga.graph.schema import connect, ensure_schema, resolve_scope_key
+from grga.graph.schema import (
+    LLM_PROMOTED_SOURCE,
+    connect,
+    ensure_schema,
+    resolve_scope_key,
+)
 
 DEFAULT_THRESHOLD = 3
-PROMOTE_SCOPE = "llm_promoted"
+# Public re-export so external callers keep the old import surface working.
+PROMOTE_SCOPE = LLM_PROMOTED_SOURCE
 
 
 @dataclass
@@ -92,31 +98,6 @@ def _ensure_promoted_marker(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE llm_extension_votes ADD COLUMN promoted_at TEXT")
 
 
-def _ensure_keyword_pairs_table(conn: sqlite3.Connection) -> None:
-    """Make sure ``keyword_pairs`` exists before we try to write into it.
-
-    :func:`grga.deep_search.KeywordLibrary` creates this table lazily on
-    first use, but ``grga index promote`` may run against a database that
-    has only ever seen ``build_graph_index`` (so no v1 table yet). We
-    replicate the KeywordLibrary DDL verbatim; because it uses ``IF NOT
-    EXISTS`` it never touches an existing v1 table.
-    """
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS keyword_pairs (
-            scope TEXT NOT NULL,
-            directory TEXT NOT NULL,
-            keyword_a TEXT NOT NULL,
-            keyword_b TEXT NOT NULL,
-            count REAL NOT NULL DEFAULT 0,
-            updated_at TEXT,
-            PRIMARY KEY (scope, directory, keyword_a, keyword_b)
-        );
-        CREATE INDEX IF NOT EXISTS idx_pairs_dir ON keyword_pairs (directory, count);
-        """
-    )
-
-
 def promote_votes(
     *,
     threshold: float = DEFAULT_THRESHOLD,
@@ -156,7 +137,6 @@ def promote_votes(
     def _run(c: sqlite3.Connection) -> PromoteStats:
         ensure_schema(c)
         _ensure_promoted_marker(c)
-        _ensure_keyword_pairs_table(c)
         stats = PromoteStats(threshold=float(threshold), dry_run=dry_run)
 
         where = "vote_count >= ?"
@@ -193,23 +173,26 @@ def promote_votes(
             if dry_run:
                 stats.promoted += 1
                 continue
-            # Canonical ordering already guaranteed by the votes writer, but
-            # keyword_pairs stores its own (scope, directory) key so we merge
-            # additively there.
+            # v4 keyword_pairs: PK is (directory, keyword_a, keyword_b,
+            # source). We write source='llm_promoted' with a NULL npmi
+            # (chunk-level build owns the npmi channel; vote-derived pairs
+            # do not have an npmi to report). ``cooccur_count`` here reuses
+            # the vote count as an "how strong is the LLM signal" number.
             c.execute(
                 """
                 INSERT INTO keyword_pairs
-                    (scope, directory, keyword_a, keyword_b, count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scope, directory, keyword_a, keyword_b) DO UPDATE SET
-                    count = count + excluded.count,
+                    (scope, directory, keyword_a, keyword_b, source,
+                     cooccur_count, npmi, updated_at)
+                VALUES ('', ?, ?, ?, ?, ?, NULL, ?)
+                ON CONFLICT(directory, keyword_a, keyword_b, source) DO UPDATE SET
+                    cooccur_count = cooccur_count + excluded.cooccur_count,
                     updated_at = excluded.updated_at
                 """,
                 (
-                    PROMOTE_SCOPE,
                     row["directory"],
                     row["keyword_a"],
                     row["keyword_b"],
+                    LLM_PROMOTED_SOURCE,
                     float(row["vote_count"]),
                     now,
                 ),

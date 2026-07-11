@@ -805,23 +805,34 @@ def expand_command(
 def index_build_command(
     scope: Path = typer.Option(Path("."), "--scope", "-s", exists=True, resolve_path=True, help="Directory (or file) to index."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
-    min_term_count: int = typer.Option(2, "--min-count", help="Minimum occurrences for a keyword to be indexed."),
-    max_terms: int = typer.Option(200, "--max-terms", help="Maximum keywords stored per file."),
+    chunk_mode: str = typer.Option("line", "--chunk-mode", help="Chunk granularity: line (1 line = 1 chunk) or chars (multi-line char window)."),
+    chunk_max_chars: int = typer.Option(600, "--chunk-max-chars", help="Target upper bound on chars per chunk (chars mode)."),
+    chunk_min_chars: int = typer.Option(300, "--chunk-min-chars", help="Target lower bound on chars per chunk (chars mode)."),
+    min_pair_count: int = typer.Option(3, "--min-pair-count", help="Minimum chunk co-occurrence count for a pair to be stored."),
     max_file_kb: int = typer.Option(512, "--max-file-kb", help="Skip files larger than this many KiB."),
     append: bool = typer.Option(False, "--append", help="Accumulate onto existing rows instead of replacing the scope."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
-    """Build ``keyword_docs`` / ``heading_docs`` for a directory scope.
+    """Build chunk-level graph tables (``chunks`` / ``keyword_chunks`` /
+    ``keyword_pairs[chunk_cooccur]``) for a directory scope.
 
-    The v1 tables (keyword_counts / keyword_pairs) are never modified.
+    ``keyword_counts`` (v1 heat table) is never modified. ``llm_promoted``
+    rows in ``keyword_pairs`` are preserved; only ``chunk_cooccur`` rows
+    for this scope are rewritten.
     """
-    from grga.graph.build import build_graph_index
+    from grga.graph.build import VALID_CHUNK_MODES, build_graph_index
+
+    if chunk_mode not in VALID_CHUNK_MODES:
+        typer.echo(f"--chunk-mode must be one of: {', '.join(VALID_CHUNK_MODES)}", err=True)
+        raise typer.Exit(2)
 
     stats = build_graph_index(
         scope,
         db_path=str(db_path) if db_path else None,
-        max_terms_per_file=max_terms,
-        min_term_count=min_term_count,
+        chunk_mode=chunk_mode,
+        chunk_max_chars=chunk_max_chars,
+        chunk_min_chars=chunk_min_chars,
+        min_pair_count=min_pair_count,
         max_file_bytes=max_file_kb * 1024,
         replace=not append,
         progress=(None if json_output else (lambda message: typer.echo(message, err=True))),
@@ -831,7 +842,9 @@ def index_build_command(
         return
     typer.echo(
         f"indexed {stats.files_indexed}/{stats.files_scanned} files, "
-        f"{stats.keyword_docs_written} keyword rows, "
+        f"{stats.chunks_written} chunks, "
+        f"{stats.keyword_chunks_written} keyword-chunk rows, "
+        f"{stats.pairs_written} pair rows, "
         f"{stats.heading_docs_written} heading rows "
         f"({stats.md_files_indexed} md) in {stats.elapsed_seconds:.2f}s"
     )
@@ -1023,7 +1036,8 @@ def related_command(
     directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict to a previously indexed scope."),
     cross_scope: bool = typer.Option(False, "--cross-scope", help="mode=graph only: seed docs stay in --directory, PPR expansion crosses into every other scope."),
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
-    preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview. Since v2.3 the preview shares the main query's PPR pass and costs at most one extra keyword_docs scan. With --json it is embedded in the envelope; without --json a compact summary is printed to stderr."),
+    preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview."),
+    graph_signals_limit: int = typer.Option(30, "--graph-signals-limit", help="mode=graph only: cap on neighbor_edges in the graph_signals JSON block."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List documents related to the given keywords via the L2 graph."""
@@ -1046,7 +1060,7 @@ def related_command(
         typer.echo("--preview only applies to --mode graph", err=True)
         raise typer.Exit(2)
 
-    if mode == "graph" and (json_output or preview):
+    if mode == "graph":
         payload = related_graph_with_preview(
             seeds,
             limit=limit,
@@ -1055,6 +1069,7 @@ def related_command(
             cross_scope=cross_scope,
             preview=preview,
             collect_trace=json_output,
+            graph_signals_limit=graph_signals_limit,
         )
         results = payload["results"]
         if json_output:
@@ -1067,8 +1082,8 @@ def related_command(
             )
             typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
             return
-        # Human-readable + --preview: render results, then a one-line
-        # preview summary to stderr so the signal is not silently dropped.
+        # Human-readable output: never print graph_signals (contract HC3 —
+        # metadata is for --json / agents only).
         for item in results:
             kw = ("  <- " + ", ".join(item.keywords)) if item.keywords else ""
             typer.echo(f"{item.score:.4f}  {item.doc_path}{kw}")
@@ -1086,9 +1101,6 @@ def related_command(
         same_scope=same_scope,
     )
     if json_output:
-        # dir / heading modes never emit graph_actions (their signal is
-        # caller-derivable from ``results`` per docs/design/trace-signals.md
-        # §1.1). The envelope keeps the field present for schema stability.
         out = trace_envelope(
             {"results": [r.to_dict() for r in results]},
             [],

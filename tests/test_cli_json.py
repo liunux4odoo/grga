@@ -28,7 +28,7 @@ def sidecar_env(monkeypatch, tmp_path):
 @pytest.fixture
 def graph_db(cross_heading_fixture: Path, tmp_path, sidecar_env) -> Path:
     db = tmp_path / "graph.db"
-    build_graph_index(cross_heading_fixture, db_path=db, min_term_count=1)
+    build_graph_index(cross_heading_fixture, db_path=db, min_pair_count=1)
     return db
 
 
@@ -116,9 +116,10 @@ def test_index_build_json_contract(cross_heading_fixture: Path, tmp_path, sideca
     )
     assert result.exit_code == 0, result.output
     payload = _parse(result.output)
-    for key in ("scope", "files_scanned", "files_indexed",
-                "keyword_docs_written", "heading_docs_written",
-                "md_files_indexed", "elapsed_seconds", "reasons"):
+    for key in ("scope", "chunk_mode", "files_scanned", "files_indexed",
+                "chunks_written", "keyword_chunks_written", "pairs_written",
+                "heading_docs_written", "md_files_indexed", "elapsed_seconds",
+                "reasons"):
         assert key in payload, f"missing {key}"
 
 

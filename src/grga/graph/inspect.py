@@ -3,7 +3,7 @@
 ``inspect_keyword`` answers "before I open ``--cross-scope`` on this seed,
 how does it distribute across my corpora and is it likely polysemous?".
 
-It is a pure read over ``keyword_docs`` (v2):
+It is a pure read over the chunk-level tables (schema v4):
 
 * ``docs_by_scope``  - how many documents in each indexed scope contain the
   keyword. A keyword spread thinly across many unrelated scopes is the
@@ -185,9 +185,10 @@ def _cooccurrences(
         placeholders = ",".join("?" for _ in doc_list)
         rows = conn.execute(
             f"""
-            SELECT keyword AS kw, occurrence_count
-            FROM keyword_docs
+            SELECT keyword AS kw, SUM(occurrence_count) AS occurrence_count
+            FROM keyword_chunks
             WHERE directory = ? AND doc_path IN ({placeholders})
+            GROUP BY keyword
             """,
             [directory, *doc_list],
         ).fetchall()
@@ -217,8 +218,8 @@ def _seed_docs(
     """
     seed_rows = conn.execute(
         """
-        SELECT directory, doc_path
-        FROM keyword_docs
+        SELECT DISTINCT directory, doc_path
+        FROM keyword_chunks
         WHERE keyword = ?
         """,
         (folded,),
@@ -240,7 +241,7 @@ def _seed_docs_batch(
 
     Used by :func:`compute_suspected_polysemy_batch` so annotating the top-N
     preview bridge keywords costs a single ``keyword IN (...)`` query instead
-    of N separate full scans of ``keyword_docs``. Returns
+    of N separate full scans of ``keyword_chunks``. Returns
     ``{folded_keyword: (docs_by_scope, seed_docs_by_scope)}`` for every
     requested keyword that has at least one row.
     """
@@ -251,8 +252,9 @@ def _seed_docs_batch(
     rows = conn.execute(
         f"""
         SELECT keyword AS kw, directory, doc_path
-        FROM keyword_docs
+        FROM keyword_chunks
         WHERE keyword IN ({placeholders})
+        GROUP BY keyword, directory, doc_path
         """,
         uniq,
     ).fetchall()

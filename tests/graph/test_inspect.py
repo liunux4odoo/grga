@@ -50,8 +50,8 @@ def polysemy_db(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "shared.db"
-    build_graph_index(nlp, db_path=db, min_term_count=1)
-    build_graph_index(psych, db_path=db, min_term_count=1)
+    build_graph_index(nlp, db_path=db, min_pair_count=1)
+    build_graph_index(psych, db_path=db, min_pair_count=1)
     return {"nlp": nlp, "psych": psych, "db": db}
 
 

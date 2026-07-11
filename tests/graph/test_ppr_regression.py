@@ -84,7 +84,7 @@ def code_repo_scope(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_term_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1)
     return {"scope": scope, "db": db}
 
 
@@ -162,7 +162,7 @@ def narrative_scope(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_term_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1)
     return {"scope": scope, "db": db}
 
 
@@ -216,7 +216,7 @@ def test_no_graph_signal_fallback_still_engaged(tmp_path, monkeypatch):
         "solitary keyword lives here alone.\n", encoding="utf-8"
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_term_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1)
     results = related(
         ["solitary"],
         mode="graph",

@@ -31,7 +31,7 @@ def indexed_scope(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_term_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1)
     return {"scope": scope, "db": db}
 
 
@@ -111,7 +111,7 @@ def cross_heading_indexed(monkeypatch, tmp_path, cross_heading_fixture):
     """
     monkeypatch.setenv("GRGA_SIDECAR_ROOT", str(tmp_path / "sidecars"))
     db = tmp_path / "graph.db"
-    build_graph_index(cross_heading_fixture, db_path=db, min_term_count=1)
+    build_graph_index(cross_heading_fixture, db_path=db, min_pair_count=1)
     return {"scope": cross_heading_fixture, "db": db}
 
 

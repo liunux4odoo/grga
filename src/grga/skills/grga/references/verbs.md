@@ -99,7 +99,7 @@ relative paths collide (e.g. two `README.md`) remain distinct.
 
 Modes:
 
-- `graph` — Personalized PageRank over `keyword_pairs` seeded on the input, then materialised through `keyword_docs`. Best for "conceptually related" navigation. Default is scope-isolated; add `--cross-scope` to reach other corpora, and read `crossed_scopes_preview` first (see `references/storage-model.md`).
+- `graph` — Personalized PageRank over the segment co-occurrence graph (`keyword_pairs`, `source='chunk_cooccur'`), then materialised to documents through `keyword_chunks`. Best for "conceptually related" navigation. `--json` results carry a `graph_signals` block (`seed_chunk_df`, `total_chunks_in_scope`, `neighbor_edges` with `npmi`/`cooccur_count`/`source`); `--graph-signals-limit N` caps the edges (default 30). Default is scope-isolated; add `--cross-scope` to reach other corpora, and read `crossed_scopes_preview` first (see `references/storage-model.md`).
 - `dir`   — documents that live in the **same directory** as documents containing the seed keywords. Best for local repository navigation. Cross-scope has no meaning here (directory proximity is intrinsically scope-local).
 - `heading` — documents that share a full or leaf **Markdown heading path** with a seed-carrying document. Cross-scope by default (heading paths are structural filters that resist same-name-different-meaning noise). Add `--same-scope` to keep matches inside `-d`.
 
@@ -130,6 +130,6 @@ enough votes accumulate, run `grga index promote` to graduate them into
 
 ## Supporting commands (offline / infra)
 
-- `grga index build -s <scope> --db <path> --json` — index a directory scope's `keyword_docs` and `heading_docs` into the **shared** user knowledge graph. Prerequisite for `related`. Every scope writes into the same DB; `directory` is the partition column, not a separate database.
+- `grga index build -s <scope> --db <path> --json` — index a directory scope's segments (`chunks` + `keyword_chunks` + `keyword_pairs[chunk_cooccur]`) and `heading_docs` into the **shared** user knowledge graph. Prerequisite for `related`. Every scope writes into the same DB; `directory` is the partition column, not a separate database. `--chunk-mode line` (default, 1 line = 1 chunk) or `--chunk-mode chars --chunk-max-chars 600 --chunk-min-chars 300` (multi-line windows split on heading > blank line > hard char cut).
 - `grga index promote --threshold N --db <path> [--dry-run] --json` — merge high-vote pairs from `llm_extension_votes` into `keyword_pairs`. Idempotent; `--dry-run` reports without writing.
 - `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`, and a `suspected_polysemy` warning. Run it on a bridge keyword before enabling `related --cross-scope`.

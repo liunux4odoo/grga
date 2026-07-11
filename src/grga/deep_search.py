@@ -1,4 +1,3 @@
-import itertools
 import json
 import logging
 import os
@@ -190,15 +189,6 @@ class KeywordLibrary:
                 updated_at TEXT,
                 PRIMARY KEY (scope, directory, term)
             );
-            CREATE TABLE IF NOT EXISTS keyword_pairs (
-                scope TEXT NOT NULL,
-                directory TEXT NOT NULL,
-                keyword_a TEXT NOT NULL,
-                keyword_b TEXT NOT NULL,
-                count REAL NOT NULL DEFAULT 0,
-                updated_at TEXT,
-                PRIMARY KEY (scope, directory, keyword_a, keyword_b)
-            );
             CREATE TABLE IF NOT EXISTS keyword_sources (
                 directory TEXT NOT NULL,
                 keyword TEXT NOT NULL,
@@ -208,7 +198,6 @@ class KeywordLibrary:
                 updated_at TEXT,
                 PRIMARY KEY (directory, keyword, path, line_number)
             );
-            CREATE INDEX IF NOT EXISTS idx_pairs_dir ON keyword_pairs (directory, count);
             CREATE INDEX IF NOT EXISTS idx_counts_dir ON keyword_counts (directory, count);
             CREATE INDEX IF NOT EXISTS idx_sources_kw ON keyword_sources (directory, keyword);
             """
@@ -220,10 +209,8 @@ class KeywordLibrary:
             return
         params = (self.decay_factor, directory)
         self.conn.execute("UPDATE keyword_counts SET count = count * ? WHERE directory = ?", params)
-        self.conn.execute("UPDATE keyword_pairs SET count = count * ? WHERE directory = ?", params)
         self.conn.execute("UPDATE keyword_sources SET count = count * ? WHERE directory = ?", params)
         self.conn.execute("DELETE FROM keyword_counts WHERE directory = ? AND count < ?", (directory, self.min_count))
-        self.conn.execute("DELETE FROM keyword_pairs WHERE directory = ? AND count < ?", (directory, self.min_count))
         self.conn.execute("DELETE FROM keyword_sources WHERE directory = ? AND count < ?", (directory, self.min_count))
         self.conn.commit()
 
@@ -242,20 +229,26 @@ class KeywordLibrary:
                 """,
                 (scope, directory, term, now),
             )
-        pair_rows = [
-            (scope, directory, left, right, now)
-            for left, right in itertools.combinations(sorted(terms, key=lambda item: item.casefold()), 2)
-        ]
-        if pair_rows:
-            self.conn.executemany(
-                """
-                INSERT INTO keyword_pairs (scope, directory, keyword_a, keyword_b, count, updated_at)
-                VALUES (?, ?, ?, ?, 1, ?)
-                ON CONFLICT(scope, directory, keyword_a, keyword_b)
-                DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
-                """,
-                pair_rows,
-            )
+        # Since the chunk-level migration (schema v4) keyword_pairs is a
+        # multi-source table gated by anti-pollution (only ``chunk_cooccur``
+        # from build and ``llm_promoted`` from ``grga index promote`` may
+        # write). The v1 LLM-driven deep-search pairs are now routed through
+        # ``llm_extension_votes`` — several deep-search co-mentions of the
+        # same pair accumulate votes, then ``grga index promote`` graduates
+        # them into ``keyword_pairs`` when the threshold is reached. This
+        # keeps a single write path for the graph and matches the plan's
+        # "两种 source 只允许 chunk_cooccur / llm_promoted" contract.
+        if len(terms) >= 2:
+            try:
+                from grga.graph.votes import record_votes_from_keywords
+
+                record_votes_from_keywords(
+                    terms, directory=directory, weight=1.0, conn=self.conn
+                )
+            except Exception:
+                # Vote recording is best-effort auxiliary — a failure here
+                # must not derail the deep-search primary flow.
+                pass
 
     def add_sources(self, directory, keywords, path, line_number):
         terms = _normalize_keywords(keywords)
@@ -277,6 +270,11 @@ class KeywordLibrary:
         self.conn.commit()
 
     def history(self, directory, seed_keywords, limit=30, global_library=False):
+        # Pair history now reads from ``llm_extension_votes`` (the pre-promote
+        # buffer that deep-search co-mentions feed into). ``keyword_pairs``
+        # in schema v4 is a graph-facing table with a different PK; the
+        # ``history`` caller (deep-search's query-plan seed) needs the raw
+        # LLM-driven co-occurrence buffer, not the promoted / chunk edges.
         seeds = [item for item in _normalize_keywords(seed_keywords)]
         params = []
         where = []
@@ -286,16 +284,24 @@ class KeywordLibrary:
         if seeds:
             placeholders = ",".join("?" for _ in seeds)
             lowered = [item.casefold() for item in seeds]
-            where.append(f"(LOWER(keyword_a) IN ({placeholders}) OR LOWER(keyword_b) IN ({placeholders}))")
+            where.append(f"(keyword_a IN ({placeholders}) OR keyword_b IN ({placeholders}))")
             params.extend(lowered)
             params.extend(lowered)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
-        rows = self.conn.execute(
-            f"SELECT scope, keyword_a, keyword_b, count FROM keyword_pairs{clause} ORDER BY count DESC LIMIT ?",
-            (*params, limit),
-        ).fetchall()
+        try:
+            rows = self.conn.execute(
+                f"SELECT keyword_a, keyword_b, vote_count FROM llm_extension_votes"
+                f"{clause} ORDER BY vote_count DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
         pairs = [
-            {"source": row["scope"], "keywords": [row["keyword_a"], row["keyword_b"]], "count": round(row["count"], 3)}
+            {
+                "source": "votes",
+                "keywords": [row["keyword_a"], row["keyword_b"]],
+                "count": round(float(row["vote_count"] or 0.0), 3),
+            }
             for row in rows
         ]
         if pairs or seeds:

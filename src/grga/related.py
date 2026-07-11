@@ -1,18 +1,24 @@
-"""``related()`` API - L2 graph neighbours (Phase 4.4).
+"""``related()`` API — L2 graph neighbours (chunk-level).
 
 Three modes map to the three "adjacent document" definitions from
-``docs/design/v2-design.md`` §7.3:
+``docs/design/v2-design.md`` §7.3, refactored on top of the chunk-level
+tables (schema v4):
 
-* ``graph``  - run Personalized PageRank over the keyword co-occurrence
-  graph (``keyword_pairs`` + ``keyword_docs``), then resolve the top
-  keywords back to the documents that contain them.
-* ``dir``    - documents living in the same directories as the documents
+* ``graph``  — run Personalized PageRank over the keyword pair graph
+  (``keyword_pairs``), then resolve top keywords back to documents via
+  ``keyword_chunks``.
+* ``dir``    — documents living in the same directories as the documents
   that contain the seed keywords (directory-level proximity).
 * ``heading``- documents that share a ``heading_path`` with a document
   containing the seed keywords (cross-document chapter match).
 
 All modes are read-only, deterministic, and never touch an LLM. Each
 returns a list of :class:`Related` records sorted by ``score`` desc.
+
+The ``graph`` mode additionally reports a ``graph_signals`` metadata block
+(seed segment-df, total-chunks-in-scope, top neighbour edges with npmi /
+raw count / source) so callers can classify seeds (hub / domain / rare)
+and re-rank neighbours themselves. See §4.1 of the chunk-migration plan.
 """
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ from grga.trace import GraphAction
 
 VALID_MODES = ("graph", "dir", "heading")
 DEFAULT_LIMIT = 20
+DEFAULT_GRAPH_SIGNALS_LIMIT = 30
 
 
 @dataclass
@@ -55,6 +62,9 @@ class Related:
     reason: str = ""
     keywords: List[str] = field(default_factory=list)
     directory: Optional[str] = None
+    # ``mode='graph'`` only: the chunk-level metadata block described in
+    # the chunk-migration plan §4.1. ``None`` for other modes.
+    graph_signals: Optional[dict] = None
 
     @property
     def qualified_path(self) -> str:
@@ -64,7 +74,7 @@ class Related:
         return self.doc_path
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "doc_path": self.doc_path,
             "score": round(self.score, 6),
             "mode": self.mode,
@@ -73,6 +83,9 @@ class Related:
             "directory": self.directory,
             "qualified_path": self.qualified_path,
         }
+        if self.graph_signals is not None:
+            out["graph_signals"] = self.graph_signals
+        return out
 
 
 def _fold(term: str) -> str:
@@ -96,6 +109,7 @@ def related(
     iters: int = DEFAULT_ITERS,
     cross_scope: bool = False,
     same_scope: bool = False,
+    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
 ) -> List[Related]:
     """Return documents related to ``keywords`` under the chosen ``mode``.
 
@@ -105,22 +119,12 @@ def related(
         limit: maximum number of results.
         db_path: SQLite path (defaults to shared deep-search DB).
         directory: optional scope filter. In the user-scoped storage model
-            this is a *query-time filter*, not a partition key: all
-            ``index build`` invocations share the same DB and rows are
-            grouped by their ``directory`` column.
+            this is a *query-time filter*, not a partition key.
         alpha / iters: PPR knobs (``graph`` mode only).
-        cross_scope: ``mode=graph`` only. When ``True`` and ``directory``
-            is given, seeds are validated against ``directory`` but PPR
-            expansion and final doc collection cross into every other
-            scope in the shared DB. Ignored for ``mode=dir`` (directory
-            proximity is intrinsically scope-local) and for
-            ``mode=heading`` (which is cross-scope by default; use
-            ``same_scope=True`` to override).
-        same_scope: ``mode=heading`` only. When ``True``, restrict heading
-            matches to ``directory`` (the pre-v2.2 default). Otherwise the
-            heading branch searches across every indexed scope so a
-            shared heading path like ``Install > macOS`` surfaces
-            documents from other corpora.
+        cross_scope: ``mode=graph`` only.
+        same_scope: ``mode=heading`` only.
+        graph_signals_limit: cap on ``neighbor_edges`` inside the
+            ``graph_signals`` metadata (``mode=graph`` only).
 
     Raises:
         ValueError: if ``mode`` is not recognised.
@@ -143,14 +147,10 @@ def related(
             return _related_graph(
                 conn, seeds, limit, scope_key, alpha, iters,
                 cross_scope=cross_scope, db_path=target_db,
+                graph_signals_limit=graph_signals_limit,
             )
         if mode == "dir":
             return _related_dir(conn, seeds, limit, scope_key)
-        # heading: seeds are always sourced from --directory (when given) so
-        # the walk starts in the caller's project, but the second-stage
-        # heading match is cross-scope by default so callers can discover
-        # sibling sections in other corpora. ``same_scope=True`` restricts
-        # the second stage to --directory too (legacy behaviour).
         return _related_heading(
             conn, seeds, limit,
             seed_scope_key=scope_key,
@@ -160,39 +160,20 @@ def related(
         conn.close()
 
 
-def _docs_for_keywords(
+# ---------------------------------------------------------------------------
+# Chunk-level primitives shared by all modes.
+# ---------------------------------------------------------------------------
+
+
+def _docs_for_keywords_chunks(
     conn: sqlite3.Connection,
     keywords: Sequence[str],
     scope_key: Optional[str],
-) -> Dict[str, float]:
-    """Return ``{doc_path: summed occurrence_count}`` for the given keywords."""
-    if not keywords:
-        return {}
-    placeholders = ",".join("?" for _ in keywords)
-    params: List = list(keywords)
-    where = f"keyword IN ({placeholders})"
-    if scope_key is not None:
-        where += " AND directory = ?"
-        params.append(scope_key)
-    rows = conn.execute(
-        f"SELECT doc_path, occurrence_count FROM keyword_docs WHERE {where}",
-        params,
-    ).fetchall()
-    docs: Dict[str, float] = {}
-    for row in rows:
-        docs[row["doc_path"]] = docs.get(row["doc_path"], 0.0) + float(row["occurrence_count"])
-    return docs
+) -> Dict[Tuple[str, str], Tuple[float, set]]:
+    """Aggregate ``keyword_chunks`` to ``{(directory, doc_path): (weight, kws)}``.
 
-
-def _scoped_docs_for_keywords(
-    conn: sqlite3.Connection,
-    keywords: Sequence[str],
-    scope_key: Optional[str],
-) -> Dict[tuple, float]:
-    """Like :func:`_docs_for_keywords` but keyed on ``(directory, doc_path)``.
-
-    Needed whenever results may span more than one scope (cross-scope or
-    global queries), where a bare relative ``doc_path`` is ambiguous.
+    ``weight`` is the summed ``occurrence_count`` across chunks and the
+    seed keywords. ``kws`` is the set of seed keywords that hit this doc.
     """
     if not keywords:
         return {}
@@ -203,14 +184,128 @@ def _scoped_docs_for_keywords(
         where += " AND directory = ?"
         params.append(scope_key)
     rows = conn.execute(
-        f"SELECT directory, doc_path, occurrence_count FROM keyword_docs WHERE {where}",
+        f"SELECT directory, keyword, doc_path, "
+        f"SUM(occurrence_count) AS total, COUNT(*) AS chunks "
+        f"FROM keyword_chunks WHERE {where} "
+        f"GROUP BY directory, keyword, doc_path",
         params,
     ).fetchall()
-    docs: Dict[tuple, float] = {}
+    out: Dict[Tuple[str, str], Tuple[float, set]] = {}
     for row in rows:
         key = (row["directory"], row["doc_path"])
-        docs[key] = docs.get(key, 0.0) + float(row["occurrence_count"])
-    return docs
+        prev_w, prev_kws = out.get(key, (0.0, set()))
+        prev_kws = set(prev_kws)
+        prev_kws.add(row["keyword"])
+        out[key] = (prev_w + float(row["total"] or 0.0), prev_kws)
+    return out
+
+
+def _seed_chunk_df(
+    conn: sqlite3.Connection,
+    keywords: Sequence[str],
+    scope_key: Optional[str],
+) -> Dict[str, int]:
+    """Return ``{keyword: chunk_df}`` — distinct chunks each keyword hits."""
+    if not keywords:
+        return {}
+    placeholders = ",".join("?" for _ in keywords)
+    params: List = list(keywords)
+    where = f"keyword IN ({placeholders})"
+    if scope_key is not None:
+        where += " AND directory = ?"
+        params.append(scope_key)
+    rows = conn.execute(
+        f"SELECT keyword, COUNT(*) AS df FROM keyword_chunks WHERE {where} "
+        f"GROUP BY keyword",
+        params,
+    ).fetchall()
+    return {row["keyword"]: int(row["df"]) for row in rows}
+
+
+def _total_chunks_in_scope(
+    conn: sqlite3.Connection,
+    scope_key: Optional[str],
+) -> int:
+    where = ""
+    params: List = []
+    if scope_key is not None:
+        where = " WHERE directory = ?"
+        params.append(scope_key)
+    row = conn.execute(
+        f"SELECT COUNT(*) AS n FROM chunks{where}", params
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def _neighbor_edges_for_seeds(
+    conn: sqlite3.Connection,
+    seeds: Sequence[str],
+    neighbor_keywords: Sequence[str],
+    scope_key: Optional[str],
+    limit: int,
+) -> List[dict]:
+    """Return ``keyword_pairs`` rows connecting seeds to their PPR neighbours.
+
+    Each row carries ``a`` / ``b`` / ``npmi`` / ``cooccur_count`` /
+    ``source``. Ordered by ``npmi DESC NULLS LAST`` then ``cooccur_count
+    DESC`` for determinism, capped at ``limit``.
+    """
+    if not seeds or not neighbor_keywords or limit <= 0:
+        return []
+    seed_ph = ",".join("?" for _ in seeds)
+    nbr_ph = ",".join("?" for _ in neighbor_keywords)
+    params: List = [*seeds, *neighbor_keywords, *neighbor_keywords, *seeds]
+    where = (
+        f"((keyword_a IN ({seed_ph}) AND keyword_b IN ({nbr_ph})) "
+        f" OR (keyword_a IN ({nbr_ph}) AND keyword_b IN ({seed_ph})))"
+    )
+    if scope_key is not None:
+        where += " AND directory = ?"
+        params.append(scope_key)
+    rows = conn.execute(
+        f"SELECT keyword_a, keyword_b, npmi, cooccur_count, source "
+        f"FROM keyword_pairs WHERE {where}",
+        params,
+    ).fetchall()
+    seed_set = set(seeds)
+    out: List[dict] = []
+    for row in rows:
+        a, b = row["keyword_a"], row["keyword_b"]
+        # Orient (a, b) so ``a`` is the seed side (for caller convenience).
+        if a in seed_set:
+            oa, ob = a, b
+        else:
+            oa, ob = b, a
+        npmi = row["npmi"]
+        out.append(
+            {
+                "a": oa,
+                "b": ob,
+                "npmi": float(npmi) if npmi is not None else None,
+                "cooccur_count": float(row["cooccur_count"] or 0.0),
+                "source": row["source"],
+            }
+        )
+    # Deterministic ordering: npmi desc (None last), then cooccur desc,
+    # then (a, b) lexicographic.
+    def _sort_key(edge: dict):
+        npmi = edge["npmi"]
+        # Non-None npmi should sort before None (higher priority); within
+        # non-None, higher is better; ties broken by cooccur_count then a/b.
+        return (
+            0 if npmi is not None else 1,
+            -(npmi if npmi is not None else 0.0),
+            -edge["cooccur_count"],
+            edge["a"],
+            edge["b"],
+        )
+    out.sort(key=_sort_key)
+    return out[:limit]
+
+
+# ---------------------------------------------------------------------------
+# mode = graph
+# ---------------------------------------------------------------------------
 
 
 def _related_graph(
@@ -223,11 +318,12 @@ def _related_graph(
     *,
     cross_scope: bool = False,
     db_path: Optional[Path] = None,
+    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
 ) -> List[Related]:
-    """Public-facing wrapper preserving the historical ``List[Related]`` shape."""
     results, _, _ = _related_graph_impl(
         conn, seeds, limit, scope_key, alpha, iters,
         cross_scope=cross_scope, db_path=db_path,
+        graph_signals_limit=graph_signals_limit,
     )
     return results
 
@@ -242,17 +338,9 @@ def _build_graph_trace(
 ) -> List["GraphAction"]:
     """Reconstruct a walk trace from a finished ``mode=graph`` computation.
 
-    PPR is a diffusion, not a literal walk, so there is no ground-truth
-    edge sequence to report. We reconstruct a *deterministic BFS tree*
-    over the co-occurrence graph (restricted to the keywords PPR actually
-    scored) to give viewers a stable, explainable traversal:
-
-    * ``traverse_edge`` — one per BFS tree edge (keyword→keyword), then one
-      per (contributing keyword → document) edge.
-    * ``score_node`` — one per PPR-ranked keyword and one per result doc.
-
-    ``fallback=True`` marks the "no graph signal" branch, where results are
-    direct-seed hits: we emit only seed→file edges (hop 1) plus file scores.
+    (Same algorithm as the doc-level implementation; only the underlying
+    graph source changed. The trace contract remains a deterministic BFS
+    tree over the co-occurrence graph.)
     """
     from collections import deque
 
@@ -262,8 +350,6 @@ def _build_graph_trace(
     seed_set = {s for s in seeds}
 
     if fallback:
-        # Direct-seed degrade: seeds point straight at the docs that contain
-        # them; no keyword graph was walked.
         for r in results:
             file_node = _trace.encode_file(r.doc_path)
             for kw in sorted(r.keywords):
@@ -287,14 +373,6 @@ def _build_graph_trace(
     node_ids = getattr(indexed, "node_ids", [])
     neighbors = getattr(indexed, "neighbors", [])
 
-    # ``wanted`` is the set of keywords PPR scored (``kw_score`` includes the
-    # seeds via setdefault upstream). We BFS the *full* graph — not just the
-    # scored subset — so a scored node reached only via an unscored
-    # intermediate (seed → A(unscored) → B(scored)) still gets a correct
-    # ``hops_from_seed`` and a connecting edge. Restricting the walk to
-    # ``wanted`` used to orphan such nodes (missing ``traverse_edge`` +
-    # ``hops_from_seed=-1``), which broke the "every walked edge is
-    # reported" contract (trace-signals.md §5.1).
     wanted = {
         node_index[kw] for kw in kw_score if kw in node_index
     }
@@ -302,11 +380,10 @@ def _build_graph_trace(
     seed_id_set = set(seed_ids)
 
     hop: Dict[int, int] = {sid: 0 for sid in seed_ids}
-    parent: Dict[int, Tuple[int, float]] = {}  # child -> (parent, edge weight)
+    parent: Dict[int, Tuple[int, float]] = {}
     dq: deque = deque(seed_ids)
     while dq:
         cur = dq.popleft()
-        # Deterministic neighbour order: heaviest edge first, then node id.
         ordered = sorted(
             neighbors[cur],
             key=lambda t: (-t[1], node_ids[t[0]]),
@@ -318,10 +395,6 @@ def _build_graph_trace(
             parent[j] = (cur, w)
             dq.append(j)
 
-    # Emit only the edges on shortest paths from a seed to a scored keyword:
-    # walk parent pointers up from each reachable ``wanted`` node, collecting
-    # each tree edge once. This keeps the trace bounded to the result-relevant
-    # subtree while staying connected (no dangling scored node).
     emitted: Dict[Tuple[int, int], Tuple[float, int]] = {}
     for target in wanted:
         if target in seed_id_set or target not in hop:
@@ -331,7 +404,7 @@ def _build_graph_trace(
             par, w = parent[node]
             key = (par, node)
             if key in emitted:
-                break  # ancestor chain already recorded
+                break
             emitted[key] = (w, hop[node])
             node = par
 
@@ -349,10 +422,6 @@ def _build_graph_trace(
 
     hop_by_kw = {node_ids[idx]: h for idx, h in hop.items()}
 
-    # score_node for every PPR-ranked (non-seed) keyword, in descending
-    # score then keyword order so the trace is byte-stable. A keyword with
-    # positive PPR score is by construction reachable from a seed, so
-    # ``hop_by_kw`` has an entry; the ``continue`` guard is defensive only.
     ranked = sorted(
         ((kw, sc) for kw, sc in kw_score.items() if kw not in seed_set),
         key=lambda item: (-item[1], item[0]),
@@ -368,7 +437,6 @@ def _build_graph_trace(
             )
         )
 
-    # Keyword→document edges + document scores.
     for r in sorted(results, key=lambda x: (-x.score, x.doc_path, x.directory or "")):
         file_node = _trace.encode_file(r.doc_path)
         contributing = sorted(
@@ -409,50 +477,27 @@ def _related_graph_impl(
     cross_scope: bool = False,
     db_path: Optional[Path] = None,
     collect_trace: bool = False,
+    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
 ) -> Tuple[List[Related], Dict[str, float], List["GraphAction"]]:
     """Run PPR + doc collection and return ``(results, kw_score, trace)``.
 
-    .. note::
-       Return arity changed in the trace-signals v1 rollout: this helper
-       now yields a **3-tuple** ``(results, kw_score, trace)`` (was a
-       2-tuple). ``trace`` is an empty list unless ``collect_trace=True``.
-       Internal callers only; external code should use :func:`related` or
-       :func:`related_graph_with_preview`.
-
-    Split out of :func:`_related_graph` so callers that also need the
-    keyword-score dict (e.g. potential future observability code) can get
-    it without a second traversal. The primary caller,
-    :func:`_related_graph`, drops the second element.
-
-    The ``kw_score`` we return here is always the **scope-restricted** one
-    — mixing it with cross-scope PPR results was tried once (P0-2 draft)
-    and abandoned because it silently changed which docs came back
-    whenever the caller passed ``--preview``. The preview annotation now
-    runs its own unrestricted PPR via
-    :func:`compute_crossed_scopes_preview` (whose adjacency is cached, so
-    the extra pass is cheap after the first call).
+    Chunk-level: seed → doc resolution goes through ``keyword_chunks``
+    instead of ``keyword_docs``; each result carries a ``graph_signals``
+    metadata block with segment-df and neighbour-edge details.
     """
-    # In cross-scope mode the seeds must still originate from ``scope_key``
-    # (we do not want a keyword that only lives in another corpus to
-    # bootstrap the walk), but PPR expansion and final document collection
-    # are unrestricted. When ``scope_key`` is None (global query) cross_scope
-    # is a no-op: the walk already spans the whole graph.
+    # In cross-scope mode the seeds must still originate from ``scope_key``.
     if cross_scope and scope_key is not None:
-        seed_docs = _docs_for_keywords(conn, seeds, scope_key)
+        seed_docs = _docs_for_keywords_chunks(conn, seeds, scope_key)
         if not seed_docs:
             return [], {}, []
         edge_scope_key: Optional[str] = None
         doc_scope_key: Optional[str] = None
+        signals_scope_key: Optional[str] = None
     else:
         edge_scope_key = scope_key
         doc_scope_key = scope_key
+        signals_scope_key = scope_key
 
-    # Adjacency is expensive to rebuild (~30% of the call) and unchanged
-    # between successive queries against the same (db, scope). Route the
-    # fetch through ``adjacency_cache`` when a ``db_path`` was threaded in
-    # by the top-level ``related()``; fall back to a fresh build when
-    # invoked without one (kept for legacy in-process callers that pass a
-    # bare connection). The indexed graph drives the fast PPR path.
     if db_path is not None:
         from grga.graph.adjacency_cache import get_adjacency
 
@@ -466,20 +511,40 @@ def _related_graph_impl(
         ranked_keywords = personalized_pagerank_indexed(
             seeds, indexed, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
         )
+
+    # Segment-df / total-chunks / neighbour-edges are computed once per
+    # call. All results in a single call share the same ``graph_signals``
+    # block by reference (immutable dict) so the JSON payload stays compact.
+    seed_chunk_df = _seed_chunk_df(conn, seeds, signals_scope_key)
+    total_chunks = _total_chunks_in_scope(conn, signals_scope_key)
+    if ranked_keywords:
+        neighbor_kws = [kw for kw, _ in ranked_keywords]
+    else:
+        neighbor_kws = []
+    neighbor_edges = _neighbor_edges_for_seeds(
+        conn, seeds, neighbor_kws, edge_scope_key, graph_signals_limit,
+    )
+    graph_signals = {
+        "seed_chunk_df": {kw: int(seed_chunk_df.get(kw, 0)) for kw in seeds},
+        "total_chunks_in_scope": int(total_chunks),
+        "neighbor_edges": neighbor_edges,
+    }
+
     if not ranked_keywords:
         # No graph signal: fall back to documents that directly contain the
-        # seed keywords so the caller still gets something useful.
-        direct = _scoped_docs_for_keywords(conn, seeds, doc_scope_key)
+        # seed keywords via ``keyword_chunks``.
+        direct = _docs_for_keywords_chunks(conn, seeds, doc_scope_key)
         results = [
             Related(
                 doc_path=doc,
                 score=score,
                 mode="graph",
                 reason="direct-seed",
-                keywords=list(seeds),
+                keywords=sorted(kws),
                 directory=directory,
+                graph_signals=graph_signals,
             )
-            for (directory, doc), score in direct.items()
+            for (directory, doc), (score, kws) in direct.items()
         ]
         results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
         capped = results[:limit]
@@ -490,7 +555,6 @@ def _related_graph_impl(
         return capped, {}, trace
 
     kw_score = {kw: score for kw, score in ranked_keywords}
-    # Include the seeds so their own documents are represented.
     for seed in seeds:
         kw_score.setdefault(seed, max(kw_score.values()) if kw_score else 1.0)
 
@@ -501,28 +565,18 @@ def _related_graph_impl(
     if doc_scope_key is not None:
         where += " AND directory = ?"
         params.append(doc_scope_key)
+    # Aggregate at doc level via SUM/COUNT over keyword_chunks. The
+    # ``log1p`` damping mirrors the doc-level fix (plan-2026-07-11 P0):
+    # segment-level occurrence counts can still be dominated by a single
+    # noisy chunk repeating the same low-PPR token thousands of times.
     rows = conn.execute(
-        f"SELECT directory, keyword, doc_path, occurrence_count FROM keyword_docs WHERE {where}",
+        f"SELECT directory, keyword, doc_path, "
+        f"SUM(occurrence_count) AS total, COUNT(*) AS chunk_count "
+        f"FROM keyword_chunks WHERE {where} "
+        f"GROUP BY directory, keyword, doc_path",
         params,
     ).fetchall()
 
-    # Key on (directory, doc_path): the same relative path can exist in
-    # several scopes when the query spans more than one, so collapsing on
-    # doc_path alone would merge unrelated documents.
-    #
-    # Per-keyword contribution is ``ppr_score * log1p(occurrence_count)``.
-    # The ``log1p`` damping is a deliberate fix for the "PPR collapse" bug
-    # (plan-2026-07-11 P0): with a raw linear ``occurrence_count`` a single
-    # document that repeats one low-PPR stopword thousands of times (e.g.
-    # ``if`` × 980 inside ``cytoscape.min.js``) drowns out every genuinely
-    # related document. The seed ``qwenpaw`` produced clean PPR *keywords*
-    # (grga / tools / install / rga / docs) yet a noise-file top result,
-    # because the linear product amplified frequency, not relevance.
-    # ``log1p`` keeps the monotonic "more occurrences ⇒ higher weight"
-    # signal while compressing the runaway tail; it is a pure mathematical
-    # normalisation (no corpus-specific stopword list, no file-type filter),
-    # so it holds across both the code-repo and Chinese-novel scenarios in
-    # the plan's cross-scenario matrix.
     doc_score: Dict[tuple, float] = {}
     doc_keywords: Dict[tuple, set] = {}
     for row in rows:
@@ -531,7 +585,7 @@ def _related_graph_impl(
         if weight <= 0:
             continue
         key = (row["directory"], row["doc_path"])
-        contribution = weight * math.log1p(float(row["occurrence_count"]))
+        contribution = weight * math.log1p(float(row["total"] or 0.0))
         doc_score[key] = doc_score.get(key, 0.0) + contribution
         doc_keywords.setdefault(key, set()).add(kw)
 
@@ -543,6 +597,7 @@ def _related_graph_impl(
             reason="ppr",
             keywords=sorted(doc_keywords.get((directory, doc), set())),
             directory=directory,
+            graph_signals=graph_signals,
         )
         for (directory, doc), score in doc_score.items()
     ]
@@ -555,22 +610,23 @@ def _related_graph_impl(
     return capped, kw_score, trace
 
 
+# ---------------------------------------------------------------------------
+# mode = dir
+# ---------------------------------------------------------------------------
+
+
 def _related_dir(
     conn: sqlite3.Connection,
     seeds: Sequence[str],
     limit: int,
     scope_key: Optional[str],
 ) -> List[Related]:
-    seed_docs = _scoped_docs_for_keywords(conn, seeds, scope_key)
+    seed_docs = _docs_for_keywords_chunks(conn, seeds, scope_key)
     if not seed_docs:
         return []
-    # Directory of each seed doc -> aggregated seed relevance.
-    # ``scope`` here is the indexed scope root; ``parent`` is the doc's
-    # filesystem parent *inside* that scope. We key on the tuple so two
-    # scopes cannot silently share a `parent`.
     dir_weight: Dict[tuple, float] = {}
     seed_doc_keys = set(seed_docs.keys())
-    for (scope, doc), weight in seed_docs.items():
+    for (scope, doc), (weight, _kws) in seed_docs.items():
         parent = str(Path(doc).parent)
         dir_weight[(scope, parent)] = dir_weight.get((scope, parent), 0.0) + weight
     if not dir_weight:
@@ -582,7 +638,7 @@ def _related_dir(
         where = " WHERE directory = ?"
         params.append(scope_key)
     rows = conn.execute(
-        f"SELECT DISTINCT directory, doc_path FROM keyword_docs{where}",
+        f"SELECT DISTINCT directory, doc_path FROM keyword_chunks{where}",
         params,
     ).fetchall()
 
@@ -595,7 +651,7 @@ def _related_dir(
         if weight is None:
             continue
         if (scope, doc) in seed_doc_keys:
-            continue  # skip the seed docs themselves
+            continue
         results.append(
             Related(
                 doc_path=doc,
@@ -610,6 +666,11 @@ def _related_dir(
     return results[:limit]
 
 
+# ---------------------------------------------------------------------------
+# mode = heading
+# ---------------------------------------------------------------------------
+
+
 def _related_heading(
     conn: sqlite3.Connection,
     seeds: Sequence[str],
@@ -618,25 +679,12 @@ def _related_heading(
     seed_scope_key: Optional[str],
     match_scope_key: Optional[str],
 ) -> List[Related]:
-    # Seed selection and match diffusion are two independent scope concepts.
-    # Seeds are limited to ``seed_scope_key`` (``--directory`` if given) so
-    # the walk starts in the caller's project. The second stage decides
-    # whether matching heading docs must also live in ``--directory``
-    # (``match_scope_key`` set) or may come from any scope in the shared DB
-    # (``match_scope_key=None``, the cross-scope default).
-    #
-    # Track seed docs as (directory, doc_path) so identically-named files in
-    # different scopes are not conflated when the query spans multiple
-    # scopes (the default for mode=heading in the user-scoped model).
-    seed_docs = _scoped_docs_for_keywords(conn, seeds, seed_scope_key)
+    seed_docs = _docs_for_keywords_chunks(conn, seeds, seed_scope_key)
     if not seed_docs:
         return []
-    seed_doc_set: set = set(seed_docs.keys())  # {(directory, doc_path), ...}
+    seed_doc_set: set = set(seed_docs.keys())
     seed_directories = {directory for directory, _ in seed_doc_set}
 
-    # Heading paths present in the seed documents. Restrict the lookup to
-    # the *seed scopes* (a subset of the DB) so identically-named files in
-    # unrelated scopes cannot inject stray heading paths into the seed set.
     seed_doc_paths = sorted({doc for _, doc in seed_doc_set})
     doc_ph = ",".join("?" for _ in seed_doc_paths)
     dir_ph = ",".join("?" for _ in seed_directories)
@@ -649,9 +697,6 @@ def _related_heading(
     if not rows:
         return []
 
-    # Keep only heading rows attached to *actual* seed docs (the doc_path IN
-    # + directory IN filter above is a cross-product; discard the mismatched
-    # cells here so we do not pull heading paths from an unrelated scope).
     seed_full_paths: List[str] = []
     seed_leaves: List[str] = []
     for row in rows:
@@ -667,10 +712,6 @@ def _related_heading(
     if not seed_full_paths:
         return []
 
-    # Match on both the full serialised path (exact chapter reuse) and its
-    # leaf heading (cross-document section reuse, e.g. two files each having
-    # a "macOS" subsection under different parents). We assign the leaf
-    # signal a lower weight so exact chapter matches float to the top.
     where_parts: List[str] = []
     params = []
     if seed_full_paths:
@@ -697,8 +738,6 @@ def _related_heading(
 
     full_set = set(seed_full_paths)
     leaf_set = set(seed_leaves)
-    # Score on (directory, doc_path) so an identically-named file in a
-    # different scope is a distinct result, not a merge.
     doc_score: Dict[tuple, float] = {}
     doc_headings: Dict[tuple, set] = {}
     for row in rows:
@@ -732,6 +771,11 @@ def _related_heading(
     return results[:limit]
 
 
+# ---------------------------------------------------------------------------
+# --cross-scope preview
+# ---------------------------------------------------------------------------
+
+
 def _preview_from_kw_score(
     conn: sqlite3.Connection,
     kw_score: Dict[str, float],
@@ -739,14 +783,7 @@ def _preview_from_kw_score(
 ) -> dict:
     """Build a ``crossed_scopes_preview`` dict from an existing PPR ``kw_score``.
 
-    Extracted from :func:`compute_crossed_scopes_preview` so the SQL /
-    aggregation / polysemy-annotation stage is shared and independently
-    testable. ``kw_score`` is expected to come from an *unrestricted* PPR
-    (the preview is about cross-scope reach), which
-    :func:`compute_crossed_scopes_preview` computes.
-
-    ``scope_key`` MUST be a real scope string (never ``None``); the caller
-    is responsible for the "no scope filter → no preview" short-circuit.
+    Reads ``keyword_chunks`` to count other-scope reach (post-migration).
     """
     if not kw_score:
         return {"would_add": 0, "top_other_scopes": [], "top_bridge_keywords": []}
@@ -757,9 +794,10 @@ def _preview_from_kw_score(
     params.append(scope_key)
     rows = conn.execute(
         f"""
-        SELECT directory, keyword, doc_path, occurrence_count
-        FROM keyword_docs
+        SELECT directory, keyword, doc_path, SUM(occurrence_count) AS total
+        FROM keyword_chunks
         WHERE keyword IN ({placeholders}) AND directory != ?
+        GROUP BY directory, keyword, doc_path
         """,
         params,
     ).fetchall()
@@ -777,7 +815,7 @@ def _preview_from_kw_score(
         if doc_key not in seen_docs:
             seen_docs.add(doc_key)
             scope_counts.setdefault(directory, set()).add(row["doc_path"])
-        bridge_weight[kw] = bridge_weight.get(kw, 0.0) + weight * math.log1p(float(row["occurrence_count"]))
+        bridge_weight[kw] = bridge_weight.get(kw, 0.0) + weight * math.log1p(float(row["total"] or 0.0))
 
     top_scopes = sorted(
         ((scope, len(docs)) for scope, docs in scope_counts.items()),
@@ -786,15 +824,6 @@ def _preview_from_kw_score(
     top_bridges = sorted(
         bridge_weight.items(), key=lambda item: (-item[1], item[0])
     )[:5]
-    # Annotate each bridge keyword with the same polysemy heuristic
-    # ``graph inspect`` uses. This collapses the SKILL.md upgrade sequence
-    # (inside → preview → inspect → enable) into three steps: the caller
-    # no longer has to loop ``grga graph inspect`` over the top bridges to
-    # detect same-name-different-meaning collisions before flipping
-    # ``--cross-scope``. The batched helper resolves all top-N seed sets in
-    # one ``keyword IN (...)`` scan of ``keyword_docs`` (previously N full
-    # scans, one per bridge — the annotation was silently linear in total
-    # corpus size).
     from grga.graph.inspect import compute_suspected_polysemy_batch
 
     bridge_keywords = [kw for kw, _ in top_bridges]
@@ -825,25 +854,7 @@ def compute_crossed_scopes_preview(
     *,
     db_path: Optional[Path] = None,
 ) -> Optional[dict]:
-    """Estimate what opening ``--cross-scope`` would pull into a graph query.
-
-    Returns ``None`` when there is nothing to preview (no scope filter is
-    active, so the query already spans the whole graph). Otherwise returns::
-
-        {
-          "would_add": <int docs reachable in *other* scopes>,
-          "top_other_scopes": [{"scope": str, "count": int}, ...],
-          "top_bridge_keywords": [{"keyword": str, "cross_weight": float}, ...],
-        }
-
-    Runs an unrestricted PPR (over the whole graph) and delegates the
-    SQL / aggregation / polysemy-annotation stage to
-    :func:`_preview_from_kw_score`. Called by
-    :func:`related_graph_with_preview` when ``preview=True``, and safe to
-    call standalone by external code. The adjacency is fetched through
-    :mod:`grga.graph.adjacency_cache` so the extra PPR is cheap after the
-    first call within a session.
-    """
+    """Estimate what opening ``--cross-scope`` would pull into a graph query."""
     if scope_key is None:
         return None
 
@@ -877,18 +888,12 @@ def related_graph_with_preview(
     cross_scope: bool = False,
     preview: bool = False,
     collect_trace: bool = False,
+    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
 ) -> dict:
     """``mode=graph`` variant returning results plus cross-scope observability.
 
     Returns ``{"results": List[Related], "crossed_scopes_preview": dict|None,
-    "graph_actions": List[GraphAction]}``. ``graph_actions`` is populated
-    only when ``collect_trace=True`` (the ``--json`` path); otherwise it is
-    an empty list. The preview is **opt-in** (``preview=True``) because it
-    runs a full-graph PPR whose cost scales with *every other* scope in the
-    shared DB — undesirable as an implicit tax on ordinary scoped queries.
-    It is still ``None`` when no ``directory`` scope is active even if
-    requested. Used by ``related --preview --json`` so a caller can see what
-    ``--cross-scope`` would pull in before committing to it.
+    "graph_actions": List[GraphAction]}``.
     """
     seeds = [s for s in (_fold(k) for k in keywords) if s]
     if not seeds:
@@ -901,21 +906,11 @@ def related_graph_with_preview(
     conn = connect(target_db)
     try:
         ensure_schema(conn)
-        # Main result list ALWAYS uses the scope-restricted PPR so callers
-        # get identical results with or without ``preview``. Prior to the
-        # 2026-07-09 review-followup this branch used
-        # ``_use_unrestricted_ppr=True`` and re-scored the in-scope docs
-        # with cross-scope keyword weights — silently changing ~30% of the
-        # top-20 depending on the preview flag. That broke the observability
-        # contract (``--preview`` must not perturb the results it's
-        # describing). Now the preview annotation runs its own unrestricted
-        # PPR via the standalone ``compute_crossed_scopes_preview`` (its
-        # adjacency is cached by :mod:`grga.graph.adjacency_cache`, so the
-        # second PPR is cheap after the first call).
         results, _, trace = _related_graph_impl(
             conn, seeds, limit, scope_key, alpha, iters,
             cross_scope=cross_scope, db_path=target_db,
             collect_trace=collect_trace,
+            graph_signals_limit=graph_signals_limit,
         )
         crossed_preview = None
         if preview and scope_key is not None:

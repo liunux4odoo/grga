@@ -2,7 +2,7 @@
 
 **When to use.** The user has a topic keyword and wants to see **which
 other documents in the repository discuss it**, not just where it literally
-appears. This pattern leans on the offline L2 graph (`keyword_docs` +
+appears. This pattern leans on the offline L2 graph (`keyword_chunks` +
 `keyword_pairs`) so it is fast and does **not** call an LLM.
 
 ## Storyboard

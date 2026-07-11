@@ -32,7 +32,8 @@ def _pairs(db: Path) -> list[dict]:
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT scope, keyword_a, keyword_b, count FROM keyword_pairs"
+                "SELECT source, keyword_a, keyword_b, cooccur_count AS count "
+                "FROM keyword_pairs"
             ).fetchall()
         ]
     finally:
@@ -65,7 +66,7 @@ def test_threshold_gate_only_promotes_qualifying_pairs(tmp_path):
     assert ("gamma", "delta") not in promoted_keys
 
     pairs = _pairs(db)
-    assert all(p["scope"] == PROMOTE_SCOPE for p in pairs)
+    assert all(p["source"] == PROMOTE_SCOPE for p in pairs)
     keys = {(p["keyword_a"], p["keyword_b"]) for p in pairs}
     assert keys == {("alpha", "beta"), ("epsilon", "zeta")}
 

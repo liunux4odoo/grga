@@ -53,8 +53,8 @@ def two_scope_db(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "shared.db"
-    build_graph_index(a, db_path=db, min_term_count=1)
-    build_graph_index(b, db_path=db, min_term_count=1)
+    build_graph_index(a, db_path=db, min_pair_count=1)
+    build_graph_index(b, db_path=db, min_pair_count=1)
     return {"a": a, "b": b, "db": db}
 
 
