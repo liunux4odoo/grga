@@ -101,12 +101,16 @@ def iter_text_files(
     *,
     max_file_bytes: int,
     ignore_dirs: Iterable[str],
+    on_skip: Optional[Callable[[str], None]] = None,
 ) -> Iterable[Path]:
     """Yield candidate text files under ``scope``.
 
     Directories matching ``ignore_dirs`` (name-only, matched at any depth)
     are pruned. Files larger than ``max_file_bytes`` or with unrecognised
-    suffixes are silently dropped so binary blobs never reach the tokeniser.
+    suffixes are dropped so binary blobs never reach the tokeniser; when
+    ``on_skip`` is given it is called with a short reason (``"too_large"`` or
+    ``"bad_suffix"``) for each dropped file so callers can explain an empty
+    run.
     """
     ignore_set = {name for name in ignore_dirs}
     if scope.is_file():
@@ -132,12 +136,16 @@ def iter_text_files(
                 continue
             suffix = entry.suffix.lower()
             if suffix not in _TEXT_SUFFIXES:
+                if on_skip is not None:
+                    on_skip("bad_suffix")
                 continue
             try:
                 size = entry.stat().st_size
             except OSError:
                 continue
             if size > max_file_bytes:
+                if on_skip is not None:
+                    on_skip("too_large")
                 continue
             yield entry
 
@@ -253,6 +261,7 @@ def build_graph_index(
             scope_path,
             max_file_bytes=max_file_bytes,
             ignore_dirs=ignore_dirs,
+            on_skip=stats.bump_reason,
         ):
             stats.files_scanned += 1
             try:

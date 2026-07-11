@@ -835,6 +835,27 @@ def index_build_command(
         f"{stats.heading_docs_written} heading rows "
         f"({stats.md_files_indexed} md) in {stats.elapsed_seconds:.2f}s"
     )
+    if stats.files_scanned == 0:
+        reasons = stats.reasons
+        too_large = reasons.get("too_large", 0)
+        bad_suffix = reasons.get("bad_suffix", 0)
+        parts: List[str] = []
+        if too_large:
+            parts.append(f"{too_large} file(s) exceeded --max-file-kb={max_file_kb}")
+        if bad_suffix:
+            parts.append(f"{bad_suffix} file(s) had unindexed suffixes")
+        if parts:
+            typer.echo(
+                "hint: no files were indexed; " + ", ".join(parts) + ". "
+                "Try raising --max-file-kb or narrowing --scope.",
+                err=True,
+            )
+        else:
+            typer.echo(
+                "hint: no text files found under --scope; "
+                "check the path or add supported suffixes.",
+                err=True,
+            )
 
 
 @index_app.command("promote")
