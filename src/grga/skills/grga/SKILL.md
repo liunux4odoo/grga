@@ -181,6 +181,26 @@ Guardrail across tiers: **always re-probe an LLM-reformulated query
 before searching it** — it is unvalidated and can be either empty or
 explosive.
 
+### T2 loop-shape: three touchpoints in a caller session
+
+The tier ladder above describes each verb's per-call role. Orthogonal to
+that, **T2 `related`** tends to fire at three moments in a caller
+session:
+
+1. **Session open** — before the first T1 `search`, run one T2 from the
+   caller's raw seed keywords to expand into a working seed set. Cheapest
+   place to catch alias / vocabulary gaps before they compound.
+2. **Mid-session** — T1-driven. T2 stays reactive:
+   - On stuck signal V (Vocabulary-mismatch, see below) → escalate to T2.
+   - Caller may invoke T2 anytime by judgment (e.g. a suspected alias
+     surfacing in hits, a topic shift widening the seed set).
+3. **Pre-commit** — before committing an answer, run one T2 from the
+   final seed set to catch missed aliases or adjacent evidence. This is
+   the last cheap defense against false-completeness.
+
+Each T2 call is one hop from the current seeds; whether to chain further
+calls is the caller's judgment, not a workflow rule.
+
 ### Stuck signals & escalation
 
 The tier ladder above describes the *happy path*. What follows is the
