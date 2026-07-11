@@ -926,20 +926,31 @@ def _make_index_build_progress():
             key = "ngram"
             if key not in state:
                 state[key] = progress.add_task(
-                    "[magenta]n-gram 分词", total=event["iters"], note=""
+                    "[magenta]n-gram 分词", total=event["chunks"] or None, note=""
                 )
             progress.update(
                 state[key],
-                completed=event["iter"] - 1,
+                total=event["chunks"] or None,
+                completed=0,
                 note=f"第 {event['iter']}/{event['iters']} 轮 · {event['chunks']} chunks",
             )
+        elif phase == "ngram_iter_advance":
+            task = state.get("ngram")
+            if task is not None:
+                progress.update(
+                    task,
+                    total=event["total"] or None,
+                    completed=event["current"],
+                    note=f"第 {event['iter']}/{event['iters']} 轮 · "
+                         f"{event['current']}/{event['total']} chunks",
+                )
         elif phase == "ngram_iter_end":
             task = state.get("ngram")
             if task is not None:
                 progress.update(
                     task,
-                    completed=event["iter"],
-                    note=f"{event['phrases']} 短语",
+                    completed=event["chunks"],
+                    note=f"第 {event['iter']}/{event['iters']} 轮 · {event['phrases']} 短语",
                 )
         elif phase == "materialise_start":
             state["mat"] = progress.add_task(

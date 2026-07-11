@@ -1212,6 +1212,7 @@ def build_graph_index(
             phrase_set = set(auto_dict.keys())
             chunk_tokens = {}
             line_token_lists: List[List[str]] = []
+            chunks_done = 0
             for entry in docs:
                 doc_id, rel_path, path, is_md, chunks = entry[:5]
                 for chunk in chunks:
@@ -1222,6 +1223,14 @@ def build_graph_index(
                     chunk_tokens[(doc_id, chunk.chunk_id)] = toks
                     if toks:
                         line_token_lists.append(toks)
+                    chunks_done += 1
+                    _emit(
+                        "ngram_iter_advance",
+                        iter=iteration + 1,
+                        iters=iters,
+                        current=chunks_done,
+                        total=total_scanned_chunks,
+                    )
             if run_detection:
                 detected = detect_ngram_phrases(
                     line_token_lists, max_n=max_ngram_n,
