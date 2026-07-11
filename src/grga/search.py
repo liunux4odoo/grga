@@ -68,7 +68,6 @@ def check_environment():
     add_tools_to_path()
     rg = find_tool("rg")
     rga = find_tool("rga")
-    rga_preproc = find_tool("rga-preproc")
     pandoc = find_tool("pandoc")
 
     errors = []
@@ -78,10 +77,14 @@ def check_environment():
         errors.append("未找到 rga 命令，请先安装 ripgrep_all")
     if rg is None:
         errors.append("未找到 rg 命令，请先安装 ripgrep")
-    if rga_preproc is None:
-        warnings.append("未找到 rga-preproc，将不支持 office 等非文本文档")
+    # ``rga-preproc`` is ripgrep-all's internal adapter runner. grga never
+    # invokes it directly (search/expand/graph all go through ``rga``), so
+    # its presence is not a meaningful signal — rga dispatches adapters
+    # itself. We only warn about ``pandoc`` because the pandoc adapter is
+    # a separate binary rga shells out to for epub/docx/odt; without it
+    # those formats fail to preprocess while PDFs (poppler) still work.
     if pandoc is None:
-        warnings.append("未找到 pandoc，将不支持 office 等非文本文档")
+        warnings.append("未找到 pandoc，将不支持 epub/docx/odt 等文档")
 
     return {
         "ok": not errors,
@@ -90,7 +93,6 @@ def check_environment():
         "paths": {
             "rg": rg,
             "rga": rga,
-            "rga-preproc": rga_preproc,
             "pandoc": pandoc,
         },
     }

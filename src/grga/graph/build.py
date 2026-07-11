@@ -39,6 +39,13 @@ from itertools import combinations
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
+from grga.file_read import (
+    RGA_SUPPORTED_SUFFIXES,
+    TEXT_SUFFIXES,
+    ReadSource,
+    indexable_suffixes,
+    read_file_lines_ex,
+)
 from grga.graph.ids import IdInterner
 from grga.graph.schema import CHUNK_COOCCUR_SOURCE, connect, ensure_schema
 
@@ -93,14 +100,12 @@ _STOPWORDS = frozenset(
 )
 
 _MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
-_TEXT_SUFFIXES = {
-    ".md", ".markdown", ".mdown", ".mkd", ".rst", ".txt", ".text",
-    ".py", ".pyi", ".rb", ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".hpp",
-    ".java", ".kt", ".swift", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-    ".vue", ".css", ".scss", ".less", ".html", ".htm", ".xml", ".yaml",
-    ".yml", ".toml", ".ini", ".cfg", ".conf", ".json", ".sh", ".bash",
-    ".zsh", ".fish", ".ps1", ".sql", ".r", ".m",
-}
+# Legacy alias: prior code used this local set both for the enumeration
+# gate in ``iter_text_files`` and (implicitly) for "text vs binary"
+# routing. The gate is now driven by :func:`grga.file_read.indexable_suffixes`
+# so PDFs / Office docs make it through; ``_TEXT_SUFFIXES`` is kept only
+# for existing external callers and unit tests that imported it.
+_TEXT_SUFFIXES = TEXT_SUFFIXES
 
 VALID_CHUNK_MODES = ("line", "chars")
 DEFAULT_CHUNK_MAX_CHARS = 600
@@ -117,6 +122,12 @@ class BuildStats:
     files_scanned: int = 0
     files_indexed: int = 0
     files_skipped: int = 0
+    # ``rga_reads`` counts documents whose lines were pulled via
+    # ripgrep-all's adapter chain (PDF / Office / archives / ...). It
+    # measures the *slow path*: each such read forks rga, so a spike
+    # here explains a slow build. Text files opened natively do not
+    # contribute.
+    rga_reads: int = 0
     chunks_written: int = 0
     keyword_chunks_written: int = 0
     pairs_written: int = 0
@@ -137,6 +148,7 @@ class BuildStats:
             "files_scanned": self.files_scanned,
             "files_indexed": self.files_indexed,
             "files_skipped": self.files_skipped,
+            "rga_reads": self.rga_reads,
             "chunks_written": self.chunks_written,
             "keyword_chunks_written": self.keyword_chunks_written,
             "pairs_written": self.pairs_written,
@@ -172,12 +184,18 @@ def iter_text_files(
     ignore_dirs: Iterable[str],
     on_skip: Optional[Callable[[str], None]] = None,
 ) -> Iterable[Path]:
-    """Yield candidate text files under ``scope`` (unchanged from doc-level).
+    """Yield candidate indexable files under ``scope``.
+
+    "Indexable" is the union of the plain-text whitelist and the
+    ripgrep-all-supported binary formats (PDF, Office, archives, ...);
+    see :func:`grga.file_read.indexable_suffixes`. Files whose suffix
+    is neither are reported via ``on_skip("bad_suffix")`` and skipped.
 
     ``max_file_bytes <= 0`` means *no size limit* (sentinel semantics): every
-    text file passes the size gate. A positive value skips files larger than
-    it and reports them via ``on_skip("too_large")``.
+    indexable file passes the size gate. A positive value skips files larger
+    than it and reports them via ``on_skip("too_large")``.
     """
+    accepted_suffixes = indexable_suffixes()
     ignore_set = {name for name in ignore_dirs}
     if scope.is_file():
         yield scope
@@ -201,7 +219,7 @@ def iter_text_files(
             if not entry.is_file():
                 continue
             suffix = entry.suffix.lower()
-            if suffix not in _TEXT_SUFFIXES:
+            if suffix not in accepted_suffixes:
                 if on_skip is not None:
                     on_skip("bad_suffix")
                 continue
@@ -774,12 +792,19 @@ def build_graph_index(
             on_skip=stats.bump_reason,
         ):
             stats.files_scanned += 1
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            # Dispatch on suffix inside :func:`read_file_lines_ex`: text
+            # files use plain open(), rga-supported binaries route through
+            # ``rga --passthru``. A ``FAILED`` source means we could not
+            # extract anything (missing rga, timeout, hard error) — treat
+            # it exactly like the legacy OSError branch.
+            read_result = read_file_lines_ex(path)
+            if read_result.source == ReadSource.FAILED:
                 stats.files_skipped += 1
                 stats.bump_reason("read_error")
                 continue
+            if read_result.source == ReadSource.RGA:
+                stats.rga_reads += 1
+            text = "\n".join(read_result.lines)
             try:
                 rel_path = str(path.resolve().relative_to(scope_path))
             except ValueError:

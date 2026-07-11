@@ -16,6 +16,7 @@ src/grga/
 │   related,suggest}.py
 ├── deep_search.py              # v1 多跳搜索（重量级，legacy 主体）
 ├── models.py, meta.py          # 数据类 Hit / Context + 位置元数据填充
+├── file_read.py                # 统一 file→list[str]：文本走 open()、非文本 suffix 走 rga --passthru
 ├── graph/                      # 离线图索引（PPR / 投票 / schema）
 ├── structure/                  # Markdown 章节解析 + sidecar 缓存
 ├── skills/, skill_install.py   # 内置 Skill 树 + 安装器
@@ -62,6 +63,7 @@ grga v2 的检索原语，按 caller agent 的推理层级由轻到重排列。�
 |---|---|
 | `models.py` | `Hit`（命中）+ `Context`（扩展块）dataclass；`Hit.from_raw_match` 是 v1 dict → v2 类型化的桥 |
 | `meta.py` | `annotate_hits` 填充位置元数据：`occurrence_index` / `line_ratio` / `nearby_hits` |
+| `file_read.py` | `read_file_lines(path)` / `read_file_lines_ex(path)`：suffix 分派——文本白名单走 `open()`、rga adapter 支持的 suffix（PDF/Office/归档/sqlite）走 `rga --passthru --json`。行号与 `search` 输出对齐。`TEXT_SUFFIXES` / `RGA_SUPPORTED_SUFFIXES` / `indexable_suffixes()` 是集合级出口。**expand 和 graph.build 是唯二消费者**，其它模块用之前先想清楚是否真的需要走 rga |
 
 命中的 v1 raw 结构（dict）与 v2 `Hit` 类共存，**不互相替换**（design §7.2）。
 

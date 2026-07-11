@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
+from grga.file_read import read_file_lines
 from grga.models import Context, Hit
 
 DEFAULT_LINES_SIZE = 3
@@ -71,11 +72,7 @@ def _resolve_path(path: str, base_dir: Optional[str | Path]) -> Path:
 
 
 def _read_lines(path: Path) -> List[str]:
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read().splitlines()
-    except OSError:
-        return []
+    return read_file_lines(path)
 
 
 def _expand_lines(hit: Hit, lines: List[str], size: int) -> Context:

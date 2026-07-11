@@ -834,7 +834,9 @@ def suggest(
 ### Phase 7+ · 待完善
 - [ ] 评估体系（离散指标 + agent-level 端到端）
 - [ ] 代码结构感知（tree-sitter，非 md 场景）
-- [ ] 其他格式（PDF/Office）的行段兜底优化
+- [x] 其他格式（PDF/Office）的行段兜底优化（2026-07-11：expand / graph.build 统一经
+      `grga.file_read.read_file_lines` 读取，非文本 suffix 路由到 `rga --passthru`，
+      行号与 search 对齐；PDF/Office 结构解析仍留白，`expand --level chapter` 对非 md 继续走退化链）
 
 ---
 
