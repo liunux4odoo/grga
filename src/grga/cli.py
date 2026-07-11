@@ -132,6 +132,20 @@ def _get_config_debug() -> bool:
         return False
 
 
+def _resolve_debug(debug: bool, json_output: bool) -> bool:
+    """Resolve the effective debug flag.
+
+    In ``--json`` mode debug output is forced off unless it was explicitly
+    requested via the ``--debug`` command-line flag, so that stdout carries
+    JSON content only and the config-file ``debug`` setting is ignored.
+    """
+    if debug:
+        return True
+    if json_output:
+        return False
+    return _get_config_debug()
+
+
 def _join_keywords(keywords):
     return " ".join(item for item in keywords if item.strip()).strip()
 
@@ -240,7 +254,7 @@ def search_command(
     implicit_explicit = implicit_and or implicit_or
     effective_max_total = max_total if (max_total is None or max_total > 0) else None
 
-    effective_debug = debug or _get_config_debug()
+    effective_debug = _resolve_debug(debug, json_output)
     configure_logging(debug=effective_debug)
 
     _apply_prefer_system(prefer_system)
@@ -337,7 +351,7 @@ def deep_search_command(
         typer.echo("query cannot be empty", err=True)
         raise typer.Exit(2)
 
-    effective_debug = debug or _get_config_debug()
+    effective_debug = _resolve_debug(debug, json_output)
     configure_logging(debug=effective_debug)
 
     _apply_prefer_system(prefer_system)
@@ -483,7 +497,7 @@ def probe_command(
         raise typer.Exit(2)
     implicit_operator = "or" if implicit_or else "and"
 
-    effective_debug = debug or _get_config_debug()
+    effective_debug = _resolve_debug(debug, json_output)
     configure_logging(debug=effective_debug)
 
     _apply_prefer_system(prefer_system)
