@@ -1490,133 +1490,65 @@ def suggest_command(
     typer.echo(f"tokens: {suggestion.tokens_used} ({suggestion.model})", err=True)
 
 
-def _echo_preview_summary(preview: Optional[dict]) -> None:
-    """Render a compact ``crossed_scopes_preview`` summary to stderr.
 
-    Used on the human-readable ``related --mode graph --preview`` path (no
-    ``--json``) so the preview signal is surfaced instead of silently
-    discarded. ``None`` (no scope filter active) prints a short note.
-    """
-    if preview is None:
-        typer.echo(
-            "# preview: no --directory scope active, query already spans "
-            "every scope (nothing to cross into)",
-            err=True,
-        )
-        return
-    would_add = preview.get("would_add", 0)
-    scope_count = len(preview.get("top_other_scopes", []))
-    typer.echo(
-        f"# preview: --cross-scope would add {would_add} docs across "
-        f"{scope_count} other scope(s)",
-        err=True,
-    )
-    bridges = preview.get("top_bridge_keywords", [])
-    if bridges:
-        rendered = ", ".join(
-            f"{b['keyword']} (polysemy?)" if b.get("suspected_polysemy")
-            else b["keyword"]
-            for b in bridges
-        )
-        typer.echo(f"# top bridge keywords: {rendered}", err=True)
+
 
 
 @app.command("related")
 def related_command(
     keywords: List[str] = typer.Argument(..., help="Seed keywords."),
-    mode: str = typer.Option("graph", "--mode", "-m", help="Relation mode: graph | dir | heading."),
-    limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of related documents."),
+    mode: str = typer.Option("graph", "--mode", "-m", help="Relation mode: `graph` (candidate keywords via co-occurrence) or `heading` (docs sharing a Markdown chapter with a seed-containing doc)."),
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of results (per-seed for graph mode)."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
-    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Stored scope key from `grga index build --scope` (resolved absolute path). Restrict PPR / heading / dir expansion to a previously indexed scope. The directory need not still exist on disk."),
-    cross_scope: bool = typer.Option(False, "--cross-scope", help="mode=graph only: seed docs stay in --directory, PPR expansion crosses into every other scope."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict graph/heading expansion to a previously indexed scope (resolved absolute path). The directory need not still exist on disk."),
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
-    preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview."),
-    min_npmi: Optional[float] = typer.Option(None, "--min-npmi", help="mode=graph only: drop chunk_cooccur edges with npmi below this before PPR. Default 0.2 (or $GRGA_PPR_MIN_NPMI). Mutually exclusive with --edge-quantile."),
-    edge_quantile: Optional[float] = typer.Option(None, "--edge-quantile", help="mode=graph only: keep the top X fraction of edges by npmi (sampled). E.g. 0.1 keeps top 10%. Mutually exclusive with --min-npmi."),
+    min_npmi: Optional[float] = typer.Option(None, "--min-npmi", help="mode=graph only: read-side floor on chunk_cooccur pair npmi. Can only tighten the v8 write-time floor (0.2). Default 0.2, or $GRGA_PPR_MIN_NPMI."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
-    """List documents related to the given keywords via the L2 graph."""
+    """List related keywords (graph) or documents (heading) for the seeds.
+
+    v8 keyword-primary (Phase 3b-2):
+
+    * ``--mode graph`` returns *candidate keywords* + association evidence
+      (npmi, cooccur_count, chunk_df, via_seed). Caller turns keywords into
+      passages with a follow-up ``grga search`` or ripgrep. No PPR, no full
+      graph load, no adjacency cache — sub-millisecond hot path.
+    * ``--mode heading`` returns documents that share a Markdown
+      ``heading_path`` with any seed-containing document.
+    * ``--mode dir`` was removed; use ``grga search --json`` and aggregate
+      by directory client-side.
+    """
     from grga.related import VALID_MODES, related as related_docs
 
-    if mode not in VALID_MODES:
-        typer.echo(f"mode must be one of: {', '.join(VALID_MODES)}", err=True)
+    # graph is not in VALID_MODES (which lists doc-returning modes only);
+    # it dispatches to related_keywords() below. Validate here.
+    if mode not in ("graph",) + tuple(VALID_MODES):
+        typer.echo(
+            f"mode must be one of: graph, {', '.join(VALID_MODES)}",
+            err=True,
+        )
         raise typer.Exit(2)
+
     seeds = [item for item in keywords if item.strip()]
     if not seeds:
         typer.echo("keywords cannot be empty", err=True)
         raise typer.Exit(2)
-    if cross_scope and mode != "graph":
-        typer.echo("--cross-scope only applies to --mode graph", err=True)
-        raise typer.Exit(2)
     if same_scope and mode != "heading":
         typer.echo("--same-scope only applies to --mode heading", err=True)
         raise typer.Exit(2)
-    if preview and mode != "graph":
-        typer.echo("--preview only applies to --mode graph", err=True)
+    if min_npmi is not None and mode != "graph":
+        typer.echo("--min-npmi only applies to --mode graph", err=True)
         raise typer.Exit(2)
-    if min_npmi is not None and edge_quantile is not None:
-        typer.echo(
-            "--min-npmi and --edge-quantile are mutually exclusive",
-            err=True,
-        )
-        raise typer.Exit(2)
-    if (min_npmi is not None or edge_quantile is not None) and mode != "graph":
-        typer.echo(
-            "--min-npmi / --edge-quantile only apply to --mode graph",
-            err=True,
-        )
-        raise typer.Exit(2)
-    if edge_quantile is not None and not (0.0 < edge_quantile <= 1.0):
-        typer.echo(
-            "--edge-quantile must be in the open interval (0, 1]",
-            err=True,
-        )
-        raise typer.Exit(2)
-
-    resolved_min_npmi = min_npmi
-    if edge_quantile is not None:
-        from grga.related import resolve_edge_quantile_cutoff
-
-        resolved_min_npmi = resolve_edge_quantile_cutoff(
-            db_path=str(db_path) if db_path else None,
-            directory=str(directory) if directory else None,
-            quantile=edge_quantile,
-        )
 
     if mode == "graph":
-        # v8 keyword-primary (Phase 3b-1): graph mode returns candidate
-        # keywords + association evidence, NOT documents. The caller turns
-        # keywords into passages with ripgrep. See
-        # docs/design/plan-2026-07-12-keyword-primary.md §4.
-        #
-        # The pre-v8 PPR flags (--alpha/--iters/--cross-scope/--preview/
-        # --edge-quantile) no longer affect graph mode. They are accepted
-        # for CLI backward-compatibility but ignored; a later phase removes
-        # them. --min-npmi still applies (read-side floor).
         from grga.related import related_keywords
-
-        deprecated_used = [
-            name for name, used in (
-                ("--cross-scope", cross_scope),
-                ("--preview", preview),
-                ("--edge-quantile", edge_quantile is not None),
-            ) if used
-        ]
-        if deprecated_used:
-            typer.echo(
-                "note: " + ", ".join(deprecated_used)
-                + " no longer affect --mode graph in the v8 keyword-primary "
-                "model (graph now returns candidate keywords, not documents); "
-                "ignored.",
-                err=True,
-            )
 
         kw_results = related_keywords(
             seeds,
             limit_per_seed=limit,
             db_path=str(db_path) if db_path else None,
             directory=str(directory) if directory else None,
-            min_npmi=resolved_min_npmi,
+            min_npmi=min_npmi,
         )
         if json_output:
             out = {"results": [r.to_dict() for r in kw_results]}
@@ -1625,7 +1557,6 @@ def related_command(
         if not kw_results:
             typer.echo("no related keywords found", err=True)
             raise typer.Exit(0)
-        # Human-readable: one candidate per line with its evidence.
         for r in kw_results:
             typer.echo(
                 f"{r.npmi:.4f}  {r.kw}"
@@ -1636,13 +1567,13 @@ def related_command(
         )
         return
 
+    # mode == 'heading' — doc-returning path via related()
     results = related_docs(
         seeds,
         mode=mode,
         limit=limit,
         db_path=str(db_path) if db_path else None,
         directory=str(directory) if directory else None,
-        cross_scope=cross_scope,
         same_scope=same_scope,
     )
     if json_output:

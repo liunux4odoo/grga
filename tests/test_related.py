@@ -35,32 +35,34 @@ def indexed_scope(monkeypatch, tmp_path):
     return {"scope": scope, "db": db}
 
 
-def test_graph_mode_returns_documents(indexed_scope):
-    results = related(
-        ["grga"],
-        mode="graph",
-        db_path=indexed_scope["db"],
-        directory=indexed_scope["scope"],
-        limit=10,
-    )
-    docs = [r.doc_path for r in results]
-    assert docs, "graph mode should return at least one document"
-    assert any(r.mode == "graph" for r in results)
+def test_graph_mode_raises_migration_hint(indexed_scope):
+    """v8 keyword-primary (Phase 3b-2): mode='graph' on related() is gone.
+
+    ValueError message must point callers at ``related_keywords`` so the
+    migration story is discoverable from the exception itself.
+    """
+    with pytest.raises(ValueError, match="related_keywords"):
+        related(
+            ["grga"],
+            mode="graph",
+            db_path=indexed_scope["db"],
+            directory=indexed_scope["scope"],
+        )
 
 
-def test_dir_mode_prefers_same_directory(indexed_scope):
-    results = related(
-        ["brew"],
-        mode="dir",
-        db_path=indexed_scope["db"],
-        directory=indexed_scope["scope"],
-        limit=10,
-    )
-    docs = {r.doc_path for r in results}
-    # ``brew`` lives in install/macos.md, so install/linux.md should show up
-    # as a directory-sibling result, while usage/cli.md should not.
-    assert "install/linux.md" in docs or Path("install/linux.md").as_posix() in docs
-    assert not any("usage" in Path(d).parts for d in docs if d)
+def test_dir_mode_raises_migration_hint(indexed_scope):
+    """v8 keyword-primary (Phase 3b-2): mode='dir' removed.
+
+    ValueError message should suggest the Unix-pipeline replacement
+    (grga search --json | aggregate).
+    """
+    with pytest.raises(ValueError, match="grga search"):
+        related(
+            ["brew"],
+            mode="dir",
+            db_path=indexed_scope["db"],
+            directory=indexed_scope["scope"],
+        )
 
 
 def test_heading_mode_crosses_documents(indexed_scope):
@@ -83,16 +85,16 @@ def test_invalid_mode_raises(indexed_scope):
 
 def test_empty_seed_returns_empty(indexed_scope):
     assert (
-        related([""], mode="graph", db_path=indexed_scope["db"], directory=indexed_scope["scope"])
+        related([""], mode="heading", db_path=indexed_scope["db"], directory=indexed_scope["scope"])
         == []
     )
 
 
 def test_unknown_keyword_gracefully_degrades(indexed_scope):
-    # ``dir`` mode: unknown seeds return an empty list rather than raising.
+    # heading mode: unknown seeds return an empty list rather than raising.
     result = related(
         ["totally-unknown-token"],
-        mode="dir",
+        mode="heading",
         db_path=indexed_scope["db"],
         directory=indexed_scope["scope"],
     )

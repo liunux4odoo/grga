@@ -212,25 +212,10 @@ def test_related_graph_results_carry_keyword_contributions(graph_scope, schema):
 
 
 # --------------------------------------------------------------------------- #
-# dir / heading modes: no graph-only signals                                  #
+# heading mode: no graph-only signals                                         #
+# (mode=dir removed in v8 Phase 3b-2; heading covers the "plain results,     #
+#  no expansion/contributions" invariant.)                                    #
 # --------------------------------------------------------------------------- #
-
-
-def test_related_dir_has_no_expansion_or_contributions(graph_scope):
-    result = runner.invoke(
-        app,
-        ["related", "brew", "--mode", "dir",
-         "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json"],
-    )
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert "expansion" not in payload
-    assert "graph_actions" not in payload
-    assert "trace_signals_version" not in payload
-    for r in payload["results"]:
-        assert "keyword_contributions" not in r
-        assert "graph_signals" not in r
 
 
 def test_related_heading_has_no_expansion_or_contributions(graph_scope):
