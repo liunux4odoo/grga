@@ -225,6 +225,30 @@ caller 证据触发**再定，不在 v1 预判。
 - 从 v0.1 到 v0.2 的收窄（10 op → 3 op）不视为破坏性变更，因为 v0.1 从未
   实现发布。
 
+### 7.1 · 2026-07-12 · P1.2 `min_npmi` 阈值(非 schema 变化)
+
+`graph_signals.neighbor_edges` 的 **schema 不变**(仍是
+`[{a,b,npmi,cooccur_count,source}]`),但其**门槛语义**在 2026-07-12 P1.2
+落地后从"任何 `edge_weight > 0` 的边"收紧为"npmi ≥ 默认 0.2 的
+`chunk_cooccur` 边(加所有 `llm_promoted` 边,后者 npmi 常 NULL)"参与 PPR。
+consumer 需知晓的行为差异:
+
+- **PPR 输入图**:npmi < 阈值的 `chunk_cooccur` 边不再被 PPR 消费,也
+  不出现在 `graph_actions` 的 `traverse_edge` 里。
+- **`neighbor_edges` 出现范围**:neighbor 列表本身来自 PPR 结果(即
+  经过阈值过滤),但 seed→neighbor 的具体边由
+  ``_neighbor_edges_for_seeds`` 单独查 `keyword_pairs`,不再复用 PPR
+  的门槛。因此**低 npmi 的 seed↔neighbor 边仍可能出现**在
+  `neighbor_edges` 里——只要另一端 neighbor 经由某条高 npmi 路径进入
+  PPR top-k。这不是 bug,是"neighbor 集合"与"seed↔neighbor 边"两层
+  过滤解耦的直接结果;caller 若需要严格阈值一致性,自行按
+  `npmi >= min_npmi` 复筛即可。
+- 通过 `--min-npmi 0` 可恢复旧行为(见
+  `docs/design/plan-2026-07-12-related-perf.md` §2.4)。
+
+因为 schema、字段名、字段类型、trace-signals-v1 词汇表均未变,不 bump
+`trace_signals_version`。CHANGELOG 单独描述这一门槛调整。
+
 ---
 
 ## 8. 验收标准

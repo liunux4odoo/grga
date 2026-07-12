@@ -54,19 +54,18 @@ def two_scope_db(monkeypatch, tmp_path):
 
 
 def test_second_call_hits_cache(two_scope_db):
-    """Same (db, scope) twice ⇒ load_edges runs exactly once."""
+    """Same (db, scope) twice ⇒ load_edges_indexed runs exactly once."""
     with patch(
-        "grga.graph.adjacency_cache.load_edges", wraps=__import__(
-            "grga.graph.ppr", fromlist=["load_edges"]
-        ).load_edges,
+        "grga.graph.adjacency_cache.load_edges_indexed", wraps=__import__(
+            "grga.graph.ppr", fromlist=["load_edges_indexed"]
+        ).load_edges_indexed,
     ) as spy:
-        _, adj1, idx1 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
-        _, adj2, idx2 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
+        _, _, idx1 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
+        _, _, idx2 = get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
     assert spy.call_count == 1, (
         f"expected 1 SQL rebuild, got {spy.call_count}"
     )
     # Second return is the *same object* (returned by reference).
-    assert adj1 is adj2
     assert idx1 is idx2
 
 
@@ -75,7 +74,8 @@ def test_mtime_bump_invalidates(two_scope_db):
     from grga.graph import ppr as ppr_mod
 
     with patch(
-        "grga.graph.adjacency_cache.load_edges", wraps=ppr_mod.load_edges
+        "grga.graph.adjacency_cache.load_edges_indexed",
+        wraps=ppr_mod.load_edges_indexed,
     ) as spy:
         get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
         # Force a resolvable mtime bump — the filesystem may collapse
@@ -94,7 +94,8 @@ def test_different_scopes_are_independent(two_scope_db):
     from grga.graph import ppr as ppr_mod
 
     with patch(
-        "grga.graph.adjacency_cache.load_edges", wraps=ppr_mod.load_edges
+        "grga.graph.adjacency_cache.load_edges_indexed",
+        wraps=ppr_mod.load_edges_indexed,
     ) as spy:
         get_adjacency(two_scope_db["db"], str(two_scope_db["a"]))
         get_adjacency(two_scope_db["db"], str(two_scope_db["b"]))
@@ -122,7 +123,8 @@ def test_lru_evicts_oldest_when_over_maxsize(two_scope_db, tmp_path):
     priming_scopes = [f"/tmp/nonexistent_scope_{i}" for i in range(CACHE_MAXSIZE)]
 
     with patch(
-        "grga.graph.adjacency_cache.load_edges", wraps=ppr_mod.load_edges
+        "grga.graph.adjacency_cache.load_edges_indexed",
+        wraps=ppr_mod.load_edges_indexed,
     ) as spy:
         # Fill cache with CACHE_MAXSIZE entries.
         for s in priming_scopes:

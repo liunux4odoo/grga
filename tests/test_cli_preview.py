@@ -68,6 +68,10 @@ def test_preview_without_json_prints_summary(two_scope_db):
             "--db", str(two_scope_db["db"]),
             "-d", str(two_scope_db["a"]),
             "--preview",
+            # Synthetic mini-corpus: pin off the P1.2 default so the shared
+            # bridgeword survives as a PPR bridge (test targets preview
+            # output shape, not threshold policy).
+            "--min-npmi", "0",
         ],
     )
     assert result.exit_code == 0, _err(result)
@@ -86,6 +90,7 @@ def test_preview_without_json_still_prints_results(two_scope_db):
             "--db", str(two_scope_db["db"]),
             "-d", str(two_scope_db["a"]),
             "--preview",
+            "--min-npmi", "0",
         ],
     )
     assert result.exit_code == 0
@@ -102,6 +107,7 @@ def test_preview_no_scope_prints_note(two_scope_db):
             "--mode", "graph",
             "--db", str(two_scope_db["db"]),
             "--preview",
+            "--min-npmi", "0",
         ],
     )
     assert result.exit_code == 0

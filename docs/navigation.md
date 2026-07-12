@@ -78,8 +78,8 @@ grga v2 的检索原语，按 caller agent 的推理层级由轻到重排列。�
 | `schema.py` | v5 表建立 + 两跳链式迁移 (v1/v3→v4→v5)：intern 表 (`directories` / `keywords` / `docs`) + 业务表 (`chunks` / `keyword_chunks` / `keyword_pairs`(带 `source` 列) / `heading_docs` / `llm_extension_votes` / `keyword_counts` / `keyword_sources`) 全部按 id 外键引用 intern；v3→v4 抢救 `llm_promoted` 行，v4→v5 折叠 TEXT 列到 intern。原子 BEGIN IMMEDIATE，caller-owned txn 兼容 |
 | `ids.py` | `IdInterner`：get-or-insert 三张 intern 表 + 反查文本；每个查询/写入路径通过它把用户串换成 id、把结果 id 换回串（守 --json 契约） |
 | `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk(line/chars)、通过 `IdInterner` 写 `chunks` / `keyword_chunks` / `keyword_pairs[chunk_cooccur]`(npmi) |
-| `ppr.py` | Personalized PageRank 手写 power iteration；`load_edges` 从 `keyword_pairs` JOIN `keywords` 读边（节点仍是 keyword 字符串，PPR 语义不变） |
-| `adjacency_cache.py` | 邻接表缓存，按 `(db_path, db_mtime, scope_key)` 失效 |
+| `ppr.py` | Personalized PageRank 手写 power iteration；`load_edges` 从 `keyword_pairs` JOIN `keywords` 读边（节点仍是 keyword 字符串，PPR 语义不变）。**id-native 快路径 `load_edges_indexed`**（跳过 JOIN + casefold，`node_ids` 仍填字符串）供 `related` 热路径与 adjacency_cache 使用。**numpy CSR backend**（`_ppr_numpy` + `np.bincount` SpMV，`_select_backend` 按 `GRGA_PPR_BACKEND` / 边数阈值切换；numpy 是可选依赖 `grga[perf]`，缺失自动退回纯 Python `_ppr_python`）。`edge_weight` / `load_edges*` 接 `min_npmi` 阈值参数（P1.2） |
+| `adjacency_cache.py` | 邻接表缓存，按 `(db_path, db_mtime, scope_key, min_npmi)` 失效。只缓存 `IndexedGraph`（dict adjacency 已删，`get_adjacency` 返回三元组仍兼容但 `adj` 位恒为 `None`） |
 | `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图(反污染门)；通过 `IdInterner` 写 id，`get_votes` JOIN 回文本 |
 | `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`(`source='llm_promoted'`)；`promoted_at` 列在 v5 静态建入，不再需要 ALTER |
 | `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_chunks` JOIN 三张 intern 回文本 |
@@ -181,6 +181,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | 加一个 CLI 参数 | `cli.py` 找对应 `@app.command`，然后到该动词的核心模块 |
 | 改搜索行为 | `search.py::search_directory`；GUI 需同步（见 AGENTS.md） |
 | 改图扩展算法 | `graph/ppr.py` + `related.py`；bench 里跑对比 |
+| 改 related 性能 / doc 聚合 | `related.py::_aggregate_docs_id_native`(id-native,P2.3)+ `graph/ppr.py::load_edges_indexed` / `_ppr_numpy`；设计见 `docs/design/plan-2026-07-12-related-perf.md`，实验 `experiments/related_perf_2026_07_12/` |
 | 加一种 LLM intent | `suggest.py` + 新增 `prompts/suggest_<intent>.txt` |
 | 加新 Markdown 结构信号 | `structure/md.py`（解析）+ `structure/sidecar.py`（缓存） |
 | 加退出码 / JSON 错误码 | `exit_codes.py`（**只加不改**） |

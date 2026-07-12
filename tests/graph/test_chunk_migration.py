@@ -200,6 +200,10 @@ def test_chunk_mode_chars_plus_cross_scope(tmp_path):
     _index(scope_b, db, mode="chars")
     results = related(
         ["alpha"], mode="graph", db_path=db, directory=scope_a, cross_scope=True, limit=20,
+        # Synthetic mini-corpus: npmi is tiny across the board, so pin the
+        # threshold off to isolate cross-scope mechanics from the P1.2
+        # default (0.2) which would drop every bridge edge here.
+        min_npmi=0.0,
     )
     dirs = {r.directory for r in results}
     assert str(scope_b.resolve()) in dirs

@@ -1526,6 +1526,8 @@ def related_command(
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
     preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview."),
     graph_signals_limit: int = typer.Option(30, "--graph-signals-limit", help="mode=graph only: cap on neighbor_edges in the graph_signals JSON block."),
+    min_npmi: Optional[float] = typer.Option(None, "--min-npmi", help="mode=graph only: drop chunk_cooccur edges with npmi below this before PPR. Default 0.2 (or $GRGA_PPR_MIN_NPMI). Mutually exclusive with --edge-quantile."),
+    edge_quantile: Optional[float] = typer.Option(None, "--edge-quantile", help="mode=graph only: keep the top X fraction of edges by npmi (sampled). E.g. 0.1 keeps top 10%%. Mutually exclusive with --min-npmi."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List documents related to the given keywords via the L2 graph."""
@@ -1547,6 +1549,34 @@ def related_command(
     if preview and mode != "graph":
         typer.echo("--preview only applies to --mode graph", err=True)
         raise typer.Exit(2)
+    if min_npmi is not None and edge_quantile is not None:
+        typer.echo(
+            "--min-npmi and --edge-quantile are mutually exclusive",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if (min_npmi is not None or edge_quantile is not None) and mode != "graph":
+        typer.echo(
+            "--min-npmi / --edge-quantile only apply to --mode graph",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if edge_quantile is not None and not (0.0 < edge_quantile <= 1.0):
+        typer.echo(
+            "--edge-quantile must be in the open interval (0, 1]",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    resolved_min_npmi = min_npmi
+    if edge_quantile is not None:
+        from grga.related import resolve_edge_quantile_cutoff
+
+        resolved_min_npmi = resolve_edge_quantile_cutoff(
+            db_path=str(db_path) if db_path else None,
+            directory=str(directory) if directory else None,
+            quantile=edge_quantile,
+        )
 
     if mode == "graph":
         payload = related_graph_with_preview(
@@ -1558,6 +1588,7 @@ def related_command(
             preview=preview,
             collect_trace=json_output,
             graph_signals_limit=graph_signals_limit,
+            min_npmi=resolved_min_npmi,
         )
         results = payload["results"]
         if json_output:

@@ -101,6 +101,19 @@ _STOPWORDS = frozenset(
     }
 )
 
+# Index-layer stopword filter (plan-2026-07-12-related-perf §2.6 / P1.1).
+# Detection and index used to consume separate stopword sets — detection
+# had a 26-char CJK boundary set (``_CORE_STOP_BOUNDARIES``) purpose-built
+# for n-gram edge cutting, while the index re-used the tokenizer-era
+# 14-item Chinese filler list above. After the v6 schema migration, index
+# ended up letting hub function words (在/是/也/就/但/这/有/都/后/上/...)
+# through, and they dominated PPR neighbourhoods on the read path. The
+# union re-uses the *existing* 26-char structural-particle set — no new
+# corpus prior (HC2), just a widened subscription. Detection still owns
+# ``_CORE_STOP_BOUNDARIES`` unchanged (it must not swallow 面壁**者** or
+# 破壁**人**), so the two-layer semantic split is preserved.
+_INDEX_STOPWORDS = _STOPWORDS | _CORE_STOP_BOUNDARIES
+
 _MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
 # Legacy alias: prior code used this local set both for the enumeration
 # gate in ``iter_text_files`` and (implicitly) for "text vs binary"
@@ -363,12 +376,13 @@ def extract_chunk_keywords(text: str) -> Counter:
     """Return ``{folded_keyword: occurrence_count}`` for a single chunk.
 
     Occurrences are raw token counts within the chunk. Stopwords are
-    dropped. Keywords are stored casefolded (matches ``keyword_chunks``).
+    dropped (see :data:`_INDEX_STOPWORDS`). Keywords are stored casefolded
+    (matches ``keyword_chunks``).
     """
     counts: Counter = Counter()
     for match in _TOKEN_RE.finditer(text):
         key = match.group(0).casefold()
-        if key in _STOPWORDS:
+        if key in _INDEX_STOPWORDS:
             continue
         counts[key] += 1
     return counts
@@ -508,7 +522,7 @@ def _keywords_from_tokens(tokens: Iterable[str]) -> Counter:
     counts: Counter = Counter()
     for tok in tokens:
         key = tok.casefold()
-        if key in _STOPWORDS:
+        if key in _INDEX_STOPWORDS:
             continue
         counts[key] += 1
     return counts

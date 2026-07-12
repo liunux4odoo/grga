@@ -43,6 +43,10 @@ Issues = "https://github.com/grga-tools/grga/issues"
 standalone = ["pyinstaller>=6.0"]
 test = ["pytest>=7.0"]
 v2 = ["markdown-it-py>=3.0"]
+# Accelerates related --mode graph on large corpora (numpy CSR + bincount
+# SpMV, see docs/design/plan-2026-07-12-related-perf.md §2.3). Pure-Python
+# fallback stays available when numpy is absent.
+perf = ["numpy>=1.20"]
 
 [project.scripts]
 grga = "grga.cli:main"

@@ -2,6 +2,52 @@
 
 All notable changes to `grga` are recorded here.
 
+## [Unreleased]
+
+### 性能 · `related --mode graph` 优化 (docs/design/plan-2026-07-12-related-perf.md)
+
+7 项独立优化叠加，把冷启动从 ~110s 压到 ~3s、生产热启动预期 ~200ms。
+top-20 结果 top-20 doc Jaccard=1.0（vs 旧行为），numpy 后端与纯 Python
+逐位一致。实验证据：`experiments/related_perf_2026_07_12/`。
+
+- **P2.3 doc 聚合 id-native**：`aggregate_docs` 用 `kw_id IN (int)` 替换
+  `k.kw IN (text)`，直接命中 `keyword_chunks` 复合主键
+  `(kw_id, doc_id, chunk_id)`。doc 聚合 SQL 从 ~11s → ~53ms（-99.5%）。
+  设 `GRGA_DOC_AGG_LEGACY=1` 走旧路径。
+- **P3 numpy CSR + `np.bincount` backend**：`_ppr_numpy` SpMV 幂迭代，PPR
+  从 ~35s → ~96ms（-99.7%）。numpy 是**可选依赖**：`pip install grga[perf]`
+  安装；缺失时自动退回纯 Python `_ppr_python`。`GRGA_PPR_BACKEND=py|numpy|auto`
+  可强制选后端，`GRGA_PPR_NUMPY_MIN_EDGES`（默认 50000）控制 auto 切换阈值。
+- **P2.2 id-native 图构建**：新增 `load_edges_indexed` 跳过 JOIN + casefold，
+  `IndexedGraph.node_ids` 仍填字符串（契约兼容）。
+- **P2.1 删热路径 `build_adjacency`**：`adjacency_cache` 不再构建从不使用的
+  dict adjacency；`get_adjacency` 返回 3-tuple 兼容语法但 `adj` 位恒为 `None`。
+  `build_adjacency` / `personalized_pagerank`（dict 版）函数本身保留供 legacy
+  caller / 单元测试使用。
+- **P1.2 `min_npmi` 默认 0.2**：`related --min-npmi FLOAT` 参数化；
+  `GRGA_PPR_MIN_NPMI` env 覆盖。SQL WHERE 过滤 `chunk_cooccur` 边使 npmi <
+  阈值的边不参与 PPR。`neighbor_edges` schema 不变但**门槛语义微变**（详见
+  `docs/design/trace-signals.md` §7.1）。
+- **P1.4a `--edge-quantile` 便捷入口**：`grga related --edge-quantile 0.1`
+  保留 top 10% 边（按 npmi 采样），内部换算为等效 `min_npmi`；与
+  `--min-npmi` 互斥（同给报 exit 2）。
+- **P1.1 stopword ∪ core_boundaries**：建图层 `_INDEX_STOPWORDS` 复用已有
+  的 26 字 `_CORE_STOP_BOUNDARIES` 结构虚词集，索引层不再放行 `在/是/也/就/但/
+  这/有/都/后/上/…` 等高频功能词。需要 `grga index build --rebuild` 生效；detect
+  层的 `_CORE_STOP_BOUNDARIES` 语义分层不变（构词后缀如 面壁**者** 仍安全）。
+
+### Changed
+
+- `adjacency_cache` 的缓存键增加 `min_npmi` 维度，不同阈值不串扰。
+- `edge_weight` 中 `chunk_cooccur` 边的 `0.01 * log1p(count)` 小地板**保留**
+  作为小语料下 npmi=0 的防御性 fallback（与 P1.2 的 SQL WHERE 过滤解耦，
+  见 `src/grga/graph/ppr.py::edge_weight` docstring）。
+
+### Added
+
+- `pyproject.toml [project.optional-dependencies].perf = ["numpy>=1.20"]`
+  —— 一体化开关 `pip install grga[perf]` 启用 numpy 加速后端。
+
 ## [0.2.0] - 2026-07-09
 
 ### BREAKING

@@ -1,36 +1,34 @@
-"""LRU cache for the (edges, adjacency, indexed_graph) tuple.
+"""LRU cache for the ``IndexedGraph`` used by ``related --mode graph``.
 
-``load_edges`` + ``build_adjacency`` + ``build_indexed_graph`` together
-account for ~30% of a ``related --mode graph`` call, and a caller agent
-typically issues several related queries against the same DB / scope in
-quick succession. Caching cuts that per-call cost to a hash lookup.
+``load_edges_indexed`` (the id-native loader, see plan-2026-07-12-related-perf
+§2.1) accounts for the bulk of a cold ``related --mode graph`` call, and a
+caller agent typically issues several related queries against the same DB /
+scope in quick succession. Caching cuts that per-call cost to a hash lookup.
 
-Invalidation is by ``(db_path, db_mtime, scope_key)`` tuple: any write to
-the DB (from ``index build`` / ``suggest`` / ``promote``) bumps the mtime
-and the next call rebuilds. LRU cap = ``CACHE_MAXSIZE`` (8) so a caller
-who juggles a handful of scopes still gets warm hits without unbounded
-memory growth.
+Invalidation is by ``(db_path, db_mtime, scope_key, min_npmi)`` tuple: any
+write to the DB (from ``index build`` / ``suggest`` / ``promote``) bumps the
+mtime and the next call rebuilds; a different ``min_npmi`` occupies its own
+cache slot to prevent thresholds from cross-contaminating. LRU cap =
+``CACHE_MAXSIZE`` (8) so a caller who juggles a handful of scopes still gets
+warm hits without unbounded memory growth.
 
-The cache opens its own short-lived SQLite connection on miss; the
-caller's connection is unaffected. ``edges``, ``adjacency``, and
-``indexed_graph`` are returned *by reference* (no deep copy), so callers
-MUST treat them as read-only shared state. Every consumer in
-``related.py`` derives its own per-call structures on top of these —
-mutation of the cached objects is not part of the contract.
+The cache opens its own short-lived SQLite connection on miss; the caller's
+connection is unaffected. The returned tuple is ``(edges, adj, indexed)``
+for back-compat with existing 3-tuple unpacking, but ``adj`` is always
+``None`` (the dict-of-dicts adjacency that :func:`build_adjacency` used to
+produce was dead weight on the hot path — no consumer read it; see
+plan §2.5 / P2.1) and ``edges`` is always ``()`` (no consumer needed the
+raw ``Edge`` list either).  ``indexed`` is the sole live payload — callers
+should treat it as read-only shared state; mutation is not part of the
+contract.
 """
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
-from grga.graph.ppr import (
-    Edge,
-    IndexedGraph,
-    build_adjacency,
-    build_indexed_graph,
-    load_edges,
-)
+from grga.graph.ppr import IndexedGraph, load_edges_indexed
 from grga.graph.schema import connect
 
 CACHE_MAXSIZE = 8
@@ -48,13 +46,11 @@ def _cached_adjacency(
     db_path_str: str,
     mtime: float,
     scope_key: Optional[str],
-) -> Tuple[List[Edge], Dict[str, Dict[str, float]], IndexedGraph]:
+    min_npmi: float,
+) -> IndexedGraph:
     conn = connect(db_path_str)
     try:
-        edges = load_edges(conn, directory=scope_key)
-        adjacency = build_adjacency(edges)
-        indexed = build_indexed_graph(edges)
-        return edges, adjacency, indexed
+        return load_edges_indexed(conn, directory=scope_key, min_npmi=min_npmi)
     finally:
         conn.close()
 
@@ -62,21 +58,27 @@ def _cached_adjacency(
 def get_adjacency(
     db_path: Union[str, Path],
     scope_key: Optional[str],
-) -> Tuple[List[Edge], Dict[str, Dict[str, float]], IndexedGraph]:
-    """Return cached ``(edges, adjacency, indexed_graph)`` for the given key.
+    *,
+    min_npmi: float = 0.0,
+) -> Tuple[tuple, None, IndexedGraph]:
+    """Return cached ``(edges=(), adj=None, indexed_graph)`` for the given key.
 
-    ``scope_key`` is passed through to :func:`load_edges` unchanged: ``None``
-    means "whole graph". The ``(db_path, mtime, scope_key)`` triple is the
-    cache key, so an ``index build`` that rewrites the DB naturally
-    invalidates every scoped and unscoped entry for that file.
+    ``scope_key`` is passed through unchanged: ``None`` means "whole graph".
+    ``min_npmi`` (default 0.0) is added to the cache key so different
+    thresholds do not share entries. The
+    ``(db_path, mtime, scope_key, min_npmi)`` quadruple is the full key,
+    so an ``index build`` that rewrites the DB naturally invalidates every
+    scoped and unscoped entry for that file.
 
-    The returned ``indexed_graph`` is the preferred structure for hot-path
-    callers (see :func:`grga.graph.ppr.personalized_pagerank_indexed`);
-    ``adjacency`` is retained for legacy dict callers.
+    The 3-tuple return shape is preserved for backward compatibility with
+    callers that unpack ``_, _, indexed = get_adjacency(...)`` — but only
+    the third slot carries live data. See module docstring for why the
+    ``edges`` list and dict ``adjacency`` were dropped.
     """
     resolved = Path(db_path).expanduser().resolve()
-    key = (str(resolved), _mtime_or_zero(resolved), scope_key)
-    return _cached_adjacency(*key)
+    key = (str(resolved), _mtime_or_zero(resolved), scope_key, float(min_npmi))
+    indexed = _cached_adjacency(*key)
+    return (), None, indexed
 
 
 def clear_adjacency_cache() -> None:
