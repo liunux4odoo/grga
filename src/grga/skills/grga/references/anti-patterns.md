@@ -56,8 +56,9 @@ Rule of thumb: **`grep` for a one-shot recon known not to iterate.
 `~/.config/grga/deep_keywords.db` is grga's **internal storage**, not a
 caller-facing interface. Reaching for `sqlite3 <db>` — even for a
 harmless-looking `.tables` or `SELECT DISTINCT directory FROM
-keyword_chunks` — couples the workflow to a schema free to change
-between grga releases (columns renamed, tables split, indices replaced).
+keyword_pairs` — couples the workflow to a schema free to change
+between grga releases (columns renamed, tables split, indices replaced；
+v8 就直接删了 `keyword_chunks` / `chunks`).
 
 Two failure modes hidden by this habit:
 
@@ -87,11 +88,11 @@ looks harmless but has three real costs:
 - **Silent staleness** — the copy diverges when the original is edited,
   with no warning.
 - **Broken partition keys for the L2 graph.** The `directory` column in
-  `keyword_chunks` / `heading_docs` is a partition key. Running `grga
-  index build -s /tmp/clean --db ...` binds the index to a path that
-  vanishes on the next `/tmp` sweep — orphan rows unreachable through
-  the original directory. Even if indexing is skipped this session, the
-  copy habit will poison the graph eventually.
+  `keyword_pairs` / `keyword_stats` / `heading_docs` is a partition key.
+  Running `grga index build -s /tmp/clean --db ...` binds the index to a
+  path that vanishes on the next `/tmp` sweep — orphan rows unreachable
+  through the original directory. Even if indexing is skipped this
+  session, the copy habit will poison the graph eventually.
 
 If a directory contains noise that must be excluded, do it at query
 time: `-g '*needle*'` (glob filter passed through to rga), `--type

@@ -17,7 +17,7 @@ src/grga/
 ├── deep_search.py              # v1 多跳搜索（重量级，legacy 主体）
 ├── models.py, meta.py          # 数据类 Hit / Context + 位置元数据填充
 ├── file_read.py                # 统一 file→list[str]：文本走 open()、非文本 suffix 走 rga --passthru
-├── graph/                      # 离线图索引（PPR / 投票 / schema）
+├── graph/                      # 离线图索引（共现资产 / 投票 / schema）
 ├── structure/                  # Markdown 章节解析 + sidecar 缓存
 ├── skills/, skill_install.py   # 内置 Skill 树 + 安装器
 ├── prompts/                    # suggest 的三个 intent 提示词
@@ -40,7 +40,7 @@ grga v2 的检索原语，按 caller agent 的推理层级由轻到重排列。�
 | `probe.py` | **L0 廉价探针**：只数命中数量、不读 body、不改写 query | `probe_directory` | §4.0 |
 | `search.py` | **L1 命中检索**：ripgrep-all 结构化封装 + 命中元数据注入 | `search_directory`, `build_rga_command_preview` | §4.1 |
 | `expand.py` | **L1 上下文扩展**：命中 → 段落/章节/整档 | `expand(hit, level, size, base_dir)` | §4.1 |
-| `related.py` | **L2 图扩展**：关键字共现图找相邻文档，三种 mode (`graph`/`dir`/`heading`) | 见文件顶部 docstring 列出的模式说明 | §7.3 |
+| `related.py` | **L2 关键字扩展**：查 `keyword_pairs` 共现资产返回**候选关键字**（v3 起不再返回文档），支持 `graph` / `heading` 两种 mode（`dir` 已删） | `related_keywords`（graph）/ `related`（heading） | §7.3 |
 | `suggest.py` | **L3 LLM 兜底**：唯一调 LLM 的原语；三种 intent (`expand`/`reformulate`/`rerank`) | 提示词在 `prompts/suggest_*.txt` | §4.3, §7.4 |
 
 **caller 反思链**：`probe` → `search` → `expand`/`related` → `suggest`（bail out）
@@ -71,20 +71,25 @@ grga v2 的检索原语，按 caller agent 的推理层级由轻到重排列。�
 ## 图子系统 `graph/`
 
 离线预建 + 在线读取的关键字共现图。SQLite 存储，与 v1 `KeywordLibrary` 共库。
+v9 keyword-primary（schema v8）起 pair 是**核心知识资产**（累积、grow-and-
+refine），不再有 chunk 级 doc 映射；graph 查询走亚毫秒的 index-only 早停，
+不再需要 PPR / adjacency cache。
 
 | 模块 | 职责 |
 |---|---|
-| `schema.py` | v5 表建立 + 两跳链式迁移 (v1/v3→v4→v5)：intern 表 (`directories` / `keywords` / `docs`) + 业务表 (`chunks` / `keyword_chunks` / `keyword_pairs`(带 `source` 列) / `heading_docs` / `llm_extension_votes` / `keyword_counts` / `keyword_sources`) 全部按 id 外键引用 intern；v3→v4 抢救 `llm_promoted` 行，v4→v5 折叠 TEXT 列到 intern。原子 BEGIN IMMEDIATE，caller-owned txn 兼容 |
+| `schema.py` | schema 建表 + 链式迁移（v1/v3→v4→v5→v8→v9）：intern 表 (`directories` / `keywords` / `docs`) + 资产表 (`keyword_pairs`(带 `source` + `npmi`) / `keyword_stats` / `scope_stats` / `keyword_docs`) + `heading_docs` + `llm_extension_votes` + `keyword_counts` + `keyword_sources`；v8 迁移**有损**（DROP `chunks` / `keyword_chunks`，回填 `keyword_stats` 后删表），v9 加 `keyword_docs`（doc 级倒排替代已删的 chunk 级表）。原子 BEGIN IMMEDIATE，caller-owned txn 兼容 |
 | `ids.py` | `IdInterner`：get-or-insert 三张 intern 表 + 反查文本；每个查询/写入路径通过它把用户串换成 id、把结果 id 换回串（守 --json 契约） |
-| `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk(line/chars)、通过 `IdInterner` 写 `chunks` / `keyword_chunks` / `keyword_pairs[chunk_cooccur]`(npmi) |
-| `ppr.py` | Personalized PageRank 手写 power iteration；`load_edges` 从 `keyword_pairs` JOIN `keywords` 读边（节点仍是 keyword 字符串，PPR 语义不变）。**id-native 快路径 `load_edges_indexed`**（跳过 JOIN + casefold，`node_ids` 仍填字符串）供 `related` 热路径与 adjacency_cache 使用。**numpy CSR backend**（`_ppr_numpy` + `np.bincount` SpMV，`_select_backend` 按 `GRGA_PPR_BACKEND` / 边数阈值切换；numpy 是可选依赖 `grga[perf]`，缺失自动退回纯 Python `_ppr_python`）。`edge_weight` / `load_edges*` 接 `min_npmi` 阈值参数（P1.2） |
-| `adjacency_cache.py` | 邻接表缓存，按 `(db_path, db_mtime, scope_key, min_npmi)` 失效。只缓存 `IndexedGraph`（dict adjacency 已删，`get_adjacency` 返回三元组仍兼容但 `adj` 位恒为 `None`） |
-| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图(反污染门)；通过 `IdInterner` 写 id，`get_votes` JOIN 回文本 |
-| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`(`source='llm_promoted'`)；`promoted_at` 列在 v5 静态建入，不再需要 ALTER |
-| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_chunks` JOIN 三张 intern 回文本 |
+| `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk（RAM only，不落表），通过 `IdInterner` 累加进 `keyword_pairs`（`chunk_cooccur`，UPSERT 增量）+ `keyword_stats`（chunk_df/doc_df/occurrences）+ `keyword_docs`（doc 级倒排）+ `scope_stats`（n_chunks/n_docs/vocab_size）。写入期门槛 `BUILD_MIN_PAIR_COUNT`（默认 5）+ `BUILD_MIN_NPMI`（默认 0.2）固化资产下界 |
+| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图（反污染门）；通过 `IdInterner` 写 id，`get_votes` JOIN 回文本 |
+| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`（`source='llm_promoted'`，`npmi` NULL）；`promoted_at` 列 |
+| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_stats` + `keyword_pairs` 回文本 |
 
 **反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 →
 进入 `keyword_pairs`(`source='llm_promoted'`) → `related --mode graph` 免费拿到。
+
+> v9 已删除：`graph/ppr.py`、`graph/adjacency_cache.py`；对应 `chunks` /
+> `keyword_chunks` 两张表在 schema v8 也被 DROP。历史设计见
+> `docs/design/plan-2026-07-12-keyword-primary.md`。
 
 ---
 
@@ -121,11 +126,14 @@ Markdown 章节树 + 磁盘缓存 sidecar。为 `expand --level chapter` 和
 - `exit_codes.py`：**冻结的退出码契约**（0.2.0 起）。只加不改。JSON 错误 emit
   函数 (`emit_error` / `emit_warning`) 也在此。
 - `docs/exit-codes.md`：外部消费者可见的退出码列表。
-- `docs/design/related-signals-v2.md`：`related --json --mode graph` 的
-  `expansion` + `keyword_contributions` 契约（2026-07-12 落地，替代
-  已归档的 trace-signals v1）。契约由 `schemas/related-signals-v2.json`
-  校验；热路径动词 (`search`/`probe`/`expand`/`deep-search`) 不 emit
-  任何相关字段。
+- `docs/design/related-signals-v3.md`：`related --json --mode graph` 的**候选
+  关键字**契约（2026-07-13 随 v9 keyword-primary 落地）。graph 模式返回
+  `{"results": [{kw, npmi, cooccur_count, via_seed, chunk_df, source}]}`，
+  由 `schemas/related-signals-v3.json` 校验；`--mode dir` 已移除，`--mode
+  heading` 保留但 `keyword_contributions` 字段已删。热路径动词
+  (`search`/`probe`/`expand`/`deep-search`) 不 emit 任何相关字段。
+- `docs/design/deprecated/related-signals-v2.md`：**已归档**的 v2 契约
+  （PPR + `expansion` + `keyword_contributions`），供历史参考。
 - `docs/design/deprecated/trace-signals.md`：**已废弃**的 trace-signals
   v1 规范（`graph_actions` op log）。为什么撤见其头部说明。
 
@@ -155,7 +163,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 ## 测试与 bench
 
 - `tests/`：pytest 测试。改核心模块时优先跑对应子集，别一上来 `pytest` 全跑
-- `bench/`：性能基线脚本，改算法（尤其 PPR / deep_search）时用它对比
+- `bench/`：性能基线脚本，改核心算法（尤其 deep_search / 索引构建）时用它对比
 
 ---
 
@@ -166,7 +174,9 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/v2-design.md` | 五动词、三层扩展模型、设计哲学（**首读**） |
 | `docs/design/v2-plan.md` | v2 落地阶段拆分 |
 | `docs/design/decisions.md` | 关键决策留痕 |
-| `docs/design/related-signals-v2.md` | `related --json --mode graph` 的 expansion + keyword_contributions 契约 |
+| `docs/design/plan-2026-07-12-keyword-primary.md` | **v9 架构**：pair 字典化 + 删 keyword_chunks（schema v8 落地文档） |
+| `docs/design/related-signals-v3.md` | `related --json` 当前契约（graph 返候选关键字） |
+| `docs/design/deprecated/related-signals-v2.md` | **已归档** · v2 契约（PPR + expansion + keyword_contributions） |
 | `docs/design/deprecated/trace-signals.md` | **已废弃** · 旧 graph_actions 契约（2026-07-12 撤除） |
 | `docs/design/release-0.2.0-plan.md` | 0.2.0 发版计划 |
 | `docs/adr/0001-md-parser.md` | 选用 markdown-it-py 的架构决策 |
@@ -181,8 +191,8 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 |---|---|
 | 加一个 CLI 参数 | `cli.py` 找对应 `@app.command`，然后到该动词的核心模块 |
 | 改搜索行为 | `search.py::search_directory`；GUI 需同步（见 AGENTS.md） |
-| 改图扩展算法 | `graph/ppr.py` + `related.py`；bench 里跑对比 |
-| 改 related 性能 / doc 聚合 | `related.py::_aggregate_docs_id_native`(id-native,P2.3)+ `graph/ppr.py::load_edges_indexed` / `_ppr_numpy`；设计见 `docs/design/plan-2026-07-12-related-perf.md`，实验 `experiments/related_perf_2026_07_12/` |
+| 改图扩展算法 | `graph/build.py`（写入期共现资产）+ `related.py::related_keywords`（读侧查询）；bench 里跑对比 |
+| 改 related 性能 / 候选查询 | `related.py::related_keywords`（index-only 早停查 `keyword_pairs`）；写入期见 `graph/build.py`；设计见 `docs/design/plan-2026-07-12-keyword-primary.md`，历史 perf 实验 `experiments/related_perf_2026_07_12/` |
 | 加一种 LLM intent | `suggest.py` + 新增 `prompts/suggest_<intent>.txt` |
 | 加新 Markdown 结构信号 | `structure/md.py`（解析）+ `structure/sidecar.py`（缓存） |
 | 加退出码 / JSON 错误码 | `exit_codes.py`（**只加不改**） |

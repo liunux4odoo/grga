@@ -17,7 +17,7 @@ grga index build --scope ./docs --json  # 1) one-time (or on mtime change) offli
 grga probe "your query" --directory ./docs --json                            # 2) cheap size check before a full search
 grga search "your query" --directory ./docs --json                           # 3) baseline hits + metadata
 grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 4) widen one hit into chapter/paragraph/lines
-grga related "keyword" --mode graph --json  # 5) neighbouring documents (needs step 1).
+grga related "keyword" --mode graph --json  # 5) candidate related keywords via co-occurrence (needs step 1); pipe them into rga for passages.
 ```
 
 `suggest` is the LLM fallback and runs only on demand — see
@@ -29,16 +29,17 @@ grga writes every `index build` into **one shared per-user knowledge
 graph** at `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`).
 The `directory` column is a partition key, and every query verb defaults
 to filtering by `--directory` — so **scope is a query-time filter, not a
-partition boundary**.
+partition boundary**。
 
-- **Isolation is the default** on `related --mode graph`. Cross-corpus
-  reach is an escalation opened by `--cross-scope`.
-- **`related --mode heading` is cross-scope by default** (heading paths
-  resist same-name-different-meaning noise). Add `--same-scope` to
+- **Isolation is the default** on `related --mode graph`：不传 `-d` 时
+  跨所有 scope 求和；传 `-d` 时只看该 scope 的共现资产。v9 起 pair 是
+  **累积知识资产**（grow-and-refine），跨语料的显式合并/复用是未来方向。
+- **`related --mode heading` is cross-scope by default**（heading paths
+  resist same-name-different-meaning noise）。Add `--same-scope` to
   restrict.
 
-Full escalation sequence, `--cross-scope` decision criteria, `--db`
-override reasons, multi-corpus indexing → `references/storage-model.md`.
+Full `-d` 语义、`--db` override 场景、多语料索引 →
+`references/storage-model.md`。
 
 ## When to use this skill
 
@@ -50,7 +51,9 @@ Use grga when the task involves any of the following on a local directory:
 - Turning a single hit into a **wider textual context** (nearby lines,
   paragraph, Markdown chapter, whole file).
 - Answering "**what else is related to this?**" via co-occurrence graph
-  (PPR), directory proximity, or shared Markdown heading paths.
+  （v3 起返回候选关键字 + `npmi`，caller 用 ripgrep 找片段）, directory
+  proximity（v3 已删，改走 `grga search --json` 聚合）, or shared
+  Markdown heading paths（返回文档）.
 - Asking an LLM to expand keywords, rerank hits, or reformulate a vague
   query — only after cheaper layers have been tried.
 - Building/refreshing the offline L2 graph index, or promoting
@@ -73,7 +76,7 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
 | `grga probe <q> -d <dir>` | `rga --count-matches` — returns `total_lines`, `file_count` without bodies. Makes no decision. | About to `search` an unfamiliar corpus / broad keyword / huge file — want a cheap size signal first. |
 | `grga search <q> -d <dir>` | Hits + Layer 2 position metadata (`occurrence_index`, `line_ratio`, `nearby_hits`) + Layer 1 `heading_path` for Markdown. Space-separated terms are **implicit AND** (v2 breaking; `--implicit-or` restores OR). `--max-total N` (default 1000) sets `truncated`. | Concrete query string. First **evidence-fetching** verb — but for open-ended queries a T2-bookend `related` sweep precedes T1 (see workflow). |
 | `grga expand <path>:<line> --level <lines\|paragraph\|chapter\|document>` | Turn one hit into a `Context` block. Degrades `chapter → paragraph → lines(±3) → lines(±0)`. Always read the returned `level`. Never invokes an LLM. | Hit is interesting and surrounding text is needed; want a whole Markdown chapter; quoting a block into another prompt. |
-| `grga related <kw…> --mode <graph\|dir\|heading> --db <path>` | Documents adjacent to seed keywords: `graph` (PPR over `keyword_pairs`), `dir` (same directory), `heading` (shared Markdown heading path). **Precondition**: `grga index build` must have run first, else empty. | Caller has keywords and needs to broaden — not deepen — the exploration. |
+| `grga related <kw…> --mode <graph\|heading> --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi`**（v3 起不再返回文档，caller 用 ripgrep 找片段；查 `keyword_pairs`），`heading` 返回共享 Markdown heading path 的**文档**。v3 起 `--mode dir` 已删除——改用 `grga search --json` 后按目录聚合。**Precondition**: `grga index build` must have run first, else empty. | Caller has keywords and needs to broaden — not deepen — the exploration. |
 | `grga suggest <q> --intent <expand\|rerank\|reformulate> --hits <hits.json>` | **Only** verb that calls an LLM. Emitted `keyword_pairs` vote into `llm_extension_votes` unless `--no-votes`; run `grga index promote` to graduate them. | Search returns too few / low-quality results, or query is intrinsically vague. **Never** the first verb (see "Stuck signals" for triggers and relaxed guardrails). |
 
 ### Supporting commands (offline / infra)
@@ -171,7 +174,7 @@ is caller judgment, not a workflow rule.
 - [ ] The **session-open** T2-bookend `related` ran (or was explicitly
       waived as tiny/familiar corpus, with the reason stated).
 - [ ] The **pre-answer** T2-bookend `related` just ran on the final seed
-      set, and its `results` / `neighbor_edges` were **read**, not
+      set, and its `results` (graph 模式为候选关键字) were **read**, not
       merely invoked.
 - [ ] Any new document or alias surfaced by that pre-answer sweep was
       either folded into the answer or explicitly dismissed as
@@ -285,7 +288,7 @@ Detailed material loaded on demand:
 | File | Read when |
 |---|---|
 | `references/verbs.md` | Need a verb's full signature or per-field semantics. |
-| `references/storage-model.md` | Scoped query is thin and weighing `--cross-scope`; deciding `--db` override; indexing multiple corpora. |
+| `references/storage-model.md` | Scoped query is thin and weighing `-d` vs cross-scope 求和; deciding `--db` override; indexing multiple corpora. |
 | `references/reflection-loop.md` | Executing a tier (T0-T3); need per-tier decision tables, seed selection, stuck-signal thresholds, `graph inspect` disambiguation, or `suggest` context relaxation. |
 | `references/anti-patterns.md` | Considering a `grep` / `sqlite3` / copy-to-clean-path shortcut, or an identity-disambiguation query. |
 | `references/troubleshooting.md` | A verb misbehaves — empty `related`, `expand` degraded, `suggest` hangs, promoted pairs not showing up. |

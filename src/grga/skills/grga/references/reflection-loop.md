@@ -49,7 +49,7 @@ Decide:
 |---|---|
 | `matches` empty | Back to **T0** to loosen; if already loose, jump to **T3** `intent=reformulate` |
 | `truncated: true` | Tighten (back to T0) or raise `--max-total`; do not act on a biased slice |
-| Hits concentrated in 1-2 files, but topic likely covered elsewhere | **T2-escalate** `related --mode dir` or `--mode heading` for breadth |
+| Hits concentrated in 1-2 files, but topic likely covered elsewhere | **T2-escalate** `related --mode heading` for structural breadth, or `related --mode graph` 拿候选关键字 + ripgrep 铺开 | 找同结构文档 / 借共现网扩词并回搜 |
 | < ~5 hits and unsatisfactory | **T3** `intent=expand` for more angles, then loop to T1 |
 | Hits sufficient and well-labelled | Proceed toward answer — but the **pre-answer T2-bookend `related` still runs** before you commit (SKILL.md "T2 bookends"); optionally **T2-escalate** `expand` first if you need quotable prose |
 | Individual hit text already answers the question | Quote `matches[i].text`; you may skip **T2-escalate expand**, but the **pre-answer T2-bookend `related` is still mandatory** |
@@ -77,10 +77,11 @@ Two independent capabilities, choose based on what is missing:
   (falls back to paragraph on non-md), lines with `--size 10+` for
   source code, document only for small files. Always read the returned
   `level` field — it reflects what was actually achieved.
-- **Need other documents on the same topic** → `grga related`.
-  `mode=graph` (needs `index build`) for conceptual neighbours,
-  `mode=dir` for repository proximity, `mode=heading` for the same
-  section across Markdown files.
+- **Need other documents / concepts on the same topic** → `grga related`。
+  `mode=graph`（需 `index build`）返回**候选关键字 + `npmi`**（v3 起不再
+  返回文档；caller 拿候选关键字后走 ripgrep 找片段）；`mode=heading` 走
+  `heading_docs`，返回共享 Markdown 章节的文档。v3 起 `--mode dir` 已
+  移除，改用 `grga search --json` 后按目录聚合。
 
 Compose both: after `expand --level chapter`, feed the chapter's
 headings back into `related --mode heading` to find sibling chapters.
@@ -102,7 +103,7 @@ and are **not interchangeable** for T2 exploration:
 
 | Verb | Answers | Output | When |
 |---|---|---|---|
-| `related <seed> --mode graph` | "What **documents** are conceptually near this seed?" | Ranked doc paths (PPR) + `expansion.expanded_keywords[].npmi` (strongest direct edge) | **T2-bookend** (session-open + pre-answer, mandatory) and **T2-escalate** (mid-session widening) |
+| `related <seed> --mode graph` | "还有**哪些相关的关键词**能沿着这个 seed 展开？" | 候选关键字数组（`{kw, npmi, cooccur_count, via_seed, chunk_df, source}`）；caller 拿去 ripgrep 找片段 | **T2-bookend**（session-open + pre-answer, mandatory）和 **T2-escalate**（mid-session widening） |
 | `graph inspect <keyword>` | "What is this **keyword** like — scope distribution, top co-occurring words, polysemy?" | Metadata on the *keyword*, no documents | Diagnostic only: seed-quality check, cross-scope pollution audit, "why is my `related` empty?" |
 
 **Failure mode observed in practice**: caller runs `graph inspect` on a
@@ -122,61 +123,65 @@ move is a **seed change**, not a switch to `graph inspect`.
 ### Choosing seeds for `related`
 
 `related` faithfully amplifies whatever seed it is handed. A well-chosen
-seed returns a compact on-topic neighbourhood; a poorly-chosen seed
-returns `[]`, an irrelevant list, or noise. Seed choice is the single
-biggest lever at T2 — **grga will not reject bad seeds**, it computes PPR
-on whatever is provided.
+seed returns a compact on-topic candidate keyword set; a poorly-chosen
+seed returns `{"results": []}`, an irrelevant list, or hub noise. Seed
+choice is the single biggest lever at T2 — **grga will not reject bad
+seeds**, it computes 1-跳共现邻居 on whatever is provided.
 
 **Prefer as seeds**: low-DF specific nouns (proper names of techniques,
-entities, APIs, chapter titles — check `expansion.seeds[].chunk_df`,
-single-digit to low-hundreds is the sweet spot); names surfaced by T1
-`search` (harvest 2-3 low-DF specifics from `matches[i].text`);
-multi-seed passes (2-4 diverse specifics beat one hub; PPR fuses across
-seeds).
+entities, APIs, chapter titles — check `results[].chunk_df` on a probe
+call, single-digit to low-hundreds is the sweet spot); names surfaced by
+T1 `search` (harvest 2-3 low-DF specifics from `matches[i].text`);
+multi-seed passes (2-4 diverse specifics beat one hub; grga 独立展开每个
+seed，caller 拿多组候选后自行去重/取交集)。
 
 **Avoid as sole seed**: hub words (protagonist, framework name,
-top-level concept — high DF means co-occurs with everything, PPR
-degenerates); generic descriptors ("main technique", "the API"); terms
-not in the index (`results: []` with `expansion.seeds[].chunk_df` missing means the
-seed isn't a keyword — confirm via T1 `search`, pick a nearby low-DF
-surrogate).
+top-level concept — high DF means co-occurs with everything，共现邻居里
+全是 stopword)；generic descriptors ("main technique", "the API")；
+terms not in the index（`{"results": []}` 常是这种：seed 从未进 `keywords`
+表——用 T1 `search` 确认原文有该词但没被 tokenizer 抽出，选一个相邻的
+low-DF surrogate）。
 
 **Meta-rule**: seed selection is a **caller judgment**, not a grga
-policy. The verb surfaces the numbers (`chunk_df`, `ppr_score`, `npmi` on the entry itself); the
-caller decides whether to keep the seed or swap.
+policy. The verb surfaces 每条候选自带的 `npmi` 与 `chunk_df`；the caller
+decides whether to keep the seed or swap.
 
 ### Seed-quality decision table for `related --mode graph`
 
-Read the `expansion` block off the `related` JSON (v2.1: seeds and
-expanded_keywords carry all keyword-level signals in one place), then
-decide:
+v3 起 `related --mode graph` 的返回不再有 `expansion` 顶层块——所有
+信号扁平到每条 `results[]` 上（`{kw, npmi, cooccur_count, via_seed,
+chunk_df, source}`）。种子自身的 `chunk_df` 需要用 `grga graph inspect
+<seed>` 单独查（`total_docs` / `docs_by_scope` / `top_cooccurring_keywords`）
+或从 `results[].via_seed`  + `results[].chunk_df` 反推（候选的 df 只反映
+候选词自身，非 seed 自身）。
 
 | Signal | Reading | Action |
 |---|---|---|
-| `expansion.seeds[i].chunk_df` missing or 0 | Seed is not a keyword in the index | Run T1 `search` to confirm the term exists in corpus text; if yes, the tokenizer skipped it — pick a co-appearing indexed term as surrogate |
-| `expansion.seeds[i].chunk_df` 1-few | Rare seed; usually strong signal | Proceed; check `expanded_keywords[].npmi` > 0.5 |
-| `expansion.seeds[i].chunk_df` tens - low hundreds | **Sweet spot on a large corpus** | Proceed; expect a tight neighbourhood |
-| `expansion.seeds[i].chunk_df` thousands+ | Hub word — co-occurs with everything | Swap seed; use `graph inspect <seed>` to *confirm* stopword-dominated `top_cooccurring_keywords`, then pick a low-DF specific surrogate |
-| `results: []` with `expansion.seeds[i].chunk_df` > 0 | Seed indexed but isolated (no chunk-cooccur edges above threshold) | Add another co-appearing seed; or fall back to `--mode dir` / `--mode heading` |
-| `expanded_keywords[].npmi > 0.5` | Strong semantic link | Trust; consider adding the neighbour as a follow-up seed |
-| `expanded_keywords[].npmi` 0.2-0.5 | Weak-to-moderate | Cross-check the neighbour with T1 `search` before trusting |
-| `expanded_keywords[].npmi < 0.2` | Noise-adjacent | Ignore unless corroborated by other signals |
-| Neighbours dominated by discourse markers / stopwords | Seed is a hub (even if DF looks modest) | Swap seed for a low-DF specific noun; multi-seed passes help |
+| `graph inspect <seed>` → `total_docs == 0` | Seed 不是索引里的关键字 | 用 T1 `search` 确认原文有此词；若有，则 tokenizer 跳过——挑一个共现的 indexed 词做代理 |
+| `graph inspect <seed>` → `total_docs` 1-few | Rare seed；通常信号强 | Proceed；检查 `results[].npmi` > 0.5 的候选 |
+| `graph inspect <seed>` → `total_docs` 十至低百 | **大语料上的甜蜜点** | Proceed；expect a tight neighbourhood |
+| `graph inspect <seed>` → `total_docs` 千+ / 邻居列被 stopword 主导 | Hub word — co-occurs with everything | Swap seed；pick a low-DF specific surrogate |
+| `{"results": []}` on indexed seed | Seed 已被索引但孤立（所有边被写入期 npmi 门槛过滤） | 换 seed 或用多 seed；改 `--mode heading` 找结构邻居 |
+| `results[].npmi > 0.5` | Strong semantic link | Trust；考虑把该候选作为下一轮 seed |
+| `results[].npmi` 0.2-0.5 | Weak-to-moderate | Cross-check with T1 `search` before trusting |
+| `results[].npmi < 0.2` | 写入期门槛已过滤——不会出现，除非 build 用了更低的 `--min-npmi-build` | 若真出现视作 noise-adjacent |
+| 候选被 stopword / 冗余变体主导 | Seed is hub even if DF looks modest | Swap seed；multi-seed passes help |
 
 **Multi-seed rule of thumb**: 2–4 diverse specifics fused into one call
-concentrate PPR on the shared neighbourhood better than any single hub.
-When in doubt about which specific to pick, run a T1 `search` on the
-task topic first and harvest low-DF nouns from `matches[i].text`.
+让 grga 独立展开每个 seed，caller 拿到多组 `via_seed` 分组的候选后，用
+交集/并集/取 top-npmi 自选融合策略（design D4：grga 不替 caller 决定
+融合）。When in doubt about which specific to pick, run a T1 `search` on
+the task topic first and harvest low-DF nouns from `matches[i].text`.
 
 **Self-diagnosis loop when T2 returns nothing useful**:
 
-1. `expansion.seeds[i].chunk_df` missing → seed not indexed → switch seed
-2. `chunk_df` high, `expanded_keywords[].kw` = stopword-adjacent → hub →
-   switch to a specific noun
-3. `chunk_df` reasonable, `results: []` → isolated seed → try
-   multi-seed or `--mode dir`/`heading`
-4. Everything looks fine but neighbours are off-topic → run one T3
-   `suggest --intent expand` to break the vocabulary frame
+1. `graph inspect <seed>` → `total_docs == 0` → seed 未索引 → 换 seed
+2. `total_docs` 高、`top_cooccurring_keywords` 全是 stopword → hub →
+   换 low-DF specific noun
+3. `total_docs` 合理但 `{"results": []}` → 孤立 seed → multi-seed 或
+   `--mode heading`
+4. 一切看着正常但候选跑偏 → 一发 T3 `suggest --intent expand` 打破
+   vocabulary 框架
 
 ## T3 — suggest: LLM reflection
 

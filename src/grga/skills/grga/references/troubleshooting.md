@@ -4,16 +4,17 @@ Referenced from `SKILL.md`. These are "consult when something goes
 wrong" notes, not needed at trigger time — hence they live here rather
 than in the SKILL.md body.
 
-## `grga related` returns `[]`
+## `grga related` returns `{"results": []}`
 
 The graph index is either missing or does not cover the seed keywords.
 
-- Run `grga index build --scope <dir> --db <db>` first. `related --mode graph` needs `keyword_chunks` + `keyword_pairs`; `--mode heading` needs `heading_docs` (Markdown only).
-- Most likely cause: the seed keyword never entered `keyword_chunks`, or the scope name passed to `-d` is misspelled. Confirm with `grga graph inspect <keyword> --json` — if `total_docs` is 0 the term was never indexed.
-- Check the `expansion` block in `related --mode graph --json`: `seeds[].chunk_df` shows per-seed segment df, `total_chunks_in_scope` puts it in context. `df/total` near 1.0 means the seed is a hub (edges dominated by noise); a lower ratio typically gives sharper neighbours — inspect `expanded_keywords[].npmi` (strongest direct seed edge, inlined on each entry) to confirm.
-- If the seed word is a stopword or shorter than 2 characters it never enters `keyword_chunks`. Use a longer/more concrete term or try `--mode dir` (filesystem proximity).
-- **Small / synthetic corpora**: since 2026-07-12 `--mode graph` filters edges by `npmi >= 0.2` (P1.2, `docs/design/plan-2026-07-12-related-perf.md`). On tiny fixtures npmi is dominated by noise and every bridge edge sits below the threshold, so PPR sees an empty graph. Pass `--min-npmi 0` (or `env GRGA_PPR_MIN_NPMI=0`) to disable the filter for that query.
-- To broaden scope, see `references/storage-model.md` for the `-d` / `--cross-scope` / `--mode heading` decision.
+- Run `grga index build --scope <dir> --db <db>` first. `related --mode graph` needs `keyword_pairs` + `keyword_stats`; `--mode heading` needs `heading_docs` (Markdown only).
+- Most likely cause: the seed keyword never entered the index (`keywords` 表没有它), or the scope name passed to `-d` is misspelled. Confirm with `grga graph inspect <keyword> --json` — if `total_docs` is 0 the term was never indexed.
+- v3 起 `related --mode graph` 返回**候选关键字**（不再是文档），空 `{"results": []}` 常见于 hub seed：seed 的 `chunk_df` 极高时，它的所有 pair 在写入期被 npmi 门槛过滤掉了（符合设计，见 `docs/design/related-signals-v3.md` §1.3）。用 `grga graph inspect <seed>` 看 `top_cooccurring_keywords` 是否被 stopword 主导；若是，换一个 low-DF 具体名词做 seed。
+- If the seed word is a stopword or shorter than 2 characters it never enters the index. Use a longer/more concrete term, or用 `grga search --json` 拿命中后按目录聚合（`--mode dir` 已在 v3 移除）。
+- **Small / synthetic corpora**: 写入期资产已固化下界 `npmi >= 0.2`（build 默认 `--min-npmi-build 0.2`，见 `docs/design/plan-2026-07-12-keyword-primary.md` §3.3）。在极小 fixture 上 npmi 被噪声主导，所有桥边都在门槛以下，pair 表几乎为空。读侧 `--min-npmi` 只能收紧、救不回；需在重建时放宽写入期门槛：`grga index rebuild -s <dir> --min-npmi-build 0 --min-pair-count 1`。
+- 想拿到候选关键字后铺开原文：`grga related <seed> --mode graph --json` → 取 `results[].kw` → `rga -e kw1 -e kw2 ...`。
+- To broaden scope, see `references/storage-model.md` for the `-d` / cross-scope 求和 / `--mode heading` decision.
 
 ## `grga expand` returned `level="lines"` even though I asked for `chapter`
 

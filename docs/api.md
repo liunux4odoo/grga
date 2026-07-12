@@ -169,182 +169,139 @@ Deep-search also adds top-level `query`, `strategy`
 
 ## `grga related`
 
-`--mode dir` and `--mode heading` return a JSON object `{"results": [...]}`
-whose `Related` entries are sorted by `score` descending; `--mode graph`
-returns an envelope carrying the same array plus opt-in
-`crossed_scopes_preview` observability and a query-level `expansion` block.
+v3 起 graph 模式返回**候选关键字**（不是文档）。heading 模式仍返回文档。
+`--mode dir` 已在 v3 移除。完整契约见 `docs/design/related-signals-v3.md`
++ `schemas/related-signals-v3.json`。热路径动词（`search`/`probe`/
+`expand`/`deep-search`）的 `--json` 输出不含任何相关字段。
 
-`Related` objects always carry both `doc_path` (relative to the indexed
-scope) and `directory` (the resolved scope root the document was indexed
-under). `qualified_path` is the two joined together, filesystem-resolvable
-even when results span multiple scopes.
-
-`--mode graph` results additionally carry per-doc per-keyword occurrence
-evidence (`keyword_contributions`), and the envelope carries a query-level
-`expansion` block folding every keyword-level graph signal (`ppr_score`,
-`hops_from_seed`, `chunk_df`, and — for hop-1 neighbours with a surviving
-direct edge — the strongest edge's `npmi` / `cooccur_count`) directly
-onto each entry. Together they let callers filter hub-word false
-positives without querying the DB — see
-`docs/design/related-signals-v2.md` for the full contract and rationale.
-(The pre-2026-07-12 per-doc `graph_signals` block, the
-`--graph-signals-limit` flag, and the transient v2.1 `edges_to_seeds`
-list wrapper were all removed as pure duplication / nesting overhead.)
+### `--mode graph`（返回候选关键字）
 
 ```jsonc
-// --mode dir | --mode heading  (envelope)
 {
   "results": [
     {
-      "doc_path": "docs/install.md",         // string — relative to `directory`
-      "score": 1.596026,                     // float — rounded to 6 dp
-      "mode": "dir",                         // string — dir | heading
-      "reason": "dir:docs",                  // string — provenance tag
-      "keywords": ["brew","linux"],          // string[] — matched keywords/headings
-      "directory": "/abs/path/to/project_a", // string|null — indexed scope root
-      "qualified_path": "/abs/path/to/project_a/docs/install.md"
+      "kw": "linux",                  // string — 候选关键字（casefold）
+      "npmi": 0.6746,                 // float — 与 via_seed 的关联强度（存储值）
+      "cooccur_count": 28.0,          // float — 原始共现次数
+      "via_seed": "brew",             // string — 从哪个 seed 扩展来（D4：不融合）
+      "chunk_df": 153,                // int — 候选词自身的 chunk_df（hub 判别信号）
+      "source": "chunk_cooccur"       // string — chunk_cooccur | llm_promoted
     }
   ]
 }
+```
 
-// --mode graph  (envelope)
+排序 `(via_seed, -npmi, kw)`。稳定，同参数字节一致。
+
+**多 seed 不融合**：多个 seed 时每个 seed 独立展开 top-M 邻居；同一个候选
+`kw` 若被多个 seed 命中会出现多行（每行不同 `via_seed`）。caller 自决聚合
+策略（sum / max / weighted / drop-if-only-one）。
+
+**`source` 语义**：`chunk_cooccur`（build 从 chunk 共现派生，`npmi` 有实值）
+或 `llm_promoted`（`grga index promote` 写入的边，DB 中 `npmi IS NULL`，
+JSON 里规范化为 `0.0`）。
+
+**`chunk_df` 语义**：
+- 有 `--directory`：`keyword_stats.chunk_df WHERE dir_id = ?`。
+- 无 `--directory`：`SUM(chunk_df)` 跨所有 scope。
+- caller 用它做 hub 词剪枝：`if r["chunk_df"] > threshold: drop`。
+
+**空 `{"results": []}`**：未知 seed / hub seed（所有 pair 在写入期被 npmi
+门槛过滤）/ `--min-npmi` 过严 / 空 scope。四种情况用 envelope 无法区分，
+caller 用 `grga graph inspect <seed>` 诊断。
+
+**caller 用法**：拿到候选关键字后走 ripgrep 找原文片段。
+
+```python
+result = json.loads(subprocess.check_output([
+    "grga", "related", "brew", "--mode", "graph",
+    "-d", scope, "--json",
+]))
+seeds = ["brew"] + [r["kw"] for r in result["results"][:5]]
+subprocess.run(["rga", "-i"] + [f"-e{s}" for s in seeds] + [scope])
+```
+
+Edge filter (`--mode graph` only)：
+
+- `--min-npmi FLOAT` — **读侧地板**。写入期资产已固化下界（build 默认
+  `--min-npmi-build 0.2`），`--min-npmi` 只能**收紧**到 ≥ 写入期门槛；
+  不能放松。想让更多噪声边参与召回，需在 `index build` 时用更低的
+  `--min-npmi-build`（代价：写入期资产膨胀）。
+
+**Precondition**: run `grga index build` first; otherwise the array is empty.
+
+### `--mode heading`（返回文档）
+
+```jsonc
 {
   "results": [
     {
-      "doc_path": "docs/install.md",
-      "score": 1.596026,
-      "mode": "graph",
-      "reason": "ppr",                       // "ppr" | "direct-seed"
-      "keywords": ["brew","linux"],          // sorted, mirrors keyword_contributions[].kw
-      "directory": "/abs/path/to/project_a",
-      "qualified_path": "/abs/path/to/project_a/docs/install.md",
-      "keyword_contributions": [             // per-doc per-kw evidence
-        {"kw": "brew",  "occurrences": 5},   // sorted (-occurrences, kw)
-        {"kw": "linux", "occurrences": 2}
-      ]
+      "doc_path": "usage.md",                    // string — relative to `directory`
+      "score": 1.5,                              // float — rounded to 6 dp
+      "mode": "heading",                         // string — "heading"
+      "reason": "shared-heading",                // string — provenance tag
+      "keywords": ["Install > macOS"],           // string[] — 匹配到的 heading path 集合
+      "directory": "/abs/path/to/scope",         // string|null — indexed scope root
+      "qualified_path": "/abs/path/to/scope/usage.md"
     }
-  ],
-  "crossed_scopes_preview": null,            // null unless --preview was passed
-  "expansion": {                             // query-level graph evidence
-    "seeds": [
-      {"kw": "brew", "chunk_df": 12}         // seed + its in-scope chunk df
-    ],
-    "expanded_keywords": [                   // non-seed PPR neighbours
-      {
-        "kw": "install",
-        "ppr_score": 0.0421,
-        "hops_from_seed": 1,                 // omitted if unreachable
-        "chunk_df": 340,                     // hub-word signal
-        "npmi": 0.42,                        // strongest direct seed edge
-        "cooccur_count": 8                   // (both together or neither)
-        // "source"    — omitted; defaults to "chunk_cooccur"
-        // "via_seeds" — omitted; single-seed query
-      },
-      {
-        "kw": "pandoc",
-        "ppr_score": 0.0189,
-        "hops_from_seed": 2,
-        "chunk_df": 55
-        // no direct seed edge in keyword_pairs → no npmi / cooccur_count
-      }
-      // sorted by (-ppr_score, kw)
-      //
-      // Multi-seed queries: a neighbour with direct edges to >1 seed
-      // additionally carries e.g. "via_seeds": ["ripgrep", "brew"]
-      // (npmi desc). Single-edge neighbours in multi-seed queries omit
-      // via_seeds (unambiguous). "source" only appears when it deviates
-      // from "chunk_cooccur" (i.e. only for llm_promoted edges).
-    ],
-    "total_chunks_in_scope": 100000          // context for chunk_df
-  }
-  //
-  // When --preview is passed together with -d, crossed_scopes_preview becomes:
-  // {
-  //   "would_add": 47,
-  //   "top_other_scopes": [
-  //     {"scope": "/abs/path/to/papers", "count": 32},
-  //     {"scope": "/abs/path/to/notes",  "count": 15}
-  //   ],
-  //   "top_bridge_keywords": [
-  //     {"keyword": "attention", "cross_weight": 0.42, "suspected_polysemy": true},
-  //     {"keyword": "model",     "cross_weight": 0.31, "suspected_polysemy": false}
-  //   ]
-  // }
+  ]
 }
 ```
 
-**Caller-side false-positive filter** — the intent of the `expansion` +
-`keyword_contributions` split. Drop results that never mention any actual
-seed (and optionally treat high-`chunk_df` expansions as hub noise):
+`keywords[]` 在 heading 模式里存的是**匹配到的 heading path**（例
+`"Install > macOS"`），不是候选关键字。字段名保持向前兼容。
 
-```python
-seeds = {s["kw"] for s in payload["expansion"]["seeds"]}
-kept = [
-    r for r in payload["results"]
-    if any(c["kw"] in seeds for c in r["keyword_contributions"])
-]
+**v3 破变**：`Related.keyword_contributions` 字段已从 dataclass 里删除
+（不再是 `Optional[List[KeywordContribution]]`，而是完全不存在；JSON
+schema 用 `additionalProperties: false` 强制）。
 
-# Or a stricter cut: ignore expansions that are corpus-wide hub words.
-hub = {e["kw"] for e in payload["expansion"]["expanded_keywords"]
-       if e.get("chunk_df", 0) > 10000}   # threshold is the caller's call
+Heading 模式的 flag：
+
+- `--same-scope` — restrict heading matches to `--directory`. Off by
+  default; heading mode 默认跨 scope（heading paths 是结构化过滤，抗
+  同名歧义）。
+
+### `--mode dir`：已移除
+
+`grga related --mode dir` 在 CLI 层拒绝并抛错，指向 `grga search --json`：
+
+```
+mode must be one of: graph, heading
 ```
 
-`reason` values by mode:
+Python API 调 `related(mode="dir")` 也直接 raise `ValueError`。替代做法：
 
-- `graph`   → `"ppr"` (PageRank hit) or `"direct-seed"` (fallback).
-- `dir`     → `"dir:<parent>"`.
-- `heading` → `"shared-heading"` (in this case `keywords[]` holds the shared
-  heading paths, not keywords).
+```bash
+grga search "brew" --json | jq '[.matches[].path] | group_by(.)'
+```
 
-Cross-scope flags (see SKILL.md "Storage model" for the philosophy):
+### v3 移除的 flag / 字段（历史，供 caller 迁移参考）
 
-- `--cross-scope` (`--mode graph` only): seeds are validated against
-  `--directory`, but PPR expansion and doc collection cross into every
-  other scope in the shared DB. Off by default. Results carry each
-  document's own `directory`, so identically-named files from different
-  scopes remain distinct.
-- `--same-scope` (`--mode heading` only): restrict heading matches to
-  `--directory`. Off by default; heading mode is cross-scope by default
-  because shared heading paths are structural filters that resist
-  same-name-different-meaning noise.
-- `--preview` (`--mode graph --json` only): also compute
-  `crossed_scopes_preview`. **Opt-in** because it runs a full-graph PPR
-  whose cost scales with every other scope in the shared DB — undesirable
-  as an implicit tax on ordinary scoped queries.
+以下 CLI flag 全部在 v3（Phase 3b-2）移除，传入会报未识别参数错误：
 
-Edge-filter knobs (`--mode graph` only; mutually exclusive):
+- `--cross-scope`、`--preview`、`--alpha`、`--iters`、`--edge-quantile`
 
-- `--min-npmi FLOAT` — drop `chunk_cooccur` edges with `npmi < min_npmi`
-  before PPR. Default **0.2** (env override `GRGA_PPR_MIN_NPMI`). Higher
-  values keep only the strongest associations; `0` disables the filter
-  and matches pre-2026-07-12 behaviour. `llm_promoted` edges (npmi
-  usually NULL) are always kept regardless of the threshold. See
-  `docs/design/plan-2026-07-12-related-perf.md` §2.4.
-- `--edge-quantile FLOAT` — convenience form of the same filter: keep
-  the top X fraction of edges by npmi. E.g. `--edge-quantile 0.1` keeps
-  the top 10%. Internally sampled and translated to an equivalent
-  `min_npmi`; cannot be combined with `--min-npmi` (usage error, exit 2).
+以下 JSON 字段已从 `related --json` 移除：
 
-Backend selection (`--mode graph` only, env-only — no CLI flag):
+- graph 顶层 envelope：`crossed_scopes_preview`、`expansion`（含
+  `seeds` / `expanded_keywords` / `total_chunks_in_scope`）
+- graph `results[]`：`doc_path` / `score` / `reason` / `keywords` /
+  `directory` / `qualified_path` / `keyword_contributions`（graph 现在
+  返回关键字，不再是文档）
+- 已停用的 `expanded_keywords[]` 字段：`ppr_score` / `hops_from_seed`
+  / `via_seeds`（PPR 已整体移除）
+- heading `results[]`：`keyword_contributions`（已从 dataclass 删除）
 
-- `GRGA_PPR_BACKEND=auto|numpy|py` (default `auto`). `auto` picks numpy
-  when it is importable and the graph has `≥ GRGA_PPR_NUMPY_MIN_EDGES`
-  (default 50000) edges; below that the pure-Python backend wins on the
-  fixed setup cost. numpy is an **optional dependency**
-  (`pip install grga[perf]`); grga runs without it, just slower on
-  large graphs. Both backends produce byte-identical top-K results
-  (tie-break `(-score, node_id_string)`); pick `py` when reproducing
-  numeric behaviour under a numpy-less environment.
-
-**Precondition**: run `grga index build` first; otherwise the array is empty.
+依赖上述字段的 caller 需按 v3 契约重写；`grga` 无兼容 fallback。
 
 ---
 
 ## `grga graph inspect`
 
 Reports how a single keyword distributes across scopes in the shared
-user-scoped DB, plus a heuristic same-name-different-meaning warning. Read
-this *before* enabling `related --cross-scope` on the keyword.
+user-scoped DB, plus a heuristic same-name-different-meaning warning.
+Read this to gauge seed quality (hub? polysemy?) 之前决定是否用它做
+`related` 的 seed，或跨 scope 查询时是否可信。
 
 ```jsonc
 {
@@ -445,8 +402,25 @@ values clamped to `[0, 1]`.
 }
 ```
 
-Writes only the v2 tables (`keyword_docs`, `heading_docs`); v1 tables
-(`keyword_counts`, `keyword_pairs`) are never touched.
+Writes to the v9 keyword-primary tables: `keyword_pairs`（累积知识资产，
+`chunk_cooccur` 边带 `npmi`）、`keyword_stats`（per-scope df）、
+`scope_stats`（分母 N）、`keyword_docs`（doc 级倒排）、`heading_docs`
+（Markdown 结构）。`grga index rebuild` 是全清重建（DELETE 该 scope 后
+等价重跑 build）。
+
+CLI flag：
+
+- `--min-pair-count INT`（默认 `5`）— 单 scope 内 `cooccur_count < N`
+  的 pair 不记入 `keyword_pairs`。
+- `--min-npmi-build FLOAT`（默认 `0.2`）— `npmi < X` 的 pair 不记入
+  `keyword_pairs`。`llm_promoted` 边不受此限。
+- 上述两个门槛固化资产**下界**；读侧 `related --mode graph --min-npmi`
+  只能收紧到 ≥ 写入期门槛，不能放松。想让更多噪声边参与召回，需重建
+  时用更低值（代价：写入期资产膨胀）。
+- `--chunk-mode line`（默认，1 line = 1 chunk）或
+  `--chunk-mode chars --chunk-max-chars 600 --chunk-min-chars 300`。
+- v8/v9 起 `chunks` / `keyword_chunks` 两张表已删除，chunk 只在 build
+  期 RAM 存活。
 
 ---
 

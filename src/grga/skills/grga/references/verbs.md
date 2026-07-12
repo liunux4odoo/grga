@@ -78,54 +78,76 @@ smaller than requested). Never invokes an LLM. Never modifies anything.
 ## 3. `related`
 
 ```
-related(keywords: list[str], *, mode="graph"|"dir"|"heading",
+related(keywords: list[str], *, mode="graph"|"heading",
         limit=20, db_path, directory,
-        cross_scope=False,   # graph only: expand PPR into other scopes
         same_scope=False,    # heading only: stay inside --directory
-        min_npmi=None,       # graph only: npmi edge threshold (default 0.2)
+        min_npmi=None,       # graph only: 读侧 npmi 地板；默认沿用写入期 0.2，
+                             # 可传更严值（如 0.3），不能低于写入期门槛
 ) ->
-  # dir | heading (CLI --json: {"results": [...]})
-  [{doc_path, score, mode, reason, keywords[], directory, qualified_path}]
-  # graph (list variant, no preview)
-  [{doc_path, score, mode, reason, keywords[], directory, qualified_path,
-    keyword_contributions: [{kw, occurrences}]}]
-  # graph via `related_graph_with_preview(..., preview=True)`
-  {results: [...],
-   crossed_scopes_preview: {would_add, top_other_scopes,
-                             top_bridge_keywords} | null,
-   expansion: {
-     seeds: [{kw, chunk_df?}],
-     expanded_keywords: [
-       {kw, ppr_score,
-        hops_from_seed?, chunk_df?,
-        # inlined strongest direct seed edge (hop-1 typically):
-        npmi?, cooccur_count?,
-        # omitted when equal to default 'chunk_cooccur':
-        source?,
-        # multi-seed queries only, when neighbour bridges >=2 seeds:
-        via_seeds?}
-     ],
-     total_chunks_in_scope}}
+  # graph（v3 起返回候选关键字，不再是文档）：
+  {results: [
+     {kw, npmi, cooccur_count, via_seed, chunk_df, source}
+  ]}
+  # heading（返回文档，与 v2 兼容）：
+  {results: [
+     {doc_path, score, mode, reason, keywords[], directory, qualified_path}
+  ]}
 ```
 
-Every `Related` carries `directory` (the indexed scope root) and
-`qualified_path` (`<directory>/<doc_path>`) so cross-scope results whose
-relative paths collide (e.g. two `README.md`) remain distinct.
+`--mode dir` **已在 v3 移除**。CLI 与 Python API 均会抛错，指向
+`grga search "<seed>" --json` 后 caller 侧按 `matches[].path` 分组聚合
+（Unix pipeline）。
 
 Modes:
 
-- `graph` — Personalized PageRank over the segment co-occurrence graph (`keyword_pairs`, `source='chunk_cooccur'`), then materialised to documents through `keyword_chunks`. Best for "conceptually related" navigation. Every `--json` result carries a `keyword_contributions` array of `{kw, occurrences}` (per-doc per-keyword hit counts, sorted `(-occurrences, kw)`). All query-level graph signals live once at the payload root under `expansion`: each seed carries `chunk_df`; each expanded keyword carries `ppr_score`, `hops_from_seed`, `chunk_df`, and — when a direct seed edge exists in `keyword_pairs` — the strongest edge's `npmi` / `cooccur_count` inlined onto the entry itself. `source` is only emitted when != `chunk_cooccur` (i.e. `llm_promoted`), and `via_seeds` only appears in multi-seed queries when a neighbour has direct edges to more than one seed. `total_chunks_in_scope` puts `chunk_df` into context. Together these let a caller filter hub-word false positives (e.g. drop expansions with `chunk_df` above a threshold, or with `npmi < 0.2`) without querying the DB — see `docs/design/related-signals-v2.md`. Default is scope-isolated; add `--cross-scope` to reach other corpora, and read `crossed_scopes_preview` first (see `references/storage-model.md`).
-- `dir`   — documents that live in the **same directory** as documents containing the seed keywords. Best for local repository navigation. Cross-scope has no meaning here (directory proximity is intrinsically scope-local).
-- `heading` — documents that share a full or leaf **Markdown heading path** with a seed-carrying document. Cross-scope by default (heading paths are structural filters that resist same-name-different-meaning noise). Add `--same-scope` to keep matches inside `-d`.
+- `graph` — 查 `keyword_pairs`（`source='chunk_cooccur'` 或
+  `'llm_promoted'`），对每个 seed 独立展开 top-M 邻居，返回**候选关键字
+  + 关联证据**。多 seed 不融合（每个候选带 `via_seed`；同一 kw 若被多
+  个 seed 命中会出现多行）。caller 拿到候选后自行 ripgrep 找原文。
+  `RelatedKeyword` 字段：
+  - `kw`：候选关键字（casefold）。
+  - `npmi`：与 `via_seed` 的关联强度（存储值，或读侧过滤后）。`llm_promoted`
+    的 pair 在 DB 中 `npmi IS NULL`，JSON 里规范化为 `0.0`。
+  - `cooccur_count`：原始共现次数。
+  - `via_seed`：这个候选是从哪个 seed 扩展来的（design D4：不融合）。
+  - `chunk_df`：候选词自身的 chunk_df（hub 词判别信号；有 `-d` 时来自
+    `keyword_stats.chunk_df WHERE dir_id=?`，无 `-d` 时跨 scope 求和）。
+  - `source`：`chunk_cooccur` | `llm_promoted`。
+  排序 `(via_seed, -npmi, kw)`。稳定，同参数字节一致。
+  完整契约见 `docs/design/related-signals-v3.md` +
+  `schemas/related-signals-v3.json`。
+- `heading` — documents that share a full or leaf **Markdown heading path**
+  with a seed-carrying document. Cross-scope by default (heading paths
+  are structural filters that resist same-name-different-meaning noise).
+  Add `--same-scope` to keep matches inside `-d`. `Related` 里的
+  `keyword_contributions` 字段 **在 v3 已删除**。
 
-Edge filter (`--mode graph` only, mutually exclusive):
+Edge filter (`--mode graph` only):
 
-- `--min-npmi FLOAT` — drop `chunk_cooccur` edges below this npmi before PPR. Default **0.2** (env `GRGA_PPR_MIN_NPMI`). Raises signal-to-noise by cutting hub/function-word edges; `0` restores pre-2026-07-12 behaviour. `llm_promoted` edges (npmi NULL) always kept.
-- `--edge-quantile FLOAT` — convenience: keep top X fraction of edges by npmi (e.g. `0.1` = top 10%), sampled then translated to `min_npmi`. Cannot combine with `--min-npmi` (exit 2).
+- `--min-npmi FLOAT` — **读侧地板**。写入期资产已固化下界（build 默认
+  `--min-npmi-build 0.2`，低于此的 pair 根本没被记入 `keyword_pairs`）。
+  `--min-npmi` 只能**收紧**到 ≥ 写入期门槛；不能放松。想让更多噪声边参与
+  召回，需在 `index build` 时用更低的 `--min-npmi-build`（有代价：写入
+  期资产膨胀）。
 
-Backend (env-only): `GRGA_PPR_BACKEND=auto|numpy|py` (default `auto`; numpy used when importable + graph ≥ `GRGA_PPR_NUMPY_MIN_EDGES`, default 50000). numpy is optional (`pip install grga[perf]`); both backends give byte-identical top-K.
+写入期资产存储契约（`index build` / `index rebuild` 上）：
 
-**Precondition**: `grga index build -s <dir> --db <path>` must have been run against the corpus (or any indexed scope inside the shared DB) first, otherwise `related` returns an empty result.
+- `--min-pair-count`（默认 5）：单 scope 内 `cooccur_count < N` 的 pair
+  不记入资产。
+- `--min-npmi-build`（默认 0.2）：`npmi < X` 的 pair 不记入资产。
+  `llm_promoted` 的 pair 不受此门槛约束。
+
+**v3 破变清单**（对齐 `docs/design/decisions.md` §"2026-07-13"）：
+- `--mode dir` 移除；`--alpha` / `--iters` / `--cross-scope` / `--preview`
+  / `--edge-quantile` CLI flag 全部移除。
+- PPR 全图算法及 `ppr_score` / `hops_from_seed` / `expansion` /
+  `keyword_contributions` / `graph_signals` 字段整体移除。
+- `keyword_chunks` 表在 schema v8 已删除，`related --mode graph` 不再
+  经 doc 聚合；文档级证据由 caller 用返回的关键字走 ripgrep 自取。
+
+**Precondition**: `grga index build -s <dir> --db <path>` must have been
+run against the corpus (or any indexed scope inside the shared DB) first,
+otherwise `related` returns `{"results": []}`.
 
 ## 4. `suggest`
 
@@ -152,6 +174,6 @@ enough votes accumulate, run `grga index promote` to graduate them into
 
 ## Supporting commands (offline / infra)
 
-- `grga index build -s <scope> --db <path> --json` — index a directory scope's segments (`chunks` + `keyword_chunks` + `keyword_pairs[chunk_cooccur]`) and `heading_docs` into the **shared** user knowledge graph. Prerequisite for `related`. Every scope writes into the same DB; scope is stored as a `dir_id` foreign key into the `directories` intern table (v5 normalized layout), not a separate database. `--chunk-mode line` (default, 1 line = 1 chunk) or `--chunk-mode chars --chunk-max-chars 600 --chunk-min-chars 300` (multi-line windows split on heading > blank line > hard char cut).
-- `grga index promote --threshold N --db <path> [--dry-run] --json` — merge high-vote pairs from `llm_extension_votes` into `keyword_pairs`. Idempotent; `--dry-run` reports without writing.
-- `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`, and a `suspected_polysemy` warning. Run it on a bridge keyword before enabling `related --cross-scope`.
+- `grga index build -s <scope> --db <path> --json` — 增量索引一个目录 scope 的 chunk 共现进**共享**用户知识图。写入 `keyword_pairs`（chunk_cooccur，带 `npmi`）+ `keyword_stats`（per-scope chunk_df）+ `scope_stats`（分母 N）+ `heading_docs`（Markdown 结构）。**pair 是累积知识资产**：删源文件不销毁资产，新增/更新文件增量 UPSERT 进已有资产。scope 存为 `dir_id` 外键（v5 归一化）。写入期门槛 `--min-pair-count`（默认 5）+ `--min-npmi-build`（默认 0.2）固化资产下界；低于门槛的 pair **根本不进表**（读侧无法救回）。`--chunk-mode line`（默认）或 `--chunk-mode chars --chunk-max-chars 600 --chunk-min-chars 300`。v8 起 **`chunks` / `keyword_chunks` 表已删除**——chunk 只在 build 期 RAM 存活。`grga index rebuild` 是全清重建（DELETE 该 scope 后等价重跑 build）。
+- `grga index promote --threshold N --db <path> [--dry-run] --json` — merge high-vote pairs from `llm_extension_votes` into `keyword_pairs`（`source='llm_promoted'`, `npmi` NULL）。Idempotent; `--dry-run` reports without writing.
+- `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`, and a `suspected_polysemy` warning. Run it on a bridge keyword before扩大 seed 集或跨 scope 查询。
