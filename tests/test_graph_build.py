@@ -124,6 +124,14 @@ def test_split_chunks_chars_mode_heading_boundary():
 
 
 def test_build_populates_chunk_tables(sidecar_env, tmp_path):
+    """Post-v9 (Phase 3b-3): build populates keyword_docs (doc-level) +
+    keyword_pairs + heading_docs. ``keyword_chunks_written`` on
+    :class:`BuildStats` is retained as the doc-level row count for JSON
+    contract stability. ``chunks_written`` stays populated by the pre-v9
+    accounting but the underlying ``chunks`` table is gone; the count now
+    reflects "chunks processed in RAM during pass 2" — a stat, not a table
+    row count.
+    """
     scope = tmp_path / "corpus"
     _write_scope(scope)
     db = tmp_path / "graph.db"
@@ -131,7 +139,8 @@ def test_build_populates_chunk_tables(sidecar_env, tmp_path):
     stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     assert stats.files_scanned >= 3
     assert stats.files_indexed >= 3
-    assert stats.chunks_written > 0
+    # v9: chunks_written may be 0 (no chunks table in v9); the meaningful
+    # signal is keyword_docs population.
     assert stats.keyword_chunks_written > 0
     assert stats.pairs_written > 0
     assert stats.heading_docs_written > 0
@@ -141,10 +150,10 @@ def test_build_populates_chunk_tables(sidecar_env, tmp_path):
     try:
         kw_rows = conn.execute(
             "SELECT k.kw AS keyword, d.doc_path AS doc_path, "
-            "       kc.occurrence_count AS occurrence_count "
-            "FROM keyword_chunks kc "
-            "JOIN keywords k ON k.id = kc.kw_id "
-            "JOIN docs d ON d.id = kc.doc_id "
+            "       kd.occurrence_count AS occurrence_count "
+            "FROM keyword_docs kd "
+            "JOIN keywords k ON k.id = kd.kw_id "
+            "JOIN docs d ON d.id = kd.doc_id "
             "ORDER BY d.doc_path, k.kw"
         ).fetchall()
         assert kw_rows
@@ -192,16 +201,16 @@ def test_replace_flag_clears_previous_chunk_rows(sidecar_env, tmp_path):
             row["doc_path"]
             for row in conn.execute(
                 "SELECT DISTINCT d.doc_path AS doc_path "
-                "FROM chunks c JOIN docs d ON d.id = c.doc_id"
+                "FROM keyword_docs kd JOIN docs d ON d.id = kd.doc_id"
             ).fetchall()
         ]
         assert "install.md" not in remaining
-        # chunk_cooccur pairs for the removed doc's exclusive keywords cleared.
+        # keyword_docs rows for the removed doc's keywords cleared.
         kw_remaining = [
             row["doc_path"]
             for row in conn.execute(
                 "SELECT DISTINCT d.doc_path AS doc_path "
-                "FROM keyword_chunks kc JOIN docs d ON d.id = kc.doc_id"
+                "FROM keyword_docs kd JOIN docs d ON d.id = kd.doc_id"
             ).fetchall()
         ]
         assert "install.md" not in kw_remaining
@@ -453,9 +462,11 @@ def test_build_ngram_iters_respected(sidecar_env, tmp_path):
 def test_build_populates_keyword_stats(sidecar_env, tmp_path):
     """Every build must materialise keyword_stats + scope_stats for the scope.
 
-    Backfills equivalent to the v7→v8 migration, but run at build time so
-    the two v8 asset tables stay in lockstep with the still-written
-    keyword_chunks / chunks (Phase 2 is additive; Phase 3 does the cutover).
+    v9 (Phase 3b-3): keyword_stats is now derived from ``keyword_docs``
+    (doc-level inverted index) — the pre-v9 chunk-level ``keyword_chunks``
+    is gone. The correctness invariant becomes ``keyword_stats.chunk_df ==
+    SUM(keyword_docs.chunk_count)`` per (dir, kw), and
+    ``scope_stats.n_chunks == SUM(docs.n_chunks_with_kw)`` per dir.
     """
     scope = tmp_path / "corpus"
     _write_scope(scope)
@@ -467,17 +478,19 @@ def test_build_populates_keyword_stats(sidecar_env, tmp_path):
 
     conn = connect(db)
     try:
-        # Every row from keyword_stats should agree with a hand-derived
-        # aggregate of keyword_chunks. This is the correctness invariant
-        # for the recompute_scope_assets helper.
+        # keyword_stats derived aggregate should equal the hand-computed
+        # aggregate from keyword_docs (dir_id, kw_id):
+        #   chunk_df = SUM(chunk_count)
+        #   doc_df   = COUNT(*)
+        #   total_occurrences = SUM(occurrence_count)
         expected = {
             (int(row[0]), int(row[1])): (int(row[2]), int(row[3]), int(row[4]))
             for row in conn.execute(
-                "SELECT d.dir_id, kc.kw_id, "
-                "       COUNT(*), COUNT(DISTINCT kc.doc_id), "
-                "       COALESCE(SUM(kc.occurrence_count), 0) "
-                "FROM keyword_chunks kc JOIN docs d ON d.id = kc.doc_id "
-                "GROUP BY d.dir_id, kc.kw_id"
+                "SELECT dir_id, kw_id, "
+                "       COALESCE(SUM(chunk_count), 0), COUNT(*), "
+                "       COALESCE(SUM(occurrence_count), 0) "
+                "FROM keyword_docs "
+                "GROUP BY dir_id, kw_id"
             )
         }
         got = {
@@ -487,16 +500,17 @@ def test_build_populates_keyword_stats(sidecar_env, tmp_path):
                 "FROM keyword_stats"
             )
         }
-        assert got == expected, "keyword_stats drifted from keyword_chunks"
+        assert got == expected, "keyword_stats drifted from keyword_docs"
 
-        # scope_stats.n_chunks = COUNT chunks in scope.
+        # scope_stats.n_chunks = SUM(docs.n_chunks_with_kw) per scope.
         for row in conn.execute(
             "SELECT s.dir_id, s.n_chunks, "
-            "       (SELECT COUNT(*) FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.dir_id=s.dir_id) "
+            "       (SELECT COALESCE(SUM(d.n_chunks_with_kw), 0) FROM docs d "
+            "        WHERE d.dir_id = s.dir_id) "
             "FROM scope_stats s"
         ):
             assert row[1] == row[2], \
-                f"scope_stats.n_chunks {row[1]} != actual chunks {row[2]}"
+                f"scope_stats.n_chunks {row[1]} != SUM(docs.n_chunks_with_kw) {row[2]}"
     finally:
         conn.close()
 

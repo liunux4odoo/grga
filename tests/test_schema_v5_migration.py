@@ -154,10 +154,15 @@ def test_v4_to_v5_bit_exact(tmp_path: Path):
     # Capture the v4 view before migrating.
     raw = sqlite3.connect(str(db))
     raw.row_factory = sqlite3.Row
-    v4_kc = [
+    # v9: keyword_chunks is dropped by the v7→v8→v9 chain; capture the
+    # equivalent doc-level aggregate we can verify keyword_docs against.
+    v4_kc_docs = [
         tuple(r) for r in raw.execute(
-            "SELECT directory, keyword, doc_path, chunk_id, occurrence_count "
-            "FROM keyword_chunks ORDER BY 1,2,3,4"
+            "SELECT directory, keyword, doc_path, "
+            "COALESCE(SUM(occurrence_count), 0), COUNT(*) "
+            "FROM keyword_chunks "
+            "GROUP BY directory, keyword, doc_path "
+            "ORDER BY 1,2,3"
         )
     ]
     v4_pairs = [
@@ -185,18 +190,21 @@ def test_v4_to_v5_bit_exact(tmp_path: Path):
                 "SELECT COUNT(*) FROM sqlite_master WHERE name=?", (name,)
             ).fetchone()[0] == 1
 
-        # keyword_chunks joined back == v4.
-        v5_kc = [
+        # v9: keyword_docs is the doc-level aggregate of the v4
+        # keyword_chunks — SUM(occurrence_count) + COUNT(chunk_id) per
+        # (dir, kw, doc). Compare to the pre-migration snapshot.
+        v9_kd = [
             tuple(r) for r in conn.execute(
-                "SELECT dir.path, k.kw, d.doc_path, kc.chunk_id, kc.occurrence_count "
-                "FROM keyword_chunks kc "
-                "JOIN keywords k ON k.id = kc.kw_id "
-                "JOIN docs d ON d.id = kc.doc_id "
+                "SELECT dir.path, k.kw, d.doc_path, "
+                "kd.occurrence_count, kd.chunk_count "
+                "FROM keyword_docs kd "
+                "JOIN keywords k ON k.id = kd.kw_id "
+                "JOIN docs d ON d.id = kd.doc_id "
                 "JOIN directories dir ON dir.id = d.dir_id "
-                "ORDER BY 1,2,3,4"
+                "ORDER BY 1,2,3"
             )
         ]
-        assert v5_kc == v4_kc
+        assert v9_kd == v4_kc_docs
 
         v5_pairs = [
             tuple(r) for r in conn.execute(

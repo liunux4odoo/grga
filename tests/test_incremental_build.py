@@ -19,7 +19,6 @@ from grga.graph.build import (
     _hash_output_lines,
     build_graph_index,
     forget_scope_phrases,
-    recompute_pairs,
 )
 from grga.graph.ids import IdInterner
 from grga.graph.schema import CHUNK_COOCCUR_SOURCE, connect, ensure_schema
@@ -169,15 +168,15 @@ def test_incremental_modify_file(tmp_path, sidecar_env):
     interner = IdInterner(conn)
     scope_dir_id = interner.dir_id(str(scope.resolve()))
     row = conn.execute(
-        "SELECT id FROM docs WHERE dir_id = ? AND doc_path = ?",
+        "SELECT id, n_chunks_with_kw FROM docs WHERE dir_id = ? AND doc_path = ?",
         (scope_dir_id, "a.md"),
     ).fetchone()
     doc_id = int(row[0])
-    chunk_count = conn.execute(
-        "SELECT COUNT(*) FROM chunks WHERE doc_id = ?", (doc_id,)
-    ).fetchone()[0]
+    chunk_count = int(row[1])
     conn.close()
     # The new content still has multiple lines → some chunks exist.
+    # v9: chunks table gone; use docs.n_chunks_with_kw (chunks that
+    # contain at least one keyword — the same "has-content" signal).
     assert chunk_count > 0
 
 
@@ -202,7 +201,7 @@ def test_incremental_delete_file_cleans_index(tmp_path, sidecar_env):
     assert s.docs_removed == 1
     assert s.docs_unchanged == 2
 
-    # Verify docs / chunks / keyword_chunks for b.txt are gone.
+    # Verify docs (and cascaded keyword_docs) for b.txt are gone.
     conn = connect(db)
     ensure_schema(conn)
     after_docs = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
@@ -211,6 +210,12 @@ def test_incremental_delete_file_cleans_index(tmp_path, sidecar_env):
         "SELECT COUNT(*) FROM docs WHERE doc_path = 'b.txt'"
     ).fetchone()[0]
     assert b_row == 0
+    # keyword_docs rows for the removed doc must be gone too.
+    orphan_kd = conn.execute(
+        "SELECT COUNT(*) FROM keyword_docs kd "
+        "LEFT JOIN docs d ON d.id = kd.doc_id WHERE d.id IS NULL"
+    ).fetchone()[0]
+    assert orphan_kd == 0
     conn.close()
 
 
@@ -296,7 +301,14 @@ def test_forget_all_wipes_scope(tmp_path, sidecar_env):
     conn.close()
 
 
-def test_forget_phrase_cascades_keyword_chunks(tmp_path, sidecar_env):
+def test_forget_phrase_cascades_keyword_docs(tmp_path, sidecar_env):
+    """Per-phrase forget removes keyword_docs + keyword_pairs cascade.
+
+    v9: the deprecated ``keyword_chunks`` table is gone; ``keyword_docs``
+    is the doc-level inverted index that takes its place. ``ForgetStats
+    .keyword_chunks_removed`` still reports the row count for JSON contract
+    stability — it now measures deleted ``keyword_docs`` rows.
+    """
     scope = tmp_path / "scope"
     _write_corpus(scope)
     db = tmp_path / "graph.db"
@@ -317,9 +329,8 @@ def test_forget_phrase_cascades_keyword_chunks(tmp_path, sidecar_env):
     # keyword row itself never existed (short corpus, stopword-adjacent).
     if kw_id is not None:
         count = conn.execute(
-            "SELECT COUNT(*) FROM keyword_chunks "
-            "WHERE kw_id = ? AND doc_id IN "
-            "(SELECT id FROM docs WHERE dir_id = ?)",
+            "SELECT COUNT(*) FROM keyword_docs "
+            "WHERE kw_id = ? AND dir_id = ?",
             (kw_id, scope_dir_id),
         ).fetchone()[0]
         assert count == 0
@@ -402,12 +413,13 @@ def test_forget_phrase_case_insensitive_matches_stored_dict(tmp_path, sidecar_en
 
 
 def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monkeypatch):
-    """A build with zero doc changes must not touch keyword_pairs.
+    """A build with zero doc changes must not rebuild derived tables.
 
-    Guard against the "recompute called unconditionally" regression the
-    review flagged: previously an incremental no-op still did DELETE +
-    full-scan pair rebuild. We prove the skip by patching
-    ``recompute_pairs`` and asserting it never fires.
+    v9 keyword-primary: pair derivation is inline (no more ``recompute_pairs``
+    function to patch). The no-op invariant is now expressed as "the
+    ``index_layer_changed`` branch does not run" — verified by patching
+    :func:`_flush_pair_delta` (the pass-3 pair maintenance helper) and
+    asserting it is never called during a no-change build.
     """
     scope = tmp_path / "scope"
     _write_corpus(scope)
@@ -418,19 +430,23 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
 
     from grga.graph import build as build_mod
     call_count = {"n": 0}
-    real = build_mod.recompute_pairs
+    real = build_mod._flush_pair_delta
 
     def _counting(*args, **kwargs):
         call_count["n"] += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(build_mod, "recompute_pairs", _counting)
+    monkeypatch.setattr(build_mod, "_flush_pair_delta", _counting)
 
     s = build_graph_index(scope, db_path=db, mode="build",
                           refresh_ngram="append")
     assert s.docs_unchanged == 3
     assert s.docs_updated == 0
-    assert call_count["n"] == 0
+    assert s.docs_added == 0
+    assert s.docs_removed == 0
+    assert call_count["n"] == 0, (
+        "_flush_pair_delta should not run on a no-change incremental build"
+    )
     # pairs_written must still be populated (read back from DB), not 0.
     conn = connect(db)
     ensure_schema(conn)
@@ -492,35 +508,47 @@ def test_forget_requires_exactly_one_mode(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_recompute_pairs_idempotent(tmp_path, sidecar_env):
+def test_rebuild_is_idempotent(tmp_path, sidecar_env):
+    """Running ``rebuild`` twice on the same corpus produces identical pairs.
+
+    v9 keyword-primary: ``recompute_pairs`` no longer exists as a separate
+    entry point — pair derivation now lives inline in :func:`build_graph_index`
+    (pass 2 accumulates a RAM ``pair_delta``; pass 3 flushes via
+    :func:`_flush_pair_delta`). The idempotence invariant is the same:
+    a second rebuild on the same corpus must produce byte-identical pair
+    rows (cooccur_count + npmi) because a rebuild wipes the scope's pair
+    rows first.
+    """
     scope = tmp_path / "scope"
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    s1 = build_graph_index(scope, db_path=db, mode="rebuild",
-                            refresh_ngram="append")
+    build_graph_index(scope, db_path=db, mode="rebuild",
+                      refresh_ngram="append")
 
     conn = connect(db)
     ensure_schema(conn)
     interner = IdInterner(conn)
     scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
-    # Running recompute a second time on unchanged index layer must
-    # produce the same pair count and same npmi values.
     before_rows = conn.execute(
         "SELECT kw_a_id, kw_b_id, cooccur_count, npmi FROM keyword_pairs "
         "WHERE dir_id = ? AND source = ?",
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     ).fetchall()
-    written = recompute_pairs(conn, scope_dir_id, min_pair_count=3)
-    conn.commit()
+    conn.close()
+
+    # Second rebuild.
+    build_graph_index(scope, db_path=db, mode="rebuild",
+                      refresh_ngram="append")
+
+    conn = connect(db)
     after_rows = conn.execute(
         "SELECT kw_a_id, kw_b_id, cooccur_count, npmi FROM keyword_pairs "
         "WHERE dir_id = ? AND source = ?",
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     ).fetchall()
     conn.close()
-    assert written == len(before_rows)
-    # Row-by-row equality (converted to tuples for hashing).
+    assert len(before_rows) == len(after_rows)
     before = sorted(tuple(r) for r in before_rows)
     after = sorted(tuple(r) for r in after_rows)
     assert before == after

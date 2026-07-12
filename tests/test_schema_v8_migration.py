@@ -57,9 +57,35 @@ def _populate_v7_fixture(conn: sqlite3.Connection) -> dict:
     # Bring the DB up to at least v5 shape so intern tables + v7 columns exist.
     # ``ensure_schema`` will run its usual chain; user_version starts at 0.
     ensure_schema(conn)
-    # Roll user_version back to 7 so the v7→v8 hop actually runs. Preserves
-    # every table shape (they are additive from v5 onwards).
+    # Roll user_version back to 7 so the v7→v8→v9 chain runs. ensure_schema
+    # (called by connect path elsewhere) produced the v9 shape which no
+    # longer has chunks / keyword_chunks — recreate them in their v7 shape
+    # so the v7→v8 backfill + v8→v9 drop have real data to work on. This
+    # mimics a genuine on-disk v7 database.
     conn.execute("PRAGMA user_version = 7")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chunks (
+            doc_id INTEGER NOT NULL,
+            chunk_id INTEGER NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            char_count INTEGER NOT NULL,
+            PRIMARY KEY (doc_id, chunk_id)
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS keyword_chunks (
+            kw_id INTEGER NOT NULL,
+            doc_id INTEGER NOT NULL,
+            chunk_id INTEGER NOT NULL,
+            occurrence_count INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (kw_id, doc_id, chunk_id)
+        ) WITHOUT ROWID
+        """
+    )
     conn.commit()
 
     # Directories
@@ -148,8 +174,11 @@ def _populate_v7_fixture(conn: sqlite3.Connection) -> dict:
         },
         "expected_scope_stats": {
             # dir_id: (n_chunks, n_docs, vocab_size)
-            1: (4, 2, 3),  # 4 chunks in scope A across docs 1+2, 2 docs, 3 kws
-            2: (2, 1, 2),  # 2 chunks in scope B, 1 doc, 2 kws
+            # v9 semantics: n_chunks counts *chunks-with-keywords* (the npmi
+            # denominator), not raw chunks. Scope A has 4 raw chunks but
+            # chunk (doc1, chunk2) has no keyword_chunks row → 3 with-kw.
+            1: (3, 2, 3),  # 3 chunks-with-kw across docs 1+2, 2 docs, 3 kws
+            2: (2, 1, 2),  # 2 chunks-with-kw in scope B, 1 doc, 2 kws
         },
         "expected_surviving_pairs": {
             # (dir_id, kw_a_id, kw_b_id, source): (cooccur, npmi_or_None)
@@ -245,21 +274,26 @@ def test_v7_to_v8_prunes_low_score_pairs(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_v7_to_v8_keeps_deprecated_tables(tmp_path: Path) -> None:
-    """chunks / keyword_chunks must survive Phase 1 (dropped in a later phase)."""
+def test_v7_to_v9_drops_deprecated_tables(tmp_path: Path) -> None:
+    """v7→v9 chain removes ``chunks`` and ``keyword_chunks``.
+
+    Phase 1's ``keep them for compat`` clause is superseded by Phase 3b-3
+    (docs/design/plan-2026-07-12-keyword-primary.md §4.3): once the build /
+    read paths no longer touch these tables, keeping them is dead weight.
+    ``keyword_docs`` (the doc-level replacement inverted index) takes over.
+    """
     conn = connect(tmp_path / "graph.db")
     try:
         _populate_v7_fixture(conn)
         conn.execute("PRAGMA user_version = 7")
         ensure_schema(conn)
 
-        assert _table_exists(conn, "chunks")
-        assert _table_exists(conn, "keyword_chunks")
-        # Row content preserved (no accidental TRUNCATE).
-        n_kc = conn.execute("SELECT COUNT(*) FROM keyword_chunks").fetchone()[0]
-        assert n_kc == 8  # matches fixture
-        n_ch = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        assert n_ch == 6
+        assert not _table_exists(conn, "chunks")
+        assert not _table_exists(conn, "keyword_chunks")
+        # keyword_docs must have been backfilled from the v7 chunk data.
+        assert _table_exists(conn, "keyword_docs")
+        n_kd = conn.execute("SELECT COUNT(*) FROM keyword_docs").fetchone()[0]
+        assert n_kd > 0
     finally:
         conn.close()
 

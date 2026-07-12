@@ -66,7 +66,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Source markers for ``keyword_pairs`` rows. These are the *only* two
 # allowed values (plan HC4 / §3.3).
@@ -91,16 +91,17 @@ V1_TABLES = ("keyword_counts", "keyword_sources")
 # Intern (lookup) tables introduced in v5.
 INTERN_TABLES = ("directories", "keywords", "docs")
 
-# Graph business tables owned by this module (post-migration shape).
-# v8 note: ``chunks`` / ``keyword_chunks`` are *deprecated* — the v7→v8
-# migration keeps them (data still readable) but the keyword-primary model
-# stops writing to them (Phase 2) and a later phase drops them (Phase 3).
-# Until then they remain in this tuple so introspection/tests still see them.
-GRAPH_TABLES = ("chunks", "keyword_chunks", "keyword_pairs", "heading_docs",
+# Graph business tables owned by this module (v9 keyword-primary shape).
+# ``chunks`` / ``keyword_chunks`` were dropped in v9 — pair co-occurrence
+# is now derived from RAM at build time, and the doc-level inverted index
+# ``keyword_docs`` covers the seed→docs lookup the old ``keyword_chunks``
+# provided for ``mode=heading`` and ``inspect``.
+GRAPH_TABLES = ("keyword_pairs", "heading_docs",
                 "llm_extension_votes", "auto_ngram_dict")
 
-# Knowledge-asset tables introduced in v8 (keyword-primary model).
+# Knowledge-asset tables owned by the v8/v9 keyword-primary model.
 V8_ASSET_TABLES = ("keyword_stats", "scope_stats")
+V9_ASSET_TABLES = ("keyword_docs",)
 
 
 def resolve_scope_key(directory: Optional[Union[str, Path]]) -> Optional[str]:
@@ -242,21 +243,6 @@ CREATE TABLE IF NOT EXISTS keyword_pairs (
 """
 
 _CREATE_GRAPH_TABLES = """
-CREATE TABLE IF NOT EXISTS chunks (
-    doc_id INTEGER NOT NULL REFERENCES docs(id),
-    chunk_id INTEGER NOT NULL,
-    start_line INTEGER NOT NULL,
-    end_line INTEGER NOT NULL,
-    char_count INTEGER NOT NULL,
-    PRIMARY KEY (doc_id, chunk_id)
-) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS keyword_chunks (
-    kw_id INTEGER NOT NULL REFERENCES keywords(id),
-    doc_id INTEGER NOT NULL REFERENCES docs(id),
-    chunk_id INTEGER NOT NULL,
-    occurrence_count INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (kw_id, doc_id, chunk_id)
-) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS heading_docs (
     doc_id INTEGER NOT NULL REFERENCES docs(id),
     heading_path TEXT NOT NULL,
@@ -307,8 +293,6 @@ CREATE TABLE IF NOT EXISTS auto_ngram_dict (
 _CREATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_docs_dir
     ON docs (dir_id);
-CREATE INDEX IF NOT EXISTS idx_keyword_chunks_doc
-    ON keyword_chunks (doc_id, chunk_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_pairs_a
     ON keyword_pairs (dir_id, kw_a_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_pairs_b
@@ -329,6 +313,10 @@ CREATE INDEX IF NOT EXISTS idx_auto_ngram_dir
     ON auto_ngram_dict (dir_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_stats_scope
     ON keyword_stats (dir_id, chunk_df DESC);
+CREATE INDEX IF NOT EXISTS idx_keyword_docs_dir
+    ON keyword_docs (dir_id, kw_id);
+CREATE INDEX IF NOT EXISTS idx_keyword_docs_reverse
+    ON keyword_docs (dir_id, doc_id);
 """
 
 # v8 keyword-primary tables (docs/design/plan-2026-07-12-keyword-primary.md §2.1).
@@ -339,8 +327,8 @@ CREATE INDEX IF NOT EXISTS idx_keyword_stats_scope
 # — merging them would denormalise (repeat kw text per scope).
 #
 # ``scope_stats`` — per-scope scalars: ``n_chunks`` (npmi denominator N),
-# ``n_docs`` / ``vocab_size`` (introspection). ``chunks`` table becomes
-# deprecated after Phase 2; ``n_chunks`` here is its Phase-3 replacement.
+# ``n_docs`` / ``vocab_size`` (introspection). In v9 ``n_chunks`` fully
+# replaces the dropped ``chunks`` table as the npmi denominator source.
 _CREATE_V8_ASSET_TABLES = """
 CREATE TABLE IF NOT EXISTS keyword_stats (
     dir_id INTEGER NOT NULL REFERENCES directories(id),
@@ -358,6 +346,27 @@ CREATE TABLE IF NOT EXISTS scope_stats (
     vocab_size INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT
 );
+"""
+
+# v9 keyword-primary table (docs/design/plan-2026-07-12-keyword-primary.md §2,
+# Phase 3b-3). ``keyword_docs`` — doc-level inverted index replacing the
+# dropped chunk-level ``keyword_chunks``. ~30× smaller (one row per
+# (kw, doc) instead of per (kw, doc, chunk)). Provides the seed→docs lookup
+# that ``related(mode='heading')`` and ``graph inspect`` need.
+#
+# ``chunk_count`` = number of distinct chunks in this doc containing the kw
+# (so ``SUM(chunk_count)`` per kw reconstructs ``keyword_stats.chunk_df``).
+# ``dir_id`` is denormalised from ``docs`` for a fast per-scope filter
+# without a JOIN (dir_id never changes for a given doc).
+_CREATE_V9_ASSET_TABLES = """
+CREATE TABLE IF NOT EXISTS keyword_docs (
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    kw_id INTEGER NOT NULL REFERENCES keywords(id),
+    doc_id INTEGER NOT NULL REFERENCES docs(id),
+    occurrence_count INTEGER NOT NULL DEFAULT 0,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (kw_id, doc_id)
+) WITHOUT ROWID;
 """
 
 
@@ -389,6 +398,7 @@ def _create_current_tables(conn: sqlite3.Connection) -> None:
         + _CREATE_KEYWORD_PAIRS
         + _CREATE_GRAPH_TABLES
         + _CREATE_V8_ASSET_TABLES
+        + _CREATE_V9_ASSET_TABLES
         + _CREATE_INDEXES
     ):
         conn.execute(stmt)
@@ -415,6 +425,28 @@ def _ensure_docs_v7_columns(conn: sqlite3.Connection) -> None:
     ):
         if name not in cols:
             conn.execute(f"ALTER TABLE docs ADD COLUMN {name} {decl}")
+
+
+def _ensure_docs_v9_columns(conn: sqlite3.Connection) -> None:
+    """Add the schema v9 ``docs.n_chunks_with_kw`` column if missing.
+
+    After Phase 3b-3 drops the raw ``chunks`` table, ``scope_stats.n_chunks``
+    (the npmi denominator N = chunks-that-contain-at-least-one-keyword)
+    must be maintainable incrementally without re-scanning a chunks table.
+    Store the per-doc contribution on ``docs`` itself so
+    ``scope_stats.n_chunks = SUM(docs.n_chunks_with_kw)`` per scope stays
+    accurate through add/update/remove of individual files.
+
+    Default 0 means "no keywords indexed yet" — matches the reality of a
+    doc that hasn't been through pass-2 tokenisation.
+    """
+    if not _table_exists(conn, "docs"):
+        return
+    cols = _table_columns(conn, "docs")
+    if "n_chunks_with_kw" not in cols:
+        conn.execute(
+            "ALTER TABLE docs ADD COLUMN n_chunks_with_kw INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _migration_announce(db_path: Optional[str], stage: str) -> None:
@@ -616,6 +648,7 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         # no portable ``IF NOT EXISTS`` clause.
         _create_current_tables(conn)
         _ensure_docs_v7_columns(conn)
+        _ensure_docs_v9_columns(conn)
 
         # v7 → v8 keyword-primary migration
         # (docs/design/plan-2026-07-12-keyword-primary.md §6). Additive +
@@ -626,6 +659,13 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         # (Phase 1) so build/related keep working; a later phase drops them.
         if read_schema_version(conn) < 8:
             _migrate_v7_to_v8_inplace(conn)
+
+        # v8 → v9 (Phase 3b-3): backfill keyword_docs from keyword_chunks,
+        # then DROP the deprecated chunks/keyword_chunks tables. Once we
+        # reach v9 the pair table is derived from RAM at build time and no
+        # chunk-level inverted index remains on disk.
+        if read_schema_version(conn) < 9:
+            _migrate_v8_to_v9_inplace(conn)
 
         # Stamp the version **inside** the transaction so shape + version
         # commit atomically.
@@ -658,7 +698,16 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
 
 
 def _needs_v3_to_v4(conn: sqlite3.Connection) -> bool:
-    """True when the DB has legacy pre-v4 pair/doc tables that need rebuild."""
+    """True when the DB has legacy pre-v4 pair/doc tables that need rebuild.
+
+    v9 note: ``keyword_docs`` is now a *v9* table (doc-level inverted
+    index) that shares the name of an unrelated legacy v3 table. The
+    presence check therefore also gates on ``user_version < 4`` so a v9
+    database is not misidentified as legacy.
+    """
+    current = read_schema_version(conn)
+    if current >= 4:
+        return False
     if _table_exists(conn, "keyword_docs"):
         return True
     if _table_exists(conn, "keyword_pairs"):
@@ -1231,6 +1280,91 @@ def _utc_now_iso() -> str:
     """UTC timestamp in ``YYYY-MM-DDTHH:MM:SSZ`` form (matches v5+ convention)."""
     import time
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# ---------------------------------------------------------------------------
+# v8 → v9 keyword-primary migration (Phase 3b-3).
+#
+# Design: docs/design/plan-2026-07-12-keyword-primary.md §4.3. Two ops:
+#
+#   1. Backfill ``keyword_docs`` from the still-present ``keyword_chunks``:
+#      collapse the chunk-level index to a doc-level inverted index, with
+#      ``chunk_count`` preserving the "how many chunks in this doc contain
+#      this kw" signal that the old ``keyword_chunks`` COUNT(*) gave.
+#
+#   2. DROP TABLE ``keyword_chunks`` and ``chunks``. Their sole readers
+#      (build's ``recompute_pairs`` / ``recompute_scope_assets`` and
+#      ``related._docs_for_keywords_chunks`` / ``inspect._cooccurrences``)
+#      switch to ``keyword_docs`` + in-RAM pair derivation in the same
+#      commit. ``chunks.n_chunks_in_scope`` is already carried by
+#      ``scope_stats.n_chunks`` (populated in Phase 1) so nothing else
+#      depends on the raw chunks table.
+#
+# The migration is idempotent — a re-run finds no keyword_chunks table,
+# skips backfill, and the DROPs are no-ops.
+# ---------------------------------------------------------------------------
+
+
+def _migrate_v8_to_v9_inplace(conn: sqlite3.Connection) -> None:
+    """Backfill ``keyword_docs`` + ``docs.n_chunks_with_kw``, correct
+    ``scope_stats.n_chunks``, then drop the two deprecated tables.
+
+    Runs inside the outer migration transaction (BEGIN IMMEDIATE from
+    ``_migrate_forward``). Safe on already-v9 shape: ``keyword_chunks`` is
+    already gone → backfill/correction are no-ops; ``DROP TABLE IF EXISTS``
+    is safe.
+
+    Semantics correction: Phase 1's v7→v8 migration populated
+    ``scope_stats.n_chunks`` from ``COUNT(*) FROM chunks`` — which counts
+    *every* chunk including empty lines with no keywords. But the historical
+    npmi denominator used by pair recomputation was "chunks with at least
+    one keyword" (see the pre-v9 ``recompute_pairs`` SQL). v9 consolidates
+    on the chunks-with-keyword definition: ``scope_stats.n_chunks`` is now
+    the authoritative source, and after this migration it matches the pair
+    table's npmi denominator exactly.
+    """
+    if _table_exists(conn, "keyword_chunks"):
+        # 1. Backfill keyword_docs: collapse chunk-level rows to (kw, doc).
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO keyword_docs
+                (dir_id, kw_id, doc_id, occurrence_count, chunk_count)
+            SELECT d.dir_id, kc.kw_id, kc.doc_id,
+                   COALESCE(SUM(kc.occurrence_count), 0),
+                   COUNT(*)
+            FROM keyword_chunks kc
+            JOIN docs d ON d.id = kc.doc_id
+            GROUP BY d.dir_id, kc.kw_id, kc.doc_id
+            """,
+        )
+        # 2. Backfill docs.n_chunks_with_kw: distinct (doc, chunk) pairs
+        #    where the chunk contains ≥ 1 keyword, grouped by doc.
+        conn.execute(
+            """
+            UPDATE docs SET n_chunks_with_kw = COALESCE((
+                SELECT COUNT(*) FROM (
+                    SELECT 1 FROM keyword_chunks kc
+                    WHERE kc.doc_id = docs.id
+                    GROUP BY kc.chunk_id
+                )
+            ), 0)
+            """,
+        )
+        # 3. Recompute scope_stats.n_chunks from the corrected per-doc counts
+        #    so npmi denominator matches pair-recomputation semantics.
+        conn.execute(
+            """
+            UPDATE scope_stats SET
+                n_chunks = COALESCE((
+                    SELECT SUM(d.n_chunks_with_kw) FROM docs d
+                    WHERE d.dir_id = scope_stats.dir_id
+                ), 0)
+            """,
+        )
+
+    # 4. DROP the deprecated chunk-level tables. Idempotent via IF EXISTS.
+    conn.execute("DROP TABLE IF EXISTS keyword_chunks")
+    conn.execute("DROP TABLE IF EXISTS chunks")
 
 
 def vacuum_db(db_path: Union[str, Path]) -> Dict[str, int]:

@@ -62,8 +62,9 @@ def test_chars_mode_short_heading_paragraph_not_merged():
 
 def test_v3_migration_atomic_transaction(tmp_path):
     """A v3 database migrates in one shot: single ensure_schema call brings
-    it to the current schema with keyword_docs dropped and llm_promoted rows
-    salvaged (v3 → v4 → v5 chain, one atomic transaction)."""
+    it to the current schema with the legacy keyword_docs dropped, the v9
+    keyword_docs recreated, and llm_promoted rows salvaged (v3→v4→v5→…→v9
+    chain, one atomic transaction)."""
     db = tmp_path / "legacy.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(
@@ -96,10 +97,14 @@ def test_v3_migration_atomic_transaction(tmp_path):
     try:
         ensure_schema(c)
         assert read_schema_version(c) == SCHEMA_VERSION
-        # Legacy keyword_docs gone
+        # keyword_docs exists post-migration but is the *v9* asset table
+        # (different column shape) — the legacy v3 keyword_docs was dropped
+        # during v3→v4 and the DDL recreated the new one.
         assert c.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE name='keyword_docs'"
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(keyword_docs)")}
+        assert cols >= {"dir_id", "kw_id", "doc_id", "occurrence_count", "chunk_count"}
         # LLM-promoted rows salvaged
         rows = c.execute(
             "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, p.source AS source "

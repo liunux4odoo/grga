@@ -507,14 +507,15 @@ def _docs_for_keywords_chunks(
     keywords: Sequence[str],
     scope_key: Optional[str],
 ) -> Dict[Tuple[str, str], Tuple[float, set]]:
-    """Aggregate ``keyword_chunks`` to ``{(directory, doc_path): (weight, kws)}``.
+    """Aggregate ``keyword_docs`` to ``{(directory, doc_path): (weight, kws)}``.
 
-    ``weight`` is the summed ``occurrence_count`` across chunks and the
-    seed keywords. ``kws`` is the set of seed keywords that hit this doc.
+    ``weight`` is the summed ``occurrence_count`` across the seed keywords
+    for each doc. ``kws`` is the set of seed keywords that hit this doc.
 
-    Reads the normalized (v5) tables, joining ``keywords`` / ``docs`` /
-    ``directories`` back to text so the returned mapping stays keyed on the
-    scope path + relative doc path (contract-compatible).
+    v9 note: reads the doc-level inverted index ``keyword_docs``. The
+    pre-v9 ``keyword_chunks`` self-join is gone; each ``keyword_docs`` row
+    already carries the per-doc occurrence total, so the lookup is a
+    single indexed join.
     """
     if not keywords:
         return {}
@@ -526,13 +527,12 @@ def _docs_for_keywords_chunks(
         params.append(scope_key)
     rows = conn.execute(
         f"SELECT dir.path AS directory, k.kw AS keyword, d.doc_path AS doc_path, "
-        f"SUM(kc.occurrence_count) AS total, COUNT(*) AS chunks "
-        f"FROM keyword_chunks kc "
-        f"JOIN keywords k ON k.id = kc.kw_id "
-        f"JOIN docs d ON d.id = kc.doc_id "
+        f"kd.occurrence_count AS total, kd.chunk_count AS chunks "
+        f"FROM keyword_docs kd "
+        f"JOIN keywords k ON k.id = kd.kw_id "
+        f"JOIN docs d ON d.id = kd.doc_id "
         f"JOIN directories dir ON dir.id = d.dir_id "
-        f"WHERE {where} "
-        f"GROUP BY dir.path, k.kw, d.doc_path",
+        f"WHERE {where}",
         params,
     ).fetchall()
     out: Dict[Tuple[str, str], Tuple[float, set]] = {}

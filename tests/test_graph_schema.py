@@ -127,15 +127,24 @@ def test_ensure_schema_on_empty_db(tmp_path: Path):
             assert name in tables, f"missing graph table {name}"
         for name in INTERN_TABLES:
             assert name in tables, f"missing intern table {name}"
-        assert "keyword_docs" not in tables
+        # v9: keyword_docs is now a real asset table; chunks / keyword_chunks
+        # must NOT exist on a fresh v9 DB.
+        assert "keyword_docs" in tables
+        assert "chunks" not in tables
+        assert "keyword_chunks" not in tables
     finally:
         conn.close()
 
 
-def _insert_normalized_kw_chunk(conn: sqlite3.Connection, directory: str,
-                                keyword: str, doc_path: str, chunk_id: int,
-                                occ: int = 1) -> None:
-    """Helper: insert a row into ``keyword_chunks`` via the intern tables."""
+def _insert_normalized_kw_doc(conn: sqlite3.Connection, directory: str,
+                              keyword: str, doc_path: str,
+                              chunk_count: int = 1, occ: int = 1) -> None:
+    """Helper: insert a row into ``keyword_docs`` via the intern tables.
+
+    v9: the doc-level inverted index replaces the pre-v9
+    ``keyword_chunks`` (chunk-level). Kept as a test helper for anything
+    that just wants "a real row exists".
+    """
     conn.execute("INSERT OR IGNORE INTO directories(path) VALUES (?)", (directory,))
     conn.execute("INSERT OR IGNORE INTO keywords(kw) VALUES (?)", (keyword,))
     dir_id = conn.execute("SELECT id FROM directories WHERE path=?", (directory,)).fetchone()[0]
@@ -149,9 +158,9 @@ def _insert_normalized_kw_chunk(conn: sqlite3.Connection, directory: str,
         (dir_id, doc_path),
     ).fetchone()[0]
     conn.execute(
-        "INSERT OR IGNORE INTO keyword_chunks(kw_id, doc_id, chunk_id, occurrence_count) "
-        "VALUES (?, ?, ?, ?)",
-        (kw_id, doc_id, chunk_id, occ),
+        "INSERT OR IGNORE INTO keyword_docs(dir_id, kw_id, doc_id, "
+        "occurrence_count, chunk_count) VALUES (?, ?, ?, ?, ?)",
+        (dir_id, kw_id, doc_id, occ, chunk_count),
     )
 
 
@@ -160,9 +169,9 @@ def test_ensure_schema_is_idempotent(tmp_path: Path):
     try:
         ensure_schema(conn)
         ensure_schema(conn)  # second call must not raise or duplicate rows.
-        _insert_normalized_kw_chunk(conn, "/d", "k", "a.md", 0)
+        _insert_normalized_kw_doc(conn, "/d", "k", "a.md")
         conn.commit()
-        assert conn.execute("SELECT COUNT(*) FROM keyword_chunks").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM keyword_docs").fetchone()[0] == 1
         assert read_schema_version(conn) == SCHEMA_VERSION
     finally:
         conn.close()
@@ -200,7 +209,10 @@ def test_migrate_v1_preserves_counts_and_salvages_promoted(tmp_path: Path):
             assert name in tables
         for name in INTERN_TABLES:
             assert name in tables
-        assert "keyword_docs" not in tables
+        # v9: legacy v1 keyword_docs was dropped during v3→v4, and v9's
+        # new keyword_docs is recreated in the current DDL — post-migration
+        # it IS present with the new column shape.
+        assert "keyword_docs" in tables
 
         # keyword_counts preserved (normalized: SELECT via joins).
         count = conn.execute(
@@ -236,7 +248,18 @@ def test_migrate_v1_preserves_counts_and_salvages_promoted(tmp_path: Path):
         conn.close()
 
 
-def test_migrate_v3_drops_keyword_docs(tmp_path: Path):
+def test_migrate_v3_drops_legacy_keyword_docs(tmp_path: Path):
+    """v3→v4 migration drops the *legacy* keyword_docs table and salvages
+    llm_promoted pairs.
+
+    Note the collision: schema v9 also has a table called ``keyword_docs``
+    (doc-level inverted index, unrelated shape). This test seeds a v3 DB
+    whose ``keyword_docs`` is the legacy shape; after migration the v9
+    table appears with the new shape, so post-migration ``keyword_docs``
+    should still be present (as the v9 asset), just with different columns.
+    The legacy detection gate in ``_needs_v3_to_v4`` uses
+    ``user_version < 4`` to avoid the false positive on already-v9 DBs.
+    """
     db = tmp_path / "v3.db"
     _make_v3_db(db)
 
@@ -247,7 +270,12 @@ def test_migrate_v3_drops_keyword_docs(tmp_path: Path):
         assert read_schema_version(conn) == SCHEMA_VERSION
 
         tables = set(list_tables(conn))
-        assert "keyword_docs" not in tables
+        # v9 keyword_docs is now a real asset table; the legacy v3 shape
+        # was dropped during v3→v4, and the v9 recreate went through the
+        # normal DDL path. Verify the new v9 columns are present.
+        assert "keyword_docs" in tables
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(keyword_docs)")}
+        assert cols >= {"dir_id", "kw_id", "doc_id", "occurrence_count", "chunk_count"}
         for name in GRAPH_TABLES:
             assert name in tables
 
@@ -309,14 +337,9 @@ def test_graph_tables_writable_after_ensure(tmp_path: Path):
         alpha_id = conn.execute("SELECT id FROM keywords WHERE kw='alpha'").fetchone()[0]
         beta_id = conn.execute("SELECT id FROM keywords WHERE kw='beta'").fetchone()[0]
         conn.execute(
-            "INSERT INTO chunks (doc_id, chunk_id, start_line, end_line, char_count) "
-            "VALUES (?, 0, 1, 1, 40)",
-            (doc_id,),
-        )
-        conn.execute(
-            "INSERT INTO keyword_chunks (kw_id, doc_id, chunk_id, occurrence_count) "
-            "VALUES (?, ?, 0, 2)",
-            (alpha_id, doc_id),
+            "INSERT INTO keyword_docs (dir_id, kw_id, doc_id, "
+            "occurrence_count, chunk_count) VALUES (?, ?, ?, 2, 1)",
+            (dir_id, alpha_id, doc_id),
         )
         conn.execute(
             "INSERT INTO keyword_pairs (dir_id, kw_a_id, kw_b_id, source, "
@@ -329,8 +352,8 @@ def test_graph_tables_writable_after_ensure(tmp_path: Path):
             (doc_id,),
         )
         conn.commit()
-        assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM keyword_chunks").fetchone()[0] == 1
+        # v9: chunks / keyword_chunks are dropped; keyword_docs replaces them.
+        assert conn.execute("SELECT COUNT(*) FROM keyword_docs").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM keyword_pairs").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM heading_docs").fetchone()[0] == 1
     finally:
@@ -350,7 +373,7 @@ def test_ensure_schema_participates_in_caller_transaction(tmp_path: Path):
     conn = connect(db)
     try:
         ensure_schema(conn)  # migrate to current
-        _insert_normalized_kw_chunk(conn, "/d", "kw1", "a.md", 0)
+        _insert_normalized_kw_doc(conn, "/d", "kw1", "a.md")
         assert conn.in_transaction is True
 
         # Second ensure_schema (fast path) MUST NOT commit the pending INSERT.
@@ -366,7 +389,7 @@ def test_ensure_schema_participates_in_caller_transaction(tmp_path: Path):
     # Reopen: the row should NOT be visible because the caller never committed.
     conn = connect(db)
     try:
-        rows = conn.execute("SELECT COUNT(*) FROM keyword_chunks").fetchone()[0]
+        rows = conn.execute("SELECT COUNT(*) FROM keyword_docs").fetchone()[0]
         assert rows == 0, (
             f"ensure_schema silently committed caller's INSERT (got {rows} rows, expected 0)"
         )
@@ -421,12 +444,14 @@ def test_migration_within_caller_transaction_succeeds(tmp_path: Path):
         version = ensure_schema(conn)
         assert version == SCHEMA_VERSION
 
-        # v5 tables exist and legacy llm_promoted salvaged.
+        # v9 tables exist and legacy llm_promoted salvaged.
         tables = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
-        assert "chunks" in tables and "keyword_chunks" in tables
-        assert "keyword_docs" not in tables
+        # v9: chunks / keyword_chunks are dropped; keyword_docs is the
+        # doc-level replacement and IS present.
+        assert "chunks" not in tables and "keyword_chunks" not in tables
+        assert "keyword_docs" in tables
         assert "directories" in tables and "keywords" in tables and "docs" in tables
         pair = conn.execute(
             "SELECT p.source FROM keyword_pairs p "
