@@ -418,8 +418,9 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
     v9 keyword-primary: pair derivation is inline (no more ``recompute_pairs``
     function to patch). The no-op invariant is now expressed as "the
     ``index_layer_changed`` branch does not run" — verified by patching
-    :func:`_flush_pair_delta` (the pass-3 pair maintenance helper) and
-    asserting it is never called during a no-change build.
+    both :func:`_upsert_pair_delta` and :func:`_finalize_pair_npmi` (the
+    pass-3 pair maintenance helpers) and asserting neither fires during
+    a no-change build.
     """
     scope = tmp_path / "scope"
     _write_corpus(scope)
@@ -430,13 +431,19 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
 
     from grga.graph import build as build_mod
     call_count = {"n": 0}
-    real = build_mod._flush_pair_delta
+    real_upsert = build_mod._upsert_pair_delta
+    real_finalize = build_mod._finalize_pair_npmi
 
-    def _counting(*args, **kwargs):
+    def _counting_upsert(*args, **kwargs):
         call_count["n"] += 1
-        return real(*args, **kwargs)
+        return real_upsert(*args, **kwargs)
 
-    monkeypatch.setattr(build_mod, "_flush_pair_delta", _counting)
+    def _counting_finalize(*args, **kwargs):
+        call_count["n"] += 1
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(build_mod, "_upsert_pair_delta", _counting_upsert)
+    monkeypatch.setattr(build_mod, "_finalize_pair_npmi", _counting_finalize)
 
     s = build_graph_index(scope, db_path=db, mode="build",
                           refresh_ngram="append")
@@ -445,7 +452,7 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
     assert s.docs_added == 0
     assert s.docs_removed == 0
     assert call_count["n"] == 0, (
-        "_flush_pair_delta should not run on a no-change incremental build"
+        "_upsert_pair_delta / _finalize_pair_npmi should not run on a no-change incremental build"
     )
     # pairs_written must still be populated (read back from DB), not 0.
     conn = connect(db)

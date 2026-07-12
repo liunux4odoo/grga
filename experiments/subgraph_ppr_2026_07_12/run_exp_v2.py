@@ -1,8 +1,14 @@
+"""V2 subgraph vs full-graph PPR comparison — parameter sweep + realistic seeds.
+
+HISTORICAL — requires ``grga.graph.ppr``, DELETED in Phase 3b-2 (commit
+``7a232c2``). Kept as evidence for the "local PPR is not viable" decision.
+NOT runnable on current HEAD; check out a pre-``7a232c2`` commit to re-run.
+"""
 import os, sys, sqlite3, time, statistics
 sys.path.insert(0, "/media/lqw/DATA/myrepo/grga/src")
 sys.path.insert(0, "/tmp/kilo/grga_subgraph_exp")
 
-from grga.graph.ppr import (
+from grga.graph.ppr import (  # noqa: F401 — HISTORICAL, module deleted post-3b-2
     load_edges_indexed, personalized_pagerank_indexed,
     edge_weight, IndexedGraph, _fold, _HAS_NUMPY,
 )

@@ -4,6 +4,10 @@ Compare full-graph PPR top-K vs K-hop subgraph PPR top-K on the real DB.
 Uses grga's own ppr.py (edge_weight, personalized_pagerank_indexed,
 IndexedGraph, _fold) so the PPR math is identical — only the graph's
 domain differs (full vs subgraph).
+
+HISTORICAL — requires ``grga.graph.ppr``, DELETED in Phase 3b-2 (commit
+``7a232c2``). Kept as evidence for the "local PPR is not viable" decision.
+NOT runnable on current HEAD; check out a pre-``7a232c2`` commit to re-run.
 """
 import os
 import sys

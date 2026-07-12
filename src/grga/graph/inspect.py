@@ -166,6 +166,28 @@ def _inspect(
     }
 
 
+def _resolve_kw_ids(
+    conn: sqlite3.Connection,
+    folded_keywords: Sequence[str],
+) -> Dict[str, int]:
+    """Resolve casefolded keywords to their global kw_id in one query.
+
+    ``keywords`` has a unique index on ``kw`` so the batched IN lookup is
+    O(log N) per key. Missing keywords are simply absent from the result.
+    """
+    uniq = [kw for kw in dict.fromkeys(folded_keywords) if kw]
+    if not uniq:
+        return {}
+    placeholders = ",".join("?" for _ in uniq)
+    out: Dict[str, int] = {}
+    for r in conn.execute(
+        f"SELECT id, kw FROM keywords WHERE kw IN ({placeholders})",
+        uniq,
+    ):
+        out[str(r["kw"])] = int(r["id"])
+    return out
+
+
 def _cooccurrences(
     conn: sqlite3.Connection,
     folded: str,
@@ -176,44 +198,117 @@ def _cooccurrences(
     ``keyword_pairs.cooccur_count`` at build time (design D6). Reading
     those edges directly is the canonical way to answer "who does this
     keyword keep company with?" — the pre-v9 ``keyword_chunks`` self-join
-    is gone. ``cooccur_count`` is the same "chunk co-occurrence count"
-    signal the old query summed (``SUM(other.occurrence_count)`` collapsed
-    to per-chunk 1 by the composite PK), so the polysemy heuristic
-    downstream sees numerically identical distributions.
+    is gone.
+
+    Post-review (F4): the query is now on kw_id equality (``kw_a_id = ?``
+    / ``kw_b_id = ?``), so SQLite can use the two ``(dir_id, kw_a_id, ...)``
+    / ``(dir_id, kw_b_id, ...)`` indexes — no more full-table scan on
+    text-column OR. For batch use, see :func:`_cooccurrences_batch`.
 
     Returns ``(cooccur_weight, cooccur_scopes, per_scope_cooccur)``.
     """
-    cooccur_weight: Dict[str, float] = {}
-    cooccur_scopes: Dict[str, set] = {}
-    per_scope_cooccur: Dict[str, Dict[str, float]] = {}
-    # Fetch pairs where the seed sits on either endpoint. Both directions
-    # matter — ``kw_a_id < kw_b_id`` is the storage invariant so the seed
-    # may be on either side.
-    rows = conn.execute(
-        """
-        SELECT dir.path AS directory,
-               CASE WHEN sk.kw = ? THEN ok.kw ELSE sk.kw END AS kw,
-               p.cooccur_count AS cooccur_count
-        FROM keyword_pairs p
-        JOIN keywords sk ON sk.id = p.kw_a_id
-        JOIN keywords ok ON ok.id = p.kw_b_id
-        JOIN directories dir ON dir.id = p.dir_id
-        WHERE (sk.kw = ? OR ok.kw = ?)
-          AND p.source = 'chunk_cooccur'
-        """,
-        (folded, folded, folded),
-    ).fetchall()
-    for row in rows:
-        kw = _fold(row["kw"])
-        if not kw or kw == folded:
-            continue
-        directory = row["directory"]
-        weight = float(row["cooccur_count"])
-        cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
-        cooccur_scopes.setdefault(kw, set()).add(directory)
-        scope_map = per_scope_cooccur.setdefault(directory, {})
-        scope_map[kw] = scope_map.get(kw, 0.0) + weight
-    return cooccur_weight, cooccur_scopes, per_scope_cooccur
+    kw_ids = _resolve_kw_ids(conn, [folded])
+    seed_kw_id = kw_ids.get(folded)
+    if seed_kw_id is None:
+        return {}, {}, {}
+    batch = _cooccurrences_batch(conn, {folded: seed_kw_id})
+    return batch.get(folded, ({}, {}, {}))
+
+
+def _cooccurrences_batch(
+    conn: sqlite3.Connection,
+    seed_kw_ids: Dict[str, int],
+) -> Dict[str, tuple[Dict[str, float], Dict[str, set], Dict[str, Dict[str, float]]]]:
+    """Batched :func:`_cooccurrences` — one scan resolves many keywords.
+
+    ``seed_kw_ids`` maps folded keyword → kw_id (as produced by
+    :func:`_resolve_kw_ids`). Returns
+    ``{folded_keyword: (cooccur_weight, cooccur_scopes, per_scope_cooccur)}``
+    for every requested seed. Missing seeds are simply absent from the
+    result.
+
+    F4 (review): pre-fix, ``compute_suspected_polysemy_batch`` looped
+    :func:`_cooccurrences` per keyword — turning a K-keyword batch into
+    K full-table scans. This batched form issues one indexed query per
+    endpoint side (a-side + b-side) using ``kw_a_id IN (...)`` / ``kw_b_id
+    IN (...)`` so the whole batch costs two index probes.
+    """
+    if not seed_kw_ids:
+        return {}
+    id_to_folded: Dict[int, str] = {v: k for k, v in seed_kw_ids.items()}
+    if len(id_to_folded) != len(seed_kw_ids):
+        # Same kw_id resolves for multiple folded keys — shouldn't happen
+        # (kw column is unique) but stay defensive.
+        pass
+
+    out: Dict[str, tuple[Dict[str, float], Dict[str, set], Dict[str, Dict[str, float]]]] = {
+        folded: ({}, {}, {}) for folded in seed_kw_ids
+    }
+
+    id_list = list(id_to_folded.keys())
+    if not id_list:
+        return out
+
+    # F4: two index-friendly IN queries — a-side and b-side of the pair.
+    # Chunk-partition to dodge SQLITE_MAX_VARIABLE_NUMBER.
+    for i in range(0, len(id_list), 900):
+        piece = id_list[i:i + 900]
+        ph = ",".join("?" for _ in piece)
+        # a-side: seed is kw_a_id; other is kw_b_id
+        for row in conn.execute(
+            f"""
+            SELECT dir.path AS directory,
+                   p.kw_a_id AS seed_id,
+                   ok.kw     AS other_kw,
+                   p.cooccur_count AS cooccur_count
+            FROM keyword_pairs p
+            JOIN keywords ok ON ok.id = p.kw_b_id
+            JOIN directories dir ON dir.id = p.dir_id
+            WHERE p.source = 'chunk_cooccur'
+              AND p.kw_a_id IN ({ph})
+            """,
+            piece,
+        ):
+            _absorb_cooccur_row(row, id_to_folded, out)
+        # b-side: seed is kw_b_id; other is kw_a_id
+        for row in conn.execute(
+            f"""
+            SELECT dir.path AS directory,
+                   p.kw_b_id AS seed_id,
+                   ok.kw     AS other_kw,
+                   p.cooccur_count AS cooccur_count
+            FROM keyword_pairs p
+            JOIN keywords ok ON ok.id = p.kw_a_id
+            JOIN directories dir ON dir.id = p.dir_id
+            WHERE p.source = 'chunk_cooccur'
+              AND p.kw_b_id IN ({ph})
+            """,
+            piece,
+        ):
+            _absorb_cooccur_row(row, id_to_folded, out)
+    return out
+
+
+def _absorb_cooccur_row(row, id_to_folded, out) -> None:
+    """Fold one (seed_id, other_kw, directory, cooccur_count) row into ``out``.
+
+    Shared by the two IN queries in :func:`_cooccurrences_batch` so the
+    aggregation logic stays in one place.
+    """
+    seed_id = int(row["seed_id"])
+    folded_seed = id_to_folded.get(seed_id)
+    if folded_seed is None:
+        return
+    kw = _fold(row["other_kw"])
+    if not kw or kw == folded_seed:
+        return
+    directory = row["directory"]
+    weight = float(row["cooccur_count"])
+    cooccur_weight, cooccur_scopes, per_scope_cooccur = out[folded_seed]
+    cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
+    cooccur_scopes.setdefault(kw, set()).add(directory)
+    scope_map = per_scope_cooccur.setdefault(directory, {})
+    scope_map[kw] = scope_map.get(kw, 0.0) + weight
 
 
 def _seed_docs(
@@ -310,14 +405,19 @@ def compute_suspected_polysemy_batch(
 ) -> Dict[str, bool]:
     """Batched polysemy verdict for many keywords: ``{keyword: suspected}``.
 
-    Resolves every keyword's seed set in one ``keyword IN (...)`` scan (see
-    :func:`_seed_docs_batch`) rather than one full scan per keyword. The
-    verdict is identical to calling :func:`compute_suspected_polysemy`
-    individually. Missing keywords map to ``False``. The returned dict is
+    F4 (review): pre-fix, this looped :func:`_cooccurrences` per keyword,
+    turning a K-keyword batch into K full-table scans and defeating the
+    :func:`_seed_docs_batch` batching. Now every keyword's neighbour set
+    is resolved in one indexed pass via :func:`_cooccurrences_batch`.
+
+    The verdict is identical to calling :func:`compute_suspected_polysemy`
+    individually. Missing keywords map to ``False``. Returned dict is
     keyed on the *folded* keyword.
     """
     folded = [_fold(kw) for kw in keywords]
     seed_map = _seed_docs_batch(conn, folded)
+    kw_ids = _resolve_kw_ids(conn, folded)
+    cooccur_map = _cooccurrences_batch(conn, kw_ids)
     out: Dict[str, bool] = {}
     for kw in dict.fromkeys(folded):
         if not kw:
@@ -326,7 +426,7 @@ def compute_suspected_polysemy_batch(
         if not docs_by_scope:
             out[kw] = False
             continue
-        _, _, per_scope_cooccur = _cooccurrences(conn, kw)
+        _, _, per_scope_cooccur = cooccur_map.get(kw, ({}, {}, {}))
         suspected, _ = _detect_polysemy(
             docs_by_scope, per_scope_cooccur, cooccur_limit
         )

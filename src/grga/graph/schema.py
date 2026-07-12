@@ -148,13 +148,15 @@ def connect(path: Union[str, Path]) -> sqlite3.Connection:
     """
     resolved = Path(path).expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    # The v4→v5 migration holds a write lock (``BEGIN IMMEDIATE``) for the
-    # duration of the one-shot rewrite (~10s on a large corpus). Python's
-    # default 5s busy timeout would make a *concurrent* grga invocation fail
-    # with ``database is locked`` before the migrator finishes. A 60s timeout
-    # lets the loser wait out the migration and then take the idempotent
+    # A migration holds a write lock (``BEGIN IMMEDIATE``) for the duration
+    # of its one-shot rewrite. The full v7→v9 chain is measured at ~40s on a
+    # 450 MB corpus (pair prune + keyword_docs backfill + chunk-table drop).
+    # Python's default 5s busy timeout would make a *concurrent* grga
+    # invocation fail with ``database is locked`` before the migrator
+    # finishes. A 180s timeout leaves comfortable headroom over the observed
+    # 40s so the loser waits out the migration and then takes the idempotent
     # fast-path instead of crashing.
-    conn = sqlite3.connect(str(resolved), timeout=60.0)
+    conn = sqlite3.connect(str(resolved), timeout=180.0)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -297,10 +299,6 @@ CREATE INDEX IF NOT EXISTS idx_keyword_pairs_a
     ON keyword_pairs (dir_id, kw_a_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_pairs_b
     ON keyword_pairs (dir_id, kw_b_id);
-CREATE INDEX IF NOT EXISTS idx_kp_a_npmi
-    ON keyword_pairs (dir_id, kw_a_id, npmi DESC);
-CREATE INDEX IF NOT EXISTS idx_kp_b_npmi
-    ON keyword_pairs (dir_id, kw_b_id, npmi DESC);
 CREATE INDEX IF NOT EXISTS idx_heading_docs_head
     ON heading_docs (heading_path);
 CREATE INDEX IF NOT EXISTS idx_keyword_counts_count
@@ -597,6 +595,25 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
             "downgrading to older grga cannot recover the pruned data. "
             "Back up the DB now if you may need to roll back.",
         )
+    # v8 → v9 (Phase 3b-3) is the second lossy hop — it DROPs the entire
+    # ``keyword_chunks`` + ``chunks`` tables. A user already on v8 (they
+    # ran Phase 1) sees the pair-prune warning nowhere in this upgrade
+    # unless we announce it here. Gate on the deprecated table actually
+    # existing so fresh/already-v9 DBs stay silent. Reuse GRGA_QUIET_MIGRATION.
+    if (
+        pre_version < 9 <= SCHEMA_VERSION
+        and db_path_str
+        and _table_exists(conn, "keyword_chunks")
+    ):
+        _migration_announce(
+            db_path_str,
+            f"WARNING: v{pre_version}→v9 upgrade will permanently DROP the "
+            "``keyword_chunks`` and ``chunks`` tables. They are replaced by "
+            "the doc-level ``keyword_docs`` index (30× smaller). This is "
+            "NOT reversible — pre-v9 grga cannot read the resulting DB, "
+            "and chunk-level data cannot be reconstructed without a full "
+            "rebuild. Back up the DB now if you may need to roll back.",
+        )
     if db_path_str:
         try:
             # Announce only when the DB is big enough for the migration to
@@ -666,6 +683,12 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         # chunk-level inverted index remains on disk.
         if read_schema_version(conn) < 9:
             _migrate_v8_to_v9_inplace(conn)
+
+        # Ensure the npmi-ordered pair indexes exist. Owned outside
+        # ``_CREATE_INDEXES`` (see :func:`_ensure_npmi_indexes`) so the
+        # v7→v8 hop can build them post-prune; here we cover the fresh-install
+        # and already-migrated fast paths. Idempotent.
+        _ensure_npmi_indexes(conn)
 
         # Stamp the version **inside** the transaction so shape + version
         # commit atomically.
@@ -1240,16 +1263,26 @@ def _migrate_v7_to_v8_inplace(conn: sqlite3.Connection) -> None:
             (now,),
         )
 
-    # 3. Prune sub-threshold chunk_cooccur pairs. Drop the two new npmi
-    # indexes first so the mass DELETE does not incur per-row index
-    # maintenance across millions of rows; re-create them afterwards on
-    # the smaller surviving pair set. The DDL for both indexes is still
-    # in ``_CREATE_INDEXES`` so fresh installs / already-v8 idempotent
-    # paths get them created via the normal ``_create_current_tables``
-    # code path — this DROP+CREATE runs only during the v7→v8 hop.
-    conn.execute("DROP INDEX IF EXISTS idx_kp_a_npmi")
-    conn.execute("DROP INDEX IF EXISTS idx_kp_b_npmi")
+    # 3. Prune sub-threshold chunk_cooccur pairs. The two npmi-ordered
+    # indexes over ``keyword_pairs`` are deliberately NOT in the shared
+    # ``_CREATE_INDEXES`` DDL — they're expensive to build on the pre-prune
+    # ~2.79M-row table only to have DELETE invalidate ~94% of the entries
+    # (and force per-row index maintenance across millions of DELETEs).
+    # Own them here so they're built exactly once, on the post-prune
+    # surviving pair set. Fresh installs create them via
+    # :func:`_ensure_npmi_indexes` (idempotent no-op if already present).
     _prune_low_score_pairs(conn)
+    _ensure_npmi_indexes(conn)
+
+
+def _ensure_npmi_indexes(conn: sqlite3.Connection) -> None:
+    """Create the two `(dir_id, kw_a_id/kw_b_id, npmi DESC)` indexes if missing.
+
+    Owned separately from ``_CREATE_INDEXES`` so a v7→v8 migration can
+    build them on the post-prune (~170k row) survivor set instead of the
+    pre-prune (~2.79M row) table. Fresh v9 installs also call this so
+    the indexes are always present after any successful migration.
+    """
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_kp_a_npmi "
         "ON keyword_pairs (dir_id, kw_a_id, npmi DESC)"

@@ -133,6 +133,16 @@ DEFAULT_CHUNK_MAX_CHARS = 600
 DEFAULT_CHUNK_MIN_CHARS = 300
 DEFAULT_MIN_PAIR_COUNT = 3
 
+# Bounded-RAM pair accumulation (F3 fix). The build's in-RAM ``pair_delta``
+# Counter accumulates chunk co-occurrence increments; without periodic
+# flushing it grows with the *distinct-pair* count of the whole scope
+# (super-linear in vocabulary; multi-GB peak on real corpora). When the
+# Counter reaches this many entries we UPSERT-add it to keyword_pairs and
+# clear the RAM copy. 100_000 pairs ≈ 8 MB Counter memory in CPython —
+# large enough to amortise the UPSERT overhead across many docs, small
+# enough to bound peak RAM. Tuned empirically; not a stable API.
+PAIR_DELTA_FLUSH_THRESHOLD = 100_000
+
 
 @dataclass
 class BuildStats:
@@ -153,7 +163,10 @@ class BuildStats:
     # here explains a slow build. Text files opened natively do not
     # contribute.
     rga_reads: int = 0
-    chunks_written: int = 0
+    chunks_written: int = 0  # v9: always 0 (chunks table dropped); kept
+                             # for JSON contract stability across v7/v8/v9
+                             # readers. New readers should use scope_stats.
+                             # n_chunks or docs.n_chunks_with_kw instead.
     keyword_chunks_written: int = 0
     pairs_written: int = 0
     # v8 (plan-2026-07-12-keyword-primary.md §3): rows populated in the
@@ -1415,6 +1428,25 @@ def build_graph_index(
             # next incremental build's Level 1 check can skip this file.
             _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
 
+            # F3 (review): bound the in-RAM ``pair_delta`` footprint on large
+            # rebuilds. Without periodic flushing the Counter accumulates one
+            # entry per distinct co-occurring pair across the *whole* scope
+            # (super-linear in vocabulary; GB-scale peak on real corpora),
+            # coexisting with chunk_tokens + kw_docs_rows. Flush every
+            # ``PAIR_DELTA_FLUSH_EVERY`` docs so on-disk cooccur_count
+            # accumulates and the Counter stays bounded. touched_pair_keys
+            # keeps growing (needed for the final npmi pass) but it is a set
+            # of int tuples, ~3× smaller than the Counter's dict entries.
+            if len(pair_delta) >= PAIR_DELTA_FLUSH_THRESHOLD:
+                _upsert_pair_delta(
+                    conn,
+                    scope_dir_id=scope_dir_id,
+                    pair_delta=pair_delta,
+                    touched_pair_keys=touched_pair_keys,
+                    now=now,
+                )
+                pair_delta.clear()
+
             if progress is not None and stats.files_indexed % 25 == 0 and stats.files_indexed:
                 progress(
                     f"materialised {stats.files_indexed} files "
@@ -1533,15 +1565,24 @@ def build_graph_index(
                 candidate_pairs=len(pair_delta),
                 surviving_pairs=0,
             )
-            surviving = _flush_pair_delta(
+            # Flush any residual delta from pass 2 (the periodic flushes
+            # left ``pair_delta`` holding only the tail below the
+            # threshold), then finalize npmi over all touched pairs.
+            _upsert_pair_delta(
                 conn,
                 scope_dir_id=scope_dir_id,
                 pair_delta=pair_delta,
                 touched_pair_keys=touched_pair_keys,
+                now=now,
+            )
+            pair_delta.clear()
+            surviving = _finalize_pair_npmi(
+                conn,
+                scope_dir_id=scope_dir_id,
+                touched_pair_keys=touched_pair_keys,
                 min_pair_count=int(min_pair_count),
                 min_npmi=float(min_npmi),
                 n_chunks=n_chunks,
-                now=now,
                 on_event=on_event,
             )
             stats.pairs_written = surviving
@@ -1607,45 +1648,29 @@ def build_graph_index(
 # ---------------------------------------------------------------------------
 
 
-def _flush_pair_delta(
+def _upsert_pair_delta(
     conn,
     *,
     scope_dir_id: int,
     pair_delta: Counter,
     touched_pair_keys: set,
-    min_pair_count: int,
-    min_npmi: float,
-    n_chunks: int,
     now: str,
-    on_event: Optional[Callable[[dict], None]] = None,
-) -> int:
-    """Flush ``pair_delta`` into ``keyword_pairs`` + refresh npmi.
+) -> None:
+    """UPSERT-add a batch of pair increments into ``keyword_pairs``.
 
-    Returns the number of surviving ``chunk_cooccur`` rows in the scope
-    after all filters (min_pair_count + min_npmi) applied.
+    Idempotent partial flush: safe to call multiple times during pass 2 to
+    bound the RAM footprint of ``pair_delta`` (which otherwise grows with
+    the distinct-pair count of the whole scope). The caller is expected to
+    ``pair_delta.clear()`` after this returns.
+
+    ``touched_pair_keys`` is updated in place with every normalised (a<b)
+    pair so :func:`_finalize_pair_npmi` can recompute npmi only for the
+    pairs this build actually touched (matches decision Q2 §7.2:
+    "touched-only npmi refresh").
     """
-    def _emit(phase: str, **fields) -> None:
-        if on_event is None:
-            return
-        payload = {"phase": phase}
-        payload.update(fields)
-        try:
-            on_event(payload)
-        except Exception:
-            pass
-
-    if not pair_delta and not touched_pair_keys:
-        # No delta and nothing to refresh: report current surviving count.
-        return int(conn.execute(
-            "SELECT COUNT(*) FROM keyword_pairs "
-            "WHERE dir_id = ? AND source = ?",
-            (scope_dir_id, CHUNK_COOCCUR_SOURCE),
-        ).fetchone()[0])
-
-    # 1. UPSERT-add the delta. Normalise ordering (kw_a < kw_b) in Python
-    #    so the ON CONFLICT clause hits the primary key.
-    _emit("pairs_scan_start")
-    normalised: List[Tuple[int, int, int, int, float, str]] = []
+    if not pair_delta:
+        return
+    normalised: List[Tuple[int, int, int, str, float, str]] = []
     for (ka, kb), inc in pair_delta.items():
         if ka == kb:
             continue
@@ -1666,41 +1691,96 @@ def _flush_pair_delta(
             """,
             normalised,
         )
-    _emit("pairs_scan_end", surviving=len(normalised))
 
-    # 2. Load per-kw chunk_df for every touched pair endpoint (single query).
+
+def _finalize_pair_npmi(
+    conn,
+    *,
+    scope_dir_id: int,
+    touched_pair_keys: set,
+    min_pair_count: int,
+    min_npmi: float,
+    n_chunks: int,
+    on_event: Optional[Callable[[dict], None]] = None,
+) -> int:
+    """Recompute npmi for every touched pair, drop those failing gates.
+
+    Runs once at the end of pass 3 after all ``_upsert_pair_delta`` calls
+    have accumulated per-pair ``cooccur_count`` on disk. Returns the
+    surviving pair-row count in the scope.
+
+    Batched loads (F2 fix) — a single ``kw_id IN (...)`` SELECT collects
+    every touched pair's current ``cooccur_count``, avoiding the pre-fix
+    per-row round-trip (N+1) that made rebuilds slow on real corpora.
+    """
+    def _emit(phase: str, **fields) -> None:
+        if on_event is None:
+            return
+        payload = {"phase": phase}
+        payload.update(fields)
+        try:
+            on_event(payload)
+        except Exception:
+            pass
+
+    if not touched_pair_keys:
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM keyword_pairs "
+            "WHERE dir_id = ? AND source = ?",
+            (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+        ).fetchone()[0])
+
+    # 1. Load per-kw chunk_df for every touched pair endpoint.
     endpoint_ids = {ka for (ka, _kb) in touched_pair_keys} | {
         kb for (_ka, kb) in touched_pair_keys
     }
     chunk_df: Dict[int, int] = {}
-    if endpoint_ids:
-        # Chunk-partition to dodge SQLITE_MAX_VARIABLE_NUMBER.
-        eid_list = list(endpoint_ids)
-        for i in range(0, len(eid_list), 900):
-            piece = eid_list[i:i + 900]
-            ph = ",".join("?" for _ in piece)
-            for r in conn.execute(
-                f"SELECT kw_id, chunk_df FROM keyword_stats "
-                f"WHERE dir_id = ? AND kw_id IN ({ph})",
-                (scope_dir_id, *piece),
-            ):
-                chunk_df[int(r[0])] = int(r[1])
+    eid_list = list(endpoint_ids)
+    for i in range(0, len(eid_list), 900):
+        piece = eid_list[i:i + 900]
+        ph = ",".join("?" for _ in piece)
+        for r in conn.execute(
+            f"SELECT kw_id, chunk_df FROM keyword_stats "
+            f"WHERE dir_id = ? AND kw_id IN ({ph})",
+            (scope_dir_id, *piece),
+        ):
+            chunk_df[int(r[0])] = int(r[1])
 
-    # 3. Recompute npmi for every touched pair. Chunk-partition writes too.
-    updates: List[Tuple[Optional[float], int, int, int]] = []
+    # 2. Batched load of current ``cooccur_count`` for every touched pair
+    #    (F2 fix: was per-row SELECT). Chunk-partition on kw_a_id since the
+    #    PK ordering is ``(dir_id, kw_a_id, kw_b_id, source)`` — filter by
+    #    the a-side in the IN clause and post-filter on the b-side in
+    #    Python. Alternative was a materialised temp table; kept simple.
+    touched_by_a: Dict[int, set] = {}
+    for (a, b) in touched_pair_keys:
+        touched_by_a.setdefault(a, set()).add(b)
+    cooccur_of: Dict[Tuple[int, int], int] = {}
+    a_list = list(touched_by_a)
+    for i in range(0, len(a_list), 900):
+        piece = a_list[i:i + 900]
+        ph = ",".join("?" for _ in piece)
+        rows = conn.execute(
+            f"SELECT kw_a_id, kw_b_id, cooccur_count FROM keyword_pairs "
+            f"WHERE dir_id = ? AND source = ? "
+            f"AND kw_a_id IN ({ph})",
+            (scope_dir_id, CHUNK_COOCCUR_SOURCE, *piece),
+        ).fetchall()
+        for r in rows:
+            a_id, b_id, co = int(r[0]), int(r[1]), int(r[2])
+            if b_id in touched_by_a.get(a_id, ()):
+                cooccur_of[(a_id, b_id)] = co
+
+    # 3. Recompute npmi + build the two batched write-sets.
+    _emit("pairs_scan_start")
+    updates: List[Tuple[float, int, int, int]] = []
     drops: List[Tuple[int, int, int]] = []
     total = len(touched_pair_keys)
     step = max(1, total // 200) if total else 1
     for idx, (a, b) in enumerate(touched_pair_keys, start=1):
-        # Read current cooccur_count from DB (has the accumulated total).
-        row = conn.execute(
-            "SELECT cooccur_count FROM keyword_pairs "
-            "WHERE dir_id = ? AND kw_a_id = ? AND kw_b_id = ? AND source = ?",
-            (scope_dir_id, a, b, CHUNK_COOCCUR_SOURCE),
-        ).fetchone()
-        if row is None:
+        co = cooccur_of.get((a, b))
+        if co is None:
+            # Pair was upserted but subsequently pruned (or race) — skip.
             continue
-        co = int(row[0])
         if co < min_pair_count:
             drops.append((scope_dir_id, a, b))
             continue
@@ -1717,6 +1797,7 @@ def _flush_pair_delta(
         updates.append((float(npmi), scope_dir_id, a, b))
         if idx == total or idx % step == 0:
             _emit("pairs_advance", current=idx, total=total)
+    _emit("pairs_scan_end", surviving=len(updates))
 
     if drops:
         conn.executemany(
@@ -1738,6 +1819,50 @@ def _flush_pair_delta(
         "WHERE dir_id = ? AND source = ?",
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     ).fetchone()[0])
+
+
+def _flush_pair_delta(
+    conn,
+    *,
+    scope_dir_id: int,
+    pair_delta: Counter,
+    touched_pair_keys: set,
+    min_pair_count: int,
+    min_npmi: float,
+    n_chunks: int,
+    now: str,
+    on_event: Optional[Callable[[dict], None]] = None,
+) -> int:
+    """Convenience wrapper: UPSERT the delta then finalize npmi + prune.
+
+    Kept as the single entry point for callers that don't need periodic
+    intermediate flushes. Internal build pass 3 uses
+    :func:`_upsert_pair_delta` + :func:`_finalize_pair_npmi` directly so
+    the RAM-bounding periodic flushes fit naturally into pass 2.
+    """
+    if not pair_delta and not touched_pair_keys:
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM keyword_pairs "
+            "WHERE dir_id = ? AND source = ?",
+            (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+        ).fetchone()[0])
+    _upsert_pair_delta(
+        conn,
+        scope_dir_id=scope_dir_id,
+        pair_delta=pair_delta,
+        touched_pair_keys=touched_pair_keys,
+        now=now,
+    )
+    pair_delta.clear()
+    return _finalize_pair_npmi(
+        conn,
+        scope_dir_id=scope_dir_id,
+        touched_pair_keys=touched_pair_keys,
+        min_pair_count=min_pair_count,
+        min_npmi=min_npmi,
+        n_chunks=n_chunks,
+        on_event=on_event,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1776,8 +1901,6 @@ def forget_scope_phrases(
     db_path: Union[str, Path, None] = None,
     phrases: Optional[Sequence[str]] = None,
     all_phrases: bool = False,
-    min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
-    min_npmi: float = BUILD_MIN_NPMI,
 ) -> ForgetStats:
     """Remove entries from the asset layer with cascading cleanup.
 

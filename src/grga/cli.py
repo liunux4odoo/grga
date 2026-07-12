@@ -1225,8 +1225,8 @@ def index_forget_command(
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     phrase: List[str] = typer.Option([], "--phrase", "-p", help="Phrase to forget from `auto_ngram_dict`. Repeatable. Cascades: removes `keyword_chunks` rows for the matching keyword id in this scope and `keyword_pairs` edges with the phrase on either endpoint, then re-derives `keyword_pairs` (npmi depends on scope-global n_chunks / chunk_df)."),
     all_phrases: bool = typer.Option(False, "--all", help="Wipe the whole scope: `auto_ngram_dict` + index layer three tables + `keyword_pairs.chunk_cooccur`. `llm_promoted` pairs are preserved. Follow with `grga index build` to rebuild from scratch."),
-    min_pair_count: int = typer.Option(5, "--min-pair-count", help="Passed to the pair re-derivation step (v8 storage contract default: 5)."),
-    min_npmi_build: float = typer.Option(0.2, "--min-npmi-build", help="Passed to the pair re-derivation step (v8 storage contract default: 0.2)."),
+    min_pair_count: int = typer.Option(5, "--min-pair-count", help="[Deprecated in v9 — accepted for backward CLI compatibility but not used. Per-phrase forget in v9 does not recompute pairs (unaffected pairs' cooccur / chunk_df / npmi are stable).]", hidden=True),
+
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Remove phrases from the vocabulary (asset layer) with cascading cleanup.
@@ -1250,8 +1250,6 @@ def index_forget_command(
             db_path=str(db_path) if db_path else None,
             phrases=phrase if phrase else None,
             all_phrases=all_phrases,
-            min_pair_count=min_pair_count,
-            min_npmi=min_npmi_build,
         )
     except ValueError as exc:
         typer.echo(f"forget: {exc}", err=True)
@@ -1285,8 +1283,7 @@ def _echo_build_summary(stats, *, max_file_kb: int) -> None:
     """Shared human-readable summary for `build` / `rebuild`."""
     typer.echo(
         f"[{stats.mode}] indexed {stats.files_indexed}/{stats.files_scanned} files, "
-        f"{stats.chunks_written} chunks, "
-        f"{stats.keyword_chunks_written} keyword-chunk rows, "
+        f"{stats.keyword_chunks_written} keyword-doc rows, "
         f"{stats.pairs_written} pair rows, "
         f"{stats.heading_docs_written} heading rows "
         f"({stats.md_files_indexed} md), "

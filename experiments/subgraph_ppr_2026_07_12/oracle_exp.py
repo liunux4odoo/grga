@@ -5,10 +5,16 @@ subgraph PPR agree with full PPR?
 If NO: local PPR is fundamentally not equivalent (mass leaks differently
 in a truncated graph, no matter how you truncate).
 If YES: my expansion rule is broken and the approach is salvageable.
+
+HISTORICAL — requires ``grga.graph.ppr``, which was DELETED in Phase 3b-2
+(commit ``7a232c2``, before the v8/v9 keyword-primary series). Kept for
+the evidence chain that led to removing PPR entirely (results are quoted
+verbatim in the design doc and README). NOT runnable on current HEAD.
+To re-run, check out a pre-``7a232c2`` commit.
 """
 import os, sys, sqlite3, time, statistics
 sys.path.insert(0, "/media/lqw/DATA/myrepo/grga/src")
-from grga.graph.ppr import (
+from grga.graph.ppr import (  # noqa: F401 — HISTORICAL, module deleted post-3b-2
     load_edges_indexed, personalized_pagerank_indexed,
     edge_weight, IndexedGraph, _fold,
 )

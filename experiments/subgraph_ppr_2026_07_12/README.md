@@ -18,14 +18,14 @@
 
 ## 脚本目录
 
-| 文件 | 作用 |
-|---|---|
-| `subgraph.py` | LazyKeywordSubgraph v1：BFS 展开 + top-M 前沿剪枝 |
-| `subgraph_v2.py` | 修正版：top-M 同时限制节点入图 + 前沿传播 |
-| `run_exp.py` | 全图 PPR vs 展开子图 PPR 的 Jaccard/recall 对比 |
-| `run_exp_v2.py` | v2：参数扫描（H2/M20、H2/M30、H2/M50、H3/M20） + 真实实体 seed |
-| `oracle_exp.py` | **决定性实验**：用全图 PPR top-60 作为"神仙 oracle 子图"再跑 PPR |
-| `npmi_cost.py` | 存 npmi vs 现算 npmi 的成本对比（决策 D1 依据） |
+| 文件 | 作用 | 现状 |
+|---|---|---|
+| `subgraph.py` | LazyKeywordSubgraph v1：BFS 展开 + top-M 前沿剪枝 | ✅ 可运行 |
+| `subgraph_v2.py` | 修正版：top-M 同时限制节点入图 + 前沿传播 | ✅ 可运行 |
+| `npmi_cost.py` | 存 npmi vs 现算 npmi 的成本对比（决策 D1 依据） | ✅ 可运行 |
+| `run_exp.py` | 全图 PPR vs 展开子图 PPR 的 Jaccard/recall 对比 | ⚠️ **HISTORICAL** — 依赖已删除的 `grga.graph.ppr`（Phase 3b-2 commit `7a232c2`）。数据结论已量化保留在下文，如需重跑请 checkout `7a232c2^`。 |
+| `run_exp_v2.py` | v2：参数扫描 + 真实实体 seed | ⚠️ **HISTORICAL** — 同上 |
+| `oracle_exp.py` | **决定性实验**：全图 PPR top-60 作为"神仙 oracle 子图"再跑 PPR | ⚠️ **HISTORICAL** — 同上 |
 
 所有脚本硬编码 `~/.config/grga/deep_keywords.db` 作为数据源。
 

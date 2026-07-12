@@ -48,31 +48,8 @@ def _default_min_npmi() -> float:
 
 
 @dataclass
-class KeywordContribution:
-    """Per-``(document, keyword)`` evidence block for ``mode=graph``.
-
-    Emitted inside :attr:`Related.keyword_contributions` so callers can
-    tell "the seed hit this doc N times" apart from "a generic PPR
-    expansion word grazed this doc once". Together with ``expansion``
-    at the payload root, this is enough to filter false positives that
-    ride in only on hub words (three-body-style noise).
-
-    Fields:
-        kw: the (case-folded) keyword string.
-        occurrences: summed ``keyword_chunks.occurrence_count`` for this
-            keyword in this document, within the current scope.
-    """
-
-    kw: str
-    occurrences: int
-
-    def to_dict(self) -> dict:
-        return {"kw": self.kw, "occurrences": int(self.occurrences)}
-
-
-@dataclass
 class Related:
-    """A single related document (or keyword) with provenance.
+    """A single related document with provenance.
 
     ``doc_path`` is relative to its indexed scope. In cross-scope results
     the same relative path can occur in several scopes, so ``directory``
@@ -80,18 +57,11 @@ class Related:
     indexed under (``None`` when unknown / not tracked). ``qualified_path``
     joins the two into a filesystem-resolvable path.
 
-    ``keyword_contributions`` (``mode=graph`` only) is the per-doc
-    per-keyword occurrence breakdown documented in
-    ``docs/design/related-signals-v2.md``. ``keywords`` remains populated in
-    ``mode=dir`` (seeds) and ``mode=heading`` (matched heading paths)
-    where per-keyword occurrence has no natural meaning.
-
-    All query-level graph signals (``ppr_score`` / ``chunk_df`` /
-    ``hops_from_seed`` / ``npmi`` / ``cooccur_count`` / ``source`` /
-    ``via_seeds`` / ``total_chunks_in_scope``) now live once at the
-    payload root under ``expansion``. The pre-v2.1 per-doc
-    ``graph_signals`` block was removed as pure duplication (it was a
-    query-level constant shared by every ``Related`` in a call).
+    v8/v9 note: post ``mode='graph'`` removal (Phase 3b-2), the only
+    remaining consumer of this class is ``mode='heading'`` (matched
+    heading paths shared with the seed docs). The pre-v8 per-doc
+    ``keyword_contributions`` block is gone — graph expansion now returns
+    :class:`RelatedKeyword` records directly.
     """
 
     doc_path: str
@@ -100,9 +70,6 @@ class Related:
     reason: str = ""
     keywords: List[str] = field(default_factory=list)
     directory: Optional[str] = None
-    # ``mode='graph'`` only: per-keyword occurrence breakdown. ``None`` in
-    # other modes so callers key on presence (design §related-signals-v2).
-    keyword_contributions: Optional[List[KeywordContribution]] = None
 
     @property
     def qualified_path(self) -> str:
@@ -112,7 +79,7 @@ class Related:
         return self.doc_path
 
     def to_dict(self) -> dict:
-        out = {
+        return {
             "doc_path": self.doc_path,
             "score": round(self.score, 6),
             "mode": self.mode,
@@ -121,11 +88,6 @@ class Related:
             "directory": self.directory,
             "qualified_path": self.qualified_path,
         }
-        if self.keyword_contributions is not None:
-            out["keyword_contributions"] = [
-                c.to_dict() for c in self.keyword_contributions
-            ]
-        return out
 
 
 def _fold(term: str) -> str:
