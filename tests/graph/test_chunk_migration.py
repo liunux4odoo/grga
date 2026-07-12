@@ -33,7 +33,13 @@ def _sidecar(monkeypatch, tmp_path):
 
 
 def _index(scope: Path, db: Path, *, mode: str = "line", min_pair_count: int = 1) -> None:
-    build_graph_index(scope, db_path=db, chunk_mode=mode, min_pair_count=min_pair_count)
+    # ``min_npmi=0.0`` disables the v8 write-time quality gate — these
+    # chunk-migration tests use tiny corpora that legitimately cannot
+    # clear a 0.2 npmi floor.
+    build_graph_index(
+        scope, db_path=db, chunk_mode=mode,
+        min_pair_count=min_pair_count, min_npmi=0.0,
+    )
 
 
 # ---------------------------------------------------------------------------

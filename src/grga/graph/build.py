@@ -49,7 +49,13 @@ from grga.file_read import (
     read_file_lines_ex,
 )
 from grga.graph.ids import IdInterner
-from grga.graph.schema import CHUNK_COOCCUR_SOURCE, connect, ensure_schema
+from grga.graph.schema import (
+    BUILD_MIN_NPMI,
+    BUILD_MIN_PAIR_COUNT,
+    CHUNK_COOCCUR_SOURCE,
+    connect,
+    ensure_schema,
+)
 
 # Hybrid tokeniser (schema v6): ASCII code identifiers keep their original
 # regex shape (so ``foo-bar`` / ``v1.2.3`` / ``c++`` stay whole for code
@@ -150,6 +156,11 @@ class BuildStats:
     chunks_written: int = 0
     keyword_chunks_written: int = 0
     pairs_written: int = 0
+    # v8 (plan-2026-07-12-keyword-primary.md §3): rows populated in the
+    # keyword-primary asset tables during this build. ``scope_stats`` is
+    # always exactly 1 (a scalar per scope), so we only report
+    # keyword_stats explicitly.
+    keyword_stats_written: int = 0
     heading_docs_written: int = 0
     md_files_indexed: int = 0
     ngram_phrases_written: int = 0
@@ -190,6 +201,7 @@ class BuildStats:
             "chunks_written": self.chunks_written,
             "keyword_chunks_written": self.keyword_chunks_written,
             "pairs_written": self.pairs_written,
+            "keyword_stats_written": self.keyword_stats_written,
             "heading_docs_written": self.heading_docs_written,
             "md_files_indexed": self.md_files_indexed,
             "ngram_phrases_written": self.ngram_phrases_written,
@@ -942,6 +954,7 @@ def build_graph_index(
     chunk_max_chars: int = DEFAULT_CHUNK_MAX_CHARS,
     chunk_min_chars: int = DEFAULT_CHUNK_MIN_CHARS,
     min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
+    min_npmi: float = BUILD_MIN_NPMI,
     max_file_bytes: int = 0,
     ignore_dirs: Iterable[str] = (".git", ".grga", ".venv", "node_modules",
                                    "__pycache__", "dist", "build", "target",
@@ -1434,9 +1447,13 @@ def build_graph_index(
                 surviving_pairs=0,
             )
             stats.pairs_written = recompute_pairs(
-                conn, scope_dir_id, min_pair_count=min_pair_count, now=now,
-                on_event=on_event,
+                conn, scope_dir_id, min_pair_count=min_pair_count,
+                min_npmi=min_npmi, now=now, on_event=on_event,
             )
+            # v8 asset tables (Phase 2): keep keyword_stats / scope_stats in
+            # sync with the index layer on every build that touched it.
+            asset_counts = recompute_scope_assets(conn, scope_dir_id, now=now)
+            stats.keyword_stats_written = asset_counts["keyword_stats"]
         else:
             # No index-layer change: keep the existing pairs untouched and
             # report their current count.
@@ -1444,6 +1461,10 @@ def build_graph_index(
                 "SELECT COUNT(*) FROM keyword_pairs "
                 "WHERE dir_id = ? AND source = ?",
                 (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+            ).fetchone()[0])
+            stats.keyword_stats_written = int(conn.execute(
+                "SELECT COUNT(*) FROM keyword_stats WHERE dir_id = ?",
+                (scope_dir_id,),
             ).fetchone()[0])
 
         # ------------------------------------------------------------------
@@ -1487,6 +1508,7 @@ def recompute_pairs(
     scope_dir_id: int,
     *,
     min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
+    min_npmi: float = BUILD_MIN_NPMI,
     now: Optional[str] = None,
     on_event: Optional[Callable[[dict], None]] = None,
 ) -> int:
@@ -1500,6 +1522,22 @@ def recompute_pairs(
     inside SQLite instead of materialising every keyword_chunks row
     into Python — the old in-Python path was O(rows) memory and had a
     quadratic per-chunk pair enumeration in pure Python.
+
+    v8 write-time admission gates (plan-2026-07-12-keyword-primary.md §3.3):
+
+    * ``min_pair_count`` — HAVING clause; default 3 (:data:`DEFAULT_MIN_PAIR_COUNT`)
+      for legacy call-sites, but production CLI passes 5
+      (:data:`BUILD_MIN_PAIR_COUNT`) to match the storage contract.
+    * ``min_npmi`` — post-computation filter; default 0.2
+      (:data:`BUILD_MIN_NPMI`). Rows where npmi is ``None`` (degenerate
+      inputs) or falls below the threshold are dropped.
+
+    Together, at the production defaults, these two gates shrink the pair
+    table from ~2.79M rows (co≥3, no npmi filter) to ~167K rows on the
+    reference corpus — the scaling premise of the keyword-primary
+    architecture. Callers can pass ``min_npmi=0.0`` to opt out of the
+    quality gate for tiny test corpora that can't clear it; production
+    should never do this.
 
     ``on_event`` (optional) receives fine-grained sub-phase events:
     ``pairs_scan_start`` / ``pairs_scan_end`` bracket the heavy
@@ -1579,11 +1617,20 @@ def recompute_pairs(
     total_surviving = len(surviving)
     pair_rows = []
     step = max(1, total_surviving // 200)
+    npmi_floor = float(min_npmi)
     for idx, row in enumerate(surviving, start=1):
         a = int(row[0])
         b = int(row[1])
         c = int(row[2])
         npmi = _npmi(c, chunk_df.get(a, 0), chunk_df.get(b, 0), n_chunks)
+        # v8 write-gate: drop pairs below the npmi floor. ``_npmi`` returns
+        # None for degenerate inputs (co<=0 / df=0 / p_ab>=1) — treat those
+        # as failing the admission gate whenever a positive floor is set.
+        # A caller passing ``min_npmi=0.0`` explicitly opts out (used by
+        # tiny-corpus tests); production defaults to 0.2.
+        if npmi_floor > 0.0:
+            if npmi is None or npmi < npmi_floor:
+                continue
         pair_rows.append((scope_dir_id, a, b, float(c), npmi, now))
         if idx == total_surviving or idx % step == 0:
             _emit(
@@ -1606,6 +1653,83 @@ def recompute_pairs(
         pair_rows,
     )
     return len(pair_rows)
+
+
+def recompute_scope_assets(
+    conn,
+    scope_dir_id: int,
+    *,
+    now: Optional[str] = None,
+) -> Dict[str, int]:
+    """Rematerialise ``keyword_stats`` + ``scope_stats`` for one scope (v8).
+
+    Derives the keyword-primary asset tables from the current
+    ``keyword_chunks`` / ``chunks`` / ``docs`` contents, mirroring the
+    v7→v8 migration backfill (schema.py ``_migrate_v7_to_v8_inplace``) but
+    at build time so every ``build`` / ``rebuild`` keeps them in sync with
+    the index layer. Phase 2 is *additive*: these tables are populated
+    alongside the still-written ``keyword_chunks`` (Phase 3 will cut the
+    read path over and stop writing the chunk-level index).
+
+    * ``keyword_stats(dir_id, kw_id)`` — ``chunk_df`` = distinct chunks,
+      ``doc_df`` = distinct docs, ``total_occurrences`` = summed
+      occurrence_count, all within the scope.
+    * ``scope_stats(dir_id)`` — ``n_chunks`` (npmi denominator N),
+      ``n_docs``, ``vocab_size``.
+
+    Idempotent: clears the scope's rows first, then re-inserts. Caller owns
+    the transaction. Returns ``{"keyword_stats": n, "scope_stats": n}``.
+    """
+    if now is None:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # keyword_stats: clear + repopulate this scope.
+    conn.execute("DELETE FROM keyword_stats WHERE dir_id = ?", (scope_dir_id,))
+    conn.execute(
+        """
+        INSERT INTO keyword_stats
+            (dir_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at)
+        SELECT d.dir_id, kc.kw_id,
+               COUNT(*) AS chunk_df,
+               COUNT(DISTINCT kc.doc_id) AS doc_df,
+               COALESCE(SUM(kc.occurrence_count), 0) AS total_occurrences,
+               ?
+        FROM keyword_chunks kc
+        JOIN docs d ON d.id = kc.doc_id
+        WHERE d.dir_id = ?
+        GROUP BY d.dir_id, kc.kw_id
+        """,
+        (now, scope_dir_id),
+    )
+    n_kw_stats = int(conn.execute(
+        "SELECT COUNT(*) FROM keyword_stats WHERE dir_id = ?",
+        (scope_dir_id,),
+    ).fetchone()[0])
+
+    # scope_stats: n_chunks / n_docs / vocab_size for this scope.
+    n_chunks = int(conn.execute(
+        "SELECT COUNT(*) FROM chunks c "
+        "JOIN docs d ON d.id = c.doc_id WHERE d.dir_id = ?",
+        (scope_dir_id,),
+    ).fetchone()[0])
+    n_docs = int(conn.execute(
+        "SELECT COUNT(*) FROM docs WHERE dir_id = ?",
+        (scope_dir_id,),
+    ).fetchone()[0])
+    conn.execute(
+        """
+        INSERT INTO scope_stats
+            (dir_id, n_chunks, n_docs, vocab_size, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(dir_id) DO UPDATE SET
+            n_chunks = excluded.n_chunks,
+            n_docs = excluded.n_docs,
+            vocab_size = excluded.vocab_size,
+            updated_at = excluded.updated_at
+        """,
+        (scope_dir_id, n_chunks, n_docs, n_kw_stats, now),
+    )
+    return {"keyword_stats": n_kw_stats, "scope_stats": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -1645,6 +1769,7 @@ def forget_scope_phrases(
     phrases: Optional[Sequence[str]] = None,
     all_phrases: bool = False,
     min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
+    min_npmi: float = BUILD_MIN_NPMI,
 ) -> ForgetStats:
     """Remove entries from the asset layer with cascading cleanup.
 
@@ -1726,6 +1851,17 @@ def forget_scope_phrases(
                     "DELETE FROM auto_ngram_dict WHERE dir_id = ?",
                     (scope_dir_id,),
                 )
+                # v8 asset tables must be wiped too — leaving them behind
+                # after a full forget would give a stale doc_df / n_chunks
+                # signal to ``related``.
+                conn.execute(
+                    "DELETE FROM keyword_stats WHERE dir_id = ?",
+                    (scope_dir_id,),
+                )
+                conn.execute(
+                    "DELETE FROM scope_stats WHERE dir_id = ?",
+                    (scope_dir_id,),
+                )
                 stats.pairs_recomputed = 0
             else:
                 # Per-phrase cascade. Resolve kw_ids in one batch.
@@ -1799,7 +1935,12 @@ def forget_scope_phrases(
                 # Recompute pairs (n_chunks / chunk_df changed).
                 stats.pairs_recomputed = recompute_pairs(
                     conn, scope_dir_id, min_pair_count=min_pair_count,
+                    min_npmi=min_npmi,
                 )
+                # v8 assets must be refreshed too — per-phrase forget shrinks
+                # keyword_chunks (so chunk_df / doc_df change) and may drop
+                # kw_ids entirely (so vocab_size changes).
+                recompute_scope_assets(conn, scope_dir_id)
 
             conn.execute("COMMIT")
         except Exception:

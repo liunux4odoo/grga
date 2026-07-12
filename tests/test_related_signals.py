@@ -67,7 +67,7 @@ def graph_scope(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"scope": scope, "db": db}
 
 

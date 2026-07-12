@@ -53,8 +53,8 @@ def two_scopes(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "shared.db"
-    build_graph_index(scope_a, db_path=db, min_pair_count=1)
-    build_graph_index(scope_b, db_path=db, min_pair_count=1)
+    build_graph_index(scope_a, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index(scope_b, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"a": scope_a, "b": scope_b, "db": db}
 
 
@@ -170,8 +170,8 @@ def shared_seed_scopes(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "shared_seed.db"
-    build_graph_index(scope_a, db_path=db, min_pair_count=1)
-    build_graph_index(scope_b, db_path=db, min_pair_count=1)
+    build_graph_index(scope_a, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index(scope_b, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"a": scope_a, "b": scope_b, "db": db}
 
 
@@ -272,8 +272,8 @@ def polysemy_bridge_scopes(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "shared.db"
-    build_graph_index(ml, db_path=db, min_pair_count=1)
-    build_graph_index(psych, db_path=db, min_pair_count=1)
+    build_graph_index(ml, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index(psych, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"ml": ml, "psych": psych, "db": db}
 
 
@@ -402,8 +402,8 @@ def collision_scopes(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "shared.db"
-    build_graph_index(a, db_path=db, min_pair_count=1)
-    build_graph_index(b, db_path=db, min_pair_count=1)
+    build_graph_index(a, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index(b, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"a": a, "b": b, "db": db}
 
 

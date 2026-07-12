@@ -28,7 +28,7 @@ def sidecar_env(monkeypatch, tmp_path):
 @pytest.fixture
 def graph_db(cross_heading_fixture: Path, tmp_path, sidecar_env) -> Path:
     db = tmp_path / "graph.db"
-    build_graph_index(cross_heading_fixture, db_path=db, min_pair_count=1)
+    build_graph_index(cross_heading_fixture, db_path=db, min_pair_count=1, min_npmi=0.0)
     return db
 
 

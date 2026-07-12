@@ -46,8 +46,8 @@ def indexed_two_scope(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(a, db_path=db, min_pair_count=1)
-    build_graph_index(b, db_path=db, min_pair_count=1)
+    build_graph_index(a, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index(b, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"a": a, "b": b, "db": db}
 
 

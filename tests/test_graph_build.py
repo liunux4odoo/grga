@@ -128,7 +128,7 @@ def test_build_populates_chunk_tables(sidecar_env, tmp_path):
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1)
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     assert stats.files_scanned >= 3
     assert stats.files_indexed >= 3
     assert stats.chunks_written > 0
@@ -180,10 +180,10 @@ def test_replace_flag_clears_previous_chunk_rows(sidecar_env, tmp_path):
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, min_pair_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     (scope / "install.md").unlink()
 
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1)
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     assert stats.files_indexed == 2  # usage.md + code.py
 
     conn = connect(db)
@@ -218,7 +218,7 @@ def test_build_preserves_llm_promoted_pairs(sidecar_env, tmp_path):
     from grga.graph.ids import IdInterner
     from grga.graph.schema import LLM_PROMOTED_SOURCE, ensure_schema
 
-    build_graph_index(scope, db_path=db, min_pair_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     # Insert an llm_promoted pair for this scope.
     conn = connect(db)
@@ -239,7 +239,7 @@ def test_build_preserves_llm_promoted_pairs(sidecar_env, tmp_path):
         conn.close()
 
     # Rebuild: chunk_cooccur is replaced, llm_promoted preserved.
-    build_graph_index(scope, db_path=db, min_pair_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -267,7 +267,7 @@ def test_v1_counts_not_touched_by_build(sidecar_env, tmp_path):
     lib.commit()
     lib.close()
 
-    build_graph_index(scope, db_path=db, min_pair_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -400,7 +400,7 @@ def test_build_populates_auto_ngram_dict(sidecar_env, tmp_path):
     )
     (scope / "santi.txt").write_text(body * 3, encoding="utf-8")
     db = tmp_path / "graph.db"
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1, ngram_iters=2)
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=2)
     assert stats.ngram_iters_run == 2
     assert stats.ngram_phrases_written >= 1
 
@@ -425,7 +425,7 @@ def test_build_hybrid_keeps_code_identifiers(sidecar_env, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1)
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -441,5 +441,130 @@ def test_build_ngram_iters_respected(sidecar_env, tmp_path):
     scope.mkdir()
     (scope / "a.txt").write_text("hello world\n", encoding="utf-8")
     db = tmp_path / "graph.db"
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1, ngram_iters=3)
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=3)
     assert stats.ngram_iters_run == 3
+
+
+# ---------------------------------------------------------------------------
+# v8 keyword-primary asset population (Phase 2, plan-2026-07-12-keyword-primary.md).
+# ---------------------------------------------------------------------------
+
+
+def test_build_populates_keyword_stats(sidecar_env, tmp_path):
+    """Every build must materialise keyword_stats + scope_stats for the scope.
+
+    Backfills equivalent to the v7→v8 migration, but run at build time so
+    the two v8 asset tables stay in lockstep with the still-written
+    keyword_chunks / chunks (Phase 2 is additive; Phase 3 does the cutover).
+    """
+    scope = tmp_path / "corpus"
+    _write_scope(scope)
+    db = tmp_path / "graph.db"
+
+    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    assert stats.keyword_stats_written > 0, \
+        "build must populate keyword_stats"
+
+    conn = connect(db)
+    try:
+        # Every row from keyword_stats should agree with a hand-derived
+        # aggregate of keyword_chunks. This is the correctness invariant
+        # for the recompute_scope_assets helper.
+        expected = {
+            (int(row[0]), int(row[1])): (int(row[2]), int(row[3]), int(row[4]))
+            for row in conn.execute(
+                "SELECT d.dir_id, kc.kw_id, "
+                "       COUNT(*), COUNT(DISTINCT kc.doc_id), "
+                "       COALESCE(SUM(kc.occurrence_count), 0) "
+                "FROM keyword_chunks kc JOIN docs d ON d.id = kc.doc_id "
+                "GROUP BY d.dir_id, kc.kw_id"
+            )
+        }
+        got = {
+            (int(row[0]), int(row[1])): (int(row[2]), int(row[3]), int(row[4]))
+            for row in conn.execute(
+                "SELECT dir_id, kw_id, chunk_df, doc_df, total_occurrences "
+                "FROM keyword_stats"
+            )
+        }
+        assert got == expected, "keyword_stats drifted from keyword_chunks"
+
+        # scope_stats.n_chunks = COUNT chunks in scope.
+        for row in conn.execute(
+            "SELECT s.dir_id, s.n_chunks, "
+            "       (SELECT COUNT(*) FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.dir_id=s.dir_id) "
+            "FROM scope_stats s"
+        ):
+            assert row[1] == row[2], \
+                f"scope_stats.n_chunks {row[1]} != actual chunks {row[2]}"
+    finally:
+        conn.close()
+
+
+def test_build_write_time_gate_default_filters_low_score_pairs(sidecar_env, tmp_path):
+    """CLI-equivalent build defaults (min_pair_count=5, min_npmi=0.2) must
+    admit only pairs clearing BOTH gates."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    # 10 identical lines pairing alpha+beta strongly (co=10, npmi high).
+    # A 'noise' pair (alpha+gamma) appears once — should be excluded.
+    lines = ["alpha beta stayed together" for _ in range(10)]
+    lines.append("alpha gamma noise once")
+    (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
+    db = tmp_path / "graph.db"
+
+    # Explicit production-default settings.
+    from grga.graph.schema import BUILD_MIN_NPMI, BUILD_MIN_PAIR_COUNT
+    stats = build_graph_index(
+        scope, db_path=db,
+        min_pair_count=BUILD_MIN_PAIR_COUNT,
+        min_npmi=BUILD_MIN_NPMI,
+    )
+
+    conn = connect(db)
+    try:
+        surviving = list(conn.execute(
+            "SELECT ka.kw, kb.kw, p.cooccur_count, p.npmi "
+            "FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id "
+            "WHERE p.source='chunk_cooccur'"
+        ))
+        kws_involved = {row[0] for row in surviving} | {row[1] for row in surviving}
+        assert "gamma" not in kws_involved, \
+            "gamma pair (co=1) must be excluded by min_pair_count>=5"
+        for row in surviving:
+            assert row[2] >= BUILD_MIN_PAIR_COUNT
+            assert row[3] is not None and row[3] >= BUILD_MIN_NPMI
+    finally:
+        conn.close()
+
+
+def test_build_min_npmi_opt_out(sidecar_env, tmp_path):
+    """min_npmi=0.0 disables the quality gate — pairs with any npmi survive."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    (scope / "doc.txt").write_text(
+        "\n".join(["alpha beta seen" for _ in range(6)]),
+        encoding="utf-8",
+    )
+    db = tmp_path / "graph.db"
+    stats = build_graph_index(
+        scope, db_path=db, min_pair_count=5, min_npmi=0.0,
+    )
+    assert stats.pairs_written > 0, "min_npmi=0.0 must admit pairs regardless of npmi"
+
+
+def test_build_min_pair_count_opt_out(sidecar_env, tmp_path):
+    """min_pair_count=1 admits pairs from tiny corpora (test-mode use)."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    (scope / "doc.txt").write_text(
+        "alpha beta\ngamma delta\n", encoding="utf-8",
+    )
+    db = tmp_path / "graph.db"
+    stats = build_graph_index(
+        scope, db_path=db, min_pair_count=1, min_npmi=0.0,
+    )
+    # 2 chunks × 2 keywords each = 2 pairs (alpha,beta) and (gamma,delta).
+    assert stats.pairs_written == 2
