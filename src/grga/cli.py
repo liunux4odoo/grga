@@ -1527,7 +1527,7 @@ def related_command(
     preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview."),
     graph_signals_limit: int = typer.Option(30, "--graph-signals-limit", help="mode=graph only: cap on neighbor_edges in the graph_signals JSON block."),
     min_npmi: Optional[float] = typer.Option(None, "--min-npmi", help="mode=graph only: drop chunk_cooccur edges with npmi below this before PPR. Default 0.2 (or $GRGA_PPR_MIN_NPMI). Mutually exclusive with --edge-quantile."),
-    edge_quantile: Optional[float] = typer.Option(None, "--edge-quantile", help="mode=graph only: keep the top X fraction of edges by npmi (sampled). E.g. 0.1 keeps top 10%%. Mutually exclusive with --min-npmi."),
+    edge_quantile: Optional[float] = typer.Option(None, "--edge-quantile", help="mode=graph only: keep the top X fraction of edges by npmi (sampled). E.g. 0.1 keeps top 10%. Mutually exclusive with --min-npmi."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List documents related to the given keywords via the L2 graph."""

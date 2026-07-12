@@ -82,6 +82,7 @@ related(keywords: list[str], *, mode="graph"|"dir"|"heading",
         limit=20, db_path, directory,
         cross_scope=False,   # graph only: expand PPR into other scopes
         same_scope=False,    # heading only: stay inside --directory
+        min_npmi=None,       # graph only: npmi edge threshold (default 0.2)
 ) ->
   # dir | heading
   [{doc_path, score, mode, reason, keywords[], directory, qualified_path}]
@@ -102,6 +103,13 @@ Modes:
 - `graph` — Personalized PageRank over the segment co-occurrence graph (`keyword_pairs`, `source='chunk_cooccur'`), then materialised to documents through `keyword_chunks`. Best for "conceptually related" navigation. `--json` results carry a `graph_signals` block (`seed_chunk_df`, `total_chunks_in_scope`, `neighbor_edges` with `npmi`/`cooccur_count`/`source`); `--graph-signals-limit N` caps the edges (default 30). Default is scope-isolated; add `--cross-scope` to reach other corpora, and read `crossed_scopes_preview` first (see `references/storage-model.md`).
 - `dir`   — documents that live in the **same directory** as documents containing the seed keywords. Best for local repository navigation. Cross-scope has no meaning here (directory proximity is intrinsically scope-local).
 - `heading` — documents that share a full or leaf **Markdown heading path** with a seed-carrying document. Cross-scope by default (heading paths are structural filters that resist same-name-different-meaning noise). Add `--same-scope` to keep matches inside `-d`.
+
+Edge filter (`--mode graph` only, mutually exclusive):
+
+- `--min-npmi FLOAT` — drop `chunk_cooccur` edges below this npmi before PPR. Default **0.2** (env `GRGA_PPR_MIN_NPMI`). Raises signal-to-noise by cutting hub/function-word edges; `0` restores pre-2026-07-12 behaviour. `llm_promoted` edges (npmi NULL) always kept.
+- `--edge-quantile FLOAT` — convenience: keep top X fraction of edges by npmi (e.g. `0.1` = top 10%), sampled then translated to `min_npmi`. Cannot combine with `--min-npmi` (exit 2).
+
+Backend (env-only): `GRGA_PPR_BACKEND=auto|numpy|py` (default `auto`; numpy used when importable + graph ≥ `GRGA_PPR_NUMPY_MIN_EDGES`, default 50000). numpy is optional (`pip install grga[perf]`); both backends give byte-identical top-K.
 
 **Precondition**: `grga index build -s <dir> --db <path>` must have been run against the corpus (or any indexed scope inside the shared DB) first, otherwise `related` returns an empty result.
 

@@ -84,6 +84,24 @@ Interpretation:
   `--mode heading` (see the `heading` example in the sidebar file
   `../SKILL.md`).
 
+## Tuning the edge filter (defaults are usually right)
+
+`related --mode graph` filters `chunk_cooccur` edges by
+`npmi >= --min-npmi` before PPR. Default **0.2** (env
+`GRGA_PPR_MIN_NPMI`); it de-noises hub / function-word edges without
+hurting top-K recall on production corpora.
+
+- Empty or thin results on a tiny synthetic corpus → the default is too
+  aggressive for a small graph; add `--min-npmi 0` to disable filtering.
+- Same-shape results across queries but you want a stricter filter →
+  raise `--min-npmi` (0.3 keeps only strong associations) or use
+  `--edge-quantile 0.1` (keep top 10% by npmi; mutually exclusive with
+  `--min-npmi`, exit 2 if both given).
+- Slow on a very large corpus → make sure numpy is installed
+  (`pip install grga[perf]`). Auto-selected once the graph passes
+  `GRGA_PPR_NUMPY_MIN_EDGES` (default 50000). Both backends produce
+  byte-identical top-K.
+
 ## Composition tip
 
 Feed `related` output back into `expand`:

@@ -239,6 +239,30 @@ Cross-scope flags (see SKILL.md "Storage model" for the philosophy):
   whose cost scales with every other scope in the shared DB — undesirable
   as an implicit tax on ordinary scoped queries.
 
+Edge-filter knobs (`--mode graph` only; mutually exclusive):
+
+- `--min-npmi FLOAT` — drop `chunk_cooccur` edges with `npmi < min_npmi`
+  before PPR. Default **0.2** (env override `GRGA_PPR_MIN_NPMI`). Higher
+  values keep only the strongest associations; `0` disables the filter
+  and matches pre-2026-07-12 behaviour. `llm_promoted` edges (npmi
+  usually NULL) are always kept regardless of the threshold. See
+  `docs/design/plan-2026-07-12-related-perf.md` §2.4.
+- `--edge-quantile FLOAT` — convenience form of the same filter: keep
+  the top X fraction of edges by npmi. E.g. `--edge-quantile 0.1` keeps
+  the top 10%. Internally sampled and translated to an equivalent
+  `min_npmi`; cannot be combined with `--min-npmi` (usage error, exit 2).
+
+Backend selection (`--mode graph` only, env-only — no CLI flag):
+
+- `GRGA_PPR_BACKEND=auto|numpy|py` (default `auto`). `auto` picks numpy
+  when it is importable and the graph has `≥ GRGA_PPR_NUMPY_MIN_EDGES`
+  (default 50000) edges; below that the pure-Python backend wins on the
+  fixed setup cost. numpy is an **optional dependency**
+  (`pip install grga[perf]`); grga runs without it, just slower on
+  large graphs. Both backends produce byte-identical top-K results
+  (tie-break `(-score, node_id_string)`); pick `py` when reproducing
+  numeric behaviour under a numpy-less environment.
+
 **Precondition**: run `grga index build` first; otherwise the array is empty.
 
 ---

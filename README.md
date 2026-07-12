@@ -79,6 +79,12 @@ python -m pip install -e .
 python -m pip install -e '.[standalone]'
 ```
 
+如需加速 `grga related --mode graph` 在大图上的 PPR 计算（numpy CSR + `np.bincount`），可选安装 `perf` 依赖（不影响功能，缺失时自动退回纯 Python）：
+
+```bash
+python -m pip install -e '.[perf]'
+```
+
 安装后会提供两个入口：
 
 ```bash
