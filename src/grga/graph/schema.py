@@ -1,8 +1,8 @@
-"""Graph schema management (normalized migration, schema v5).
+"""Graph schema management (normalized migration, schema v8).
 
 ``ensure_schema(conn)`` creates the current graph tables and, when it finds
-an older database, performs a **one-shot** migration. Two historical
-migration hops are chained so any pre-v5 database converges on v5 in a
+an older database, performs a **one-shot** migration. Three historical
+migration hops are chained so any pre-v8 database converges on v8 in a
 single atomic transaction:
 
 * v1/v2/v3 → v4: the chunk-level co-occurrence model
@@ -12,8 +12,15 @@ single atomic transaction:
   business tables reference them by integer id
   (``docs/design/plan-2026-07-11-schema-v5-normalization.md``). This is a
   ~73% size reduction on large corpora (327 MB → ~87 MB measured).
+* v7 → v8: **keyword-primary** — ``keyword_pairs`` is promoted from a
+  derived index to a first-class knowledge asset (write-time gated by
+  ``BUILD_MIN_PAIR_COUNT`` / ``BUILD_MIN_NPMI``), and new asset tables
+  ``keyword_stats`` / ``scope_stats`` are added. ``keyword_chunks`` /
+  ``chunks`` are marked deprecated but *retained* in Phase 1 for backward
+  compatibility; a later phase drops them
+  (``docs/design/plan-2026-07-12-keyword-primary.md``).
 
-Current (v5) tables owned by this module:
+Current (v8) tables owned by this module:
 
 Intern tables:
 
@@ -21,19 +28,34 @@ Intern tables:
 * ``keywords``     — ``id`` → casefolded keyword.
 * ``docs``         — ``id`` → ``(dir_id, doc_path)``.
 
+Knowledge-asset tables (v8):
+
+* ``keyword_stats``  — per-scope df / occurrence stats keyed by
+  ``(dir_id, kw_id)``. Feeds npmi denominators + hub-word signals.
+* ``scope_stats``    — per-scope scalars (``n_chunks`` = npmi N,
+  ``n_docs``, ``vocab_size``).
+
 Business tables (all referencing the intern tables by id):
 
-* ``chunks``          — chunk metadata (line ranges, char counts) per doc.
-* ``keyword_chunks``  — keyword → chunk inverted index (segment df原料).
 * ``keyword_pairs``   — multi-source pair table: ``source='chunk_cooccur'``
-  rows carry segment-level ``cooccur_count`` + ``npmi``;
+  rows carry ``cooccur_count`` + ``npmi`` (both stored, v8);
   ``source='llm_promoted'`` rows come from ``grga index promote``.
 * ``heading_docs``    — Markdown chapter structure.
 * ``llm_extension_votes`` — LLM pair vote buffer.
 * ``keyword_counts`` / ``keyword_sources`` — v1 deep-search heat/source
   tables (also normalized to ``dir_id`` / ``kw_id`` in v5).
+* ``auto_ngram_dict`` — tokenizer's unsupervised n-gram dictionary.
 
-The migration is idempotent: an already-v5 database is a no-op fast path.
+Deprecated tables (retained in Phase 1, dropped later):
+
+* ``chunks``         — per-doc chunk line ranges (only remaining reader is
+  ``related._total_chunks_in_scope`` → ``scope_stats.n_chunks`` after
+  Phase 3).
+* ``keyword_chunks`` — chunk-level inverted index (~30× larger than the
+  ``keyword_stats`` doc-level aggregate it feeds; scales linearly with
+  corpus size, was the primary storage bottleneck).
+
+The migration is idempotent: an already-v8 database is a no-op fast path.
 """
 from __future__ import annotations
 
@@ -44,12 +66,23 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Source markers for ``keyword_pairs`` rows. These are the *only* two
 # allowed values (plan HC4 / §3.3).
 CHUNK_COOCCUR_SOURCE = "chunk_cooccur"
 LLM_PROMOTED_SOURCE = "llm_promoted"
+
+# Write-time admission thresholds for the keyword-primary model (schema v8,
+# docs/design/plan-2026-07-12-keyword-primary.md §3.3). A ``chunk_cooccur``
+# pair is only recorded as a knowledge asset when it clears BOTH gates in
+# its scope. These fix the *lower bound* of the stored pairs: a query may
+# filter with a *stricter* ``min_npmi`` on demand, but can never recover a
+# pair that fell below ``BUILD_MIN_NPMI`` here (it was never memorised).
+# ``llm_promoted`` pairs bypass these (npmi is NULL; they arrive via
+# vote→promote).
+BUILD_MIN_PAIR_COUNT = 5
+BUILD_MIN_NPMI = 0.2
 
 # v1 deep-search counter tables. Normalized in v5 but conceptually still the
 # "v1" heat / source pair. Kept as a named group for tests / introspection.
@@ -59,8 +92,15 @@ V1_TABLES = ("keyword_counts", "keyword_sources")
 INTERN_TABLES = ("directories", "keywords", "docs")
 
 # Graph business tables owned by this module (post-migration shape).
+# v8 note: ``chunks`` / ``keyword_chunks`` are *deprecated* — the v7→v8
+# migration keeps them (data still readable) but the keyword-primary model
+# stops writing to them (Phase 2) and a later phase drops them (Phase 3).
+# Until then they remain in this tuple so introspection/tests still see them.
 GRAPH_TABLES = ("chunks", "keyword_chunks", "keyword_pairs", "heading_docs",
                 "llm_extension_votes", "auto_ngram_dict")
+
+# Knowledge-asset tables introduced in v8 (keyword-primary model).
+V8_ASSET_TABLES = ("keyword_stats", "scope_stats")
 
 
 def resolve_scope_key(directory: Optional[Union[str, Path]]) -> Optional[str]:
@@ -136,6 +176,25 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 def _table_columns(conn: sqlite3.Connection, name: str) -> set:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({name})")}
+
+
+def _has_any_pairs(conn: sqlite3.Connection) -> bool:
+    """True when a ``keyword_pairs`` table exists and holds at least one row.
+
+    Used to gate the lossy v7→v8 migration warning: a fresh / empty DB has
+    no pairs to prune, so the "will permanently delete" banner should not
+    fire (it would be wrong and would pollute ``--json`` first-run output).
+    Cheap ``EXISTS`` probe — never scans the whole table.
+    """
+    if not _table_exists(conn, "keyword_pairs"):
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM keyword_pairs LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
 
 
 _CREATE_INTERN_TABLES = """
@@ -254,6 +313,10 @@ CREATE INDEX IF NOT EXISTS idx_keyword_pairs_a
     ON keyword_pairs (dir_id, kw_a_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_pairs_b
     ON keyword_pairs (dir_id, kw_b_id);
+CREATE INDEX IF NOT EXISTS idx_kp_a_npmi
+    ON keyword_pairs (dir_id, kw_a_id, npmi DESC);
+CREATE INDEX IF NOT EXISTS idx_kp_b_npmi
+    ON keyword_pairs (dir_id, kw_b_id, npmi DESC);
 CREATE INDEX IF NOT EXISTS idx_heading_docs_head
     ON heading_docs (heading_path);
 CREATE INDEX IF NOT EXISTS idx_keyword_counts_count
@@ -264,6 +327,37 @@ CREATE INDEX IF NOT EXISTS idx_votes_dir
     ON llm_extension_votes (dir_id, vote_count DESC);
 CREATE INDEX IF NOT EXISTS idx_auto_ngram_dir
     ON auto_ngram_dict (dir_id);
+CREATE INDEX IF NOT EXISTS idx_keyword_stats_scope
+    ON keyword_stats (dir_id, chunk_df DESC);
+"""
+
+# v8 keyword-primary tables (docs/design/plan-2026-07-12-keyword-primary.md §2.1).
+# ``keyword_stats`` — per-scope df / occurrence stats keyed by (dir_id, kw_id).
+# Fed by build; consumed at query time to supply npmi denominators (df side)
+# and hub-word discriminators (chunk_df signal). Separate from ``keywords``
+# because df is per-scope while ``keywords`` is a global 1:1 dictionary
+# — merging them would denormalise (repeat kw text per scope).
+#
+# ``scope_stats`` — per-scope scalars: ``n_chunks`` (npmi denominator N),
+# ``n_docs`` / ``vocab_size`` (introspection). ``chunks`` table becomes
+# deprecated after Phase 2; ``n_chunks`` here is its Phase-3 replacement.
+_CREATE_V8_ASSET_TABLES = """
+CREATE TABLE IF NOT EXISTS keyword_stats (
+    dir_id INTEGER NOT NULL REFERENCES directories(id),
+    kw_id INTEGER NOT NULL REFERENCES keywords(id),
+    chunk_df INTEGER NOT NULL DEFAULT 0,
+    doc_df INTEGER NOT NULL DEFAULT 0,
+    total_occurrences INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (dir_id, kw_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scope_stats (
+    dir_id INTEGER PRIMARY KEY REFERENCES directories(id),
+    n_chunks INTEGER NOT NULL DEFAULT 0,
+    n_docs INTEGER NOT NULL DEFAULT 0,
+    vocab_size INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT
+);
 """
 
 
@@ -294,6 +388,7 @@ def _create_current_tables(conn: sqlite3.Connection) -> None:
         + _CREATE_META_TABLE
         + _CREATE_KEYWORD_PAIRS
         + _CREATE_GRAPH_TABLES
+        + _CREATE_V8_ASSET_TABLES
         + _CREATE_INDEXES
     ):
         conn.execute(stmt)
@@ -341,11 +436,14 @@ def _migration_announce(db_path: Optional[str], stage: str) -> None:
 def _check_disk_space(conn: sqlite3.Connection) -> None:
     """Raise a clear message if the migration is likely to run out of space.
 
-    The v4 → v5 migration briefly doubles the on-disk size (source shape +
-    intermediate ``v4__*`` tables + rollback journal). We require ~2× the
-    current DB size in free space; if less, abort *before* touching the DB
-    so the user sees an actionable message instead of a random ``disk is
-    full`` deep in a copy loop.
+    Historically this guarded the v4 → v5 migration (which briefly doubles
+    the on-disk size while intermediate ``v4__*`` tables coexist with the
+    source shape). It now also guards v7 → v8, which grows the DB during
+    the pair-table DELETE before ``VACUUM`` can reclaim freelist pages
+    (measured 452 MB → 620 MB mid-migration on real prod DB). We require
+    ~2× the current DB size in free space; if less, abort *before* touching
+    the DB so the user sees an actionable message instead of a random
+    ``disk is full`` deep in a copy or DELETE loop.
     """
     # Resolve the DB path from the connection. sqlite3 exposes it via
     # ``PRAGMA database_list`` (file for the main DB, "" for :memory:).
@@ -367,7 +465,7 @@ def _check_disk_space(conn: sqlite3.Connection) -> None:
     if stat.free < required:
         mb = 1024 * 1024
         raise RuntimeError(
-            "grga schema v5 migration needs about "
+            f"grga schema v{SCHEMA_VERSION} migration needs about "
             f"{required // mb} MB free space (current DB is "
             f"{db_size // mb} MB), but only {stat.free // mb} MB is "
             f"available on the volume holding {db_file}. Free up space "
@@ -443,6 +541,30 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         row = None
     if row is not None and len(row) >= 3:
         db_path_str = row[2] or None
+
+    # v7 → v8 is a LOSSY migration — permanently DELETEs ``keyword_pairs``
+    # rows below ``BUILD_MIN_PAIR_COUNT`` / ``BUILD_MIN_NPMI``. Warn users
+    # unconditionally (bypassing the 20 MB "may take a while" gate below)
+    # so small DBs also see the notice, and so downgrade-to-v7 users know
+    # to back up first. See docs/design/plan-2026-07-12-keyword-primary.md
+    # §6. Silenced only by ``GRGA_QUIET_MIGRATION=1`` (test / CI).
+    #
+    # Only warn when there is actually data at risk: a fresh/empty DB
+    # (no ``keyword_pairs`` table, or an empty one) has nothing to prune,
+    # and emitting a scary "will delete" banner there is both wrong and
+    # noisy (it would also pollute ``grga index build --json`` on first
+    # run). We therefore gate on the pair table existing with >= 1 row.
+    pre_version = read_schema_version(conn)
+    if pre_version < 8 <= SCHEMA_VERSION and db_path_str and _has_any_pairs(conn):
+        _migration_announce(
+            db_path_str,
+            f"WARNING: v{pre_version}→v8 upgrade will permanently delete "
+            "``keyword_pairs`` rows below "
+            f"cooccur>={int(BUILD_MIN_PAIR_COUNT)} / "
+            f"npmi>={BUILD_MIN_NPMI:.2f}. This is NOT reversible; "
+            "downgrading to older grga cannot recover the pruned data. "
+            "Back up the DB now if you may need to roll back.",
+        )
     if db_path_str:
         try:
             # Announce only when the DB is big enough for the migration to
@@ -494,6 +616,16 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         # no portable ``IF NOT EXISTS`` clause.
         _create_current_tables(conn)
         _ensure_docs_v7_columns(conn)
+
+        # v7 → v8 keyword-primary migration
+        # (docs/design/plan-2026-07-12-keyword-primary.md §6). Additive +
+        # lossy-prune: creates the v8 asset tables (already done above by
+        # ``_create_current_tables``), backfills them from keyword_chunks /
+        # chunks, then prunes sub-threshold ``chunk_cooccur`` pairs. The
+        # deprecated ``keyword_chunks`` / ``chunks`` tables are *kept* here
+        # (Phase 1) so build/related keep working; a later phase drops them.
+        if read_schema_version(conn) < 8:
+            _migrate_v7_to_v8_inplace(conn)
 
         # Stamp the version **inside** the transaction so shape + version
         # commit atomically.
@@ -934,6 +1066,171 @@ def list_tables(conn: sqlite3.Connection) -> list[str]:
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
     return [row[0] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# v7 → v8 keyword-primary migration.
+#
+# Design: docs/design/plan-2026-07-12-keyword-primary.md §6.
+# Runs inside the caller's migration transaction (BEGIN IMMEDIATE from
+# ``_migrate_forward``). Two operations:
+#
+#   1. Backfill: derive ``keyword_stats`` (per-scope chunk_df / doc_df /
+#      total_occurrences) from ``keyword_chunks`` + ``docs``, and
+#      ``scope_stats`` (n_chunks / n_docs / vocab_size) from ``chunks`` +
+#      ``docs`` + the just-backfilled ``keyword_stats``.
+#
+#   2. Lossy prune: DELETE ``keyword_pairs`` rows with source='chunk_cooccur'
+#      that fall below the v8 admission threshold (BUILD_MIN_PAIR_COUNT /
+#      BUILD_MIN_NPMI). ``llm_promoted`` rows are untouched. Idempotent — a
+#      re-run finds nothing to delete.
+#
+# NB Phase 1 does *not* drop ``keyword_chunks`` / ``chunks`` — build and
+# related still read them until Phase 2/3 rewires the code paths. This
+# keeps the schema migration reversible (roll back user_version, tables
+# are still there) and lets us stage the rollout.
+# ---------------------------------------------------------------------------
+
+
+def _migrate_v7_to_v8_inplace(conn: sqlite3.Connection) -> None:
+    """Backfill v8 asset tables from v7 shape and prune sub-threshold pairs.
+
+    Idempotent: ``INSERT OR REPLACE`` on ``keyword_stats`` / ``scope_stats``
+    lets a re-run refresh the values; the pair DELETE is a no-op the second
+    time (rows already gone). Callers must hold the migration transaction.
+
+    Backfill semantics:
+
+    * ``keyword_stats(dir_id, kw_id)``:
+        - ``chunk_df`` = COUNT(DISTINCT chunk) from ``keyword_chunks`` in scope
+        - ``doc_df``   = COUNT(DISTINCT doc)   from ``keyword_chunks`` in scope
+        - ``total_occurrences`` = SUM(occurrence_count) in scope
+
+    * ``scope_stats(dir_id)``:
+        - ``n_chunks`` = COUNT of ``chunks`` rows in scope (npmi denominator N)
+        - ``n_docs``   = COUNT of ``docs`` rows in scope
+        - ``vocab_size`` = DISTINCT kw_id count in this scope's keyword_stats
+
+    Prune semantics: rows with ``source='chunk_cooccur'`` where
+    ``cooccur_count < BUILD_MIN_PAIR_COUNT`` OR ``npmi IS NULL`` OR
+    ``npmi < BUILD_MIN_NPMI`` are removed. This is the "storage contract"
+    — the resulting pair table represents "knowledge that cleared the v8
+    admission threshold at migration time".
+
+    Index-build ordering: the two new ``(dir_id, kw_a_id/kw_b_id, npmi DESC)``
+    indexes are DROPPED before the prune DELETE and re-CREATED afterwards.
+    Building them on the pre-prune 2.79M-row table only to have DELETE
+    invalidate 94% of the entries is wasted work; deferring keeps the
+    index build linear in the *surviving* pair count.
+    """
+    now = _utc_now_iso()
+
+    # If the v7 keyword_chunks table is missing (fresh install path where we
+    # jumped straight into v8 tables), skip backfill — there is nothing to
+    # derive from. Callers on a fresh DB will just have empty v8 tables.
+    if not _table_exists(conn, "keyword_chunks"):
+        # Still run the pair prune (idempotent no-op if pairs empty).
+        _prune_low_score_pairs(conn)
+        return
+
+    # 1. Backfill keyword_stats. Group by (docs.dir_id, kw_id).
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO keyword_stats
+            (dir_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at)
+        SELECT d.dir_id, kc.kw_id,
+               COUNT(*) AS chunk_df,
+               COUNT(DISTINCT kc.doc_id) AS doc_df,
+               COALESCE(SUM(kc.occurrence_count), 0) AS total_occurrences,
+               ?
+        FROM keyword_chunks kc
+        JOIN docs d ON d.id = kc.doc_id
+        GROUP BY d.dir_id, kc.kw_id
+        """,
+        (now,),
+    )
+
+    # 2. Backfill scope_stats. Two subqueries because ``chunks`` and ``docs``
+    #    have independent scopes-per-scope aggregates.
+    if _table_exists(conn, "chunks"):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO scope_stats
+                (dir_id, n_chunks, n_docs, vocab_size, updated_at)
+            SELECT
+                d.dir_id,
+                (SELECT COUNT(*) FROM chunks c
+                 JOIN docs d2 ON d2.id = c.doc_id
+                 WHERE d2.dir_id = d.dir_id) AS n_chunks,
+                COUNT(DISTINCT d.id) AS n_docs,
+                (SELECT COUNT(*) FROM keyword_stats ks
+                 WHERE ks.dir_id = d.dir_id) AS vocab_size,
+                ?
+            FROM docs d
+            GROUP BY d.dir_id
+            """,
+            (now,),
+        )
+    else:
+        # Extremely unusual: v7 without chunks. Backfill scope_stats without
+        # n_chunks (leaves 0; query path will fall back to legacy code until
+        # a rebuild fixes it).
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO scope_stats
+                (dir_id, n_chunks, n_docs, vocab_size, updated_at)
+            SELECT d.dir_id,
+                   0,
+                   COUNT(DISTINCT d.id),
+                   (SELECT COUNT(*) FROM keyword_stats ks
+                    WHERE ks.dir_id = d.dir_id),
+                   ?
+            FROM docs d
+            GROUP BY d.dir_id
+            """,
+            (now,),
+        )
+
+    # 3. Prune sub-threshold chunk_cooccur pairs. Drop the two new npmi
+    # indexes first so the mass DELETE does not incur per-row index
+    # maintenance across millions of rows; re-create them afterwards on
+    # the smaller surviving pair set. The DDL for both indexes is still
+    # in ``_CREATE_INDEXES`` so fresh installs / already-v8 idempotent
+    # paths get them created via the normal ``_create_current_tables``
+    # code path — this DROP+CREATE runs only during the v7→v8 hop.
+    conn.execute("DROP INDEX IF EXISTS idx_kp_a_npmi")
+    conn.execute("DROP INDEX IF EXISTS idx_kp_b_npmi")
+    _prune_low_score_pairs(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kp_a_npmi "
+        "ON keyword_pairs (dir_id, kw_a_id, npmi DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kp_b_npmi "
+        "ON keyword_pairs (dir_id, kw_b_id, npmi DESC)"
+    )
+
+
+def _prune_low_score_pairs(conn: sqlite3.Connection) -> int:
+    """Delete ``chunk_cooccur`` pairs failing the v8 admission threshold.
+
+    Returns the number of rows deleted (for logging / tests). Safe to call
+    on an empty pair table (returns 0). ``llm_promoted`` rows are never
+    touched — their npmi is NULL by design.
+    """
+    cur = conn.execute(
+        "DELETE FROM keyword_pairs "
+        "WHERE source = ? "
+        "AND (cooccur_count < ? OR npmi IS NULL OR npmi < ?)",
+        (CHUNK_COOCCUR_SOURCE, float(BUILD_MIN_PAIR_COUNT), float(BUILD_MIN_NPMI)),
+    )
+    return cur.rowcount or 0
+
+
+def _utc_now_iso() -> str:
+    """UTC timestamp in ``YYYY-MM-DDTHH:MM:SSZ`` form (matches v5+ convention)."""
+    import time
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def vacuum_db(db_path: Union[str, Path]) -> Dict[str, int]:

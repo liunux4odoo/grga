@@ -388,3 +388,32 @@ consumers to reconcile two shapes.
 **Impact**: Documented at the docstring of
 `cli.skill_install_command`; covered by
 `tests/test_skill_install_cli.py`.
+
+## 2026-07-12 · keyword-primary 架构（schema v8）：pair 字典化 + 移除 PPR
+
+**Plan doc**: `docs/design/plan-2026-07-12-keyword-primary.md`
+**关联实验**: `experiments/subgraph_ppr_2026_07_12/`
+
+**背景**：v7 里 `keyword_chunks` 随语料线性膨胀（2 文件 93 MB → 1000 文件外推 45 GB），
+`keyword_pairs` 靠 `recompute_pairs` 从 chunk 派生。`related --mode graph` 冷启 3s，
+用户提出"能否把 pair 当核心知识资产 + 移除全图 PPR"。
+
+**决策**：
+1. `keyword_pairs` 提升为**第一性资产**（不再是派生），写入期严过滤（co≥5, npmi≥0.2）；
+2. **删除** `keyword_chunks` + `chunks` 两张表（chunks 唯一读者 n_chunks 改由 `scope_stats` 提供）；
+3. **移除 PPR**（局部 PPR 与全图 PPR 双否决），`related --mode graph` 返回类型从
+   `List[Related]`（文档）改为 `List[RelatedKeyword]`（候选关键词 + npmi/cooccur），
+   caller 用 ripgrep 从关键词找原文；
+4. **存 npmi**（不现算）；
+5. **知识资产原则**：pair 表随语料更新而 refine，不随语料删除而销毁，可跨语料迁移复用。
+
+**Rationale**：
+- 实验证明局部 PPR 天花板（oracle 诱导子图）只有 Jaccard 0.65，且 1 跳加权求和基线
+  已达 Jaccard 0.51 —— PPR 传递的信号量白花，且 SQL 有 200-500ms/hop 硬地板；
+- fanout=1498 时存 npmi 查询 0.076 ms vs 现算 2.889 ms（38×），随 fanout 发散；
+- pair 严过滤后 279 万 → 16.7 万行，随 vocab²+top-M 边饱和，是**唯一次线性**的知识层；
+- 用户核心原则："删原始语料不销毁已记忆的共现"消解了增量删除的校准复杂性。
+
+**Impact**：MAJOR schema 迁移（v7→v8 有损），`related-signals` 契约 bump v2→v3
+（删 `ppr_score` / `hops_from_seed` / `keyword_contributions`，改 `via_seeds` → `via_seed`）。
+`mode=dir` 去向 §7.1 待定（倾向移除）。分 5 phase 落地，Phase 1 迁移最高风险。

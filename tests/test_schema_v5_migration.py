@@ -104,7 +104,12 @@ def _make_v4_db(path: Path) -> None:
         "INSERT INTO keyword_pairs (scope, directory, keyword_a, keyword_b, source, "
         "cooccur_count, npmi, updated_at) VALUES ('', ?, ?, ?, ?, ?, ?, ?)",
         [
-            (d1, "alpha", "beta", "chunk_cooccur", 3.0, 0.42, "2026-01-01"),
+            # NB fixture values chosen to also clear the v8 admission threshold
+            # (cooccur >= BUILD_MIN_PAIR_COUNT=5 AND npmi >= BUILD_MIN_NPMI=0.2)
+            # so the "bit-exact through migration chain" assertion downstream
+            # still holds after ensure_schema() runs the v7 → v8 hop
+            # (docs/design/plan-2026-07-12-keyword-primary.md §6).
+            (d1, "alpha", "beta", "chunk_cooccur", 6.0, 0.42, "2026-01-01"),
             (d2, "alpha", "gamma", "llm_promoted", 5.0, None, "2026-01-02"),
         ],
     )
