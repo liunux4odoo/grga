@@ -1,5 +1,12 @@
 # related 信号契约 v2
 
+> **⚠️ 已归档（2026-07-13）**：v2 契约随 v9 keyword-primary 架构被 v3 取代。
+> `related --mode graph` 不再返回文档 + PPR 元数据，改为返回候选关键字 +
+> 关联证据；`--mode dir` 移除；PPR / `keyword_chunks` / `expansion` /
+> `keyword_contributions` 全部拆除。现行契约见
+> `docs/design/related-signals-v3.md` + `schemas/related-signals-v3.json`。
+> 本文件仅作历史留痕。
+
 > **版本**：v2.2（2026-07-12 · 同日第二次 refactor）
 > **状态**：已实现（`src/grga/related.py` + `related --json --mode graph`
 > 的 `expansion` 顶层块 / 每条 `results[]` 内嵌 `keyword_contributions`）

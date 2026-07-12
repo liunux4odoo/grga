@@ -13,11 +13,11 @@ state and without paying LLM cost until absolutely necessary.
 ## 30-second quickstart
 
 ```bash
-grga index build --scope ./docs --db ~/.config/grga/deep_keywords.db --json  # 1) one-time (or on mtime change) offline index
+grga index build --scope ./docs --json  # 1) one-time (or on mtime change) offline index
 grga probe "your query" --directory ./docs --json                            # 2) cheap size check before a full search
 grga search "your query" --directory ./docs --json                           # 3) baseline hits + metadata
 grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 4) widen one hit into chapter/paragraph/lines
-grga related "keyword" --mode graph --db ~/.config/grga/deep_keywords.db --json  # 5) neighbouring documents (needs step 1)
+grga related "keyword" --mode graph --json  # 5) neighbouring documents (needs step 1).
 ```
 
 `suggest` is the LLM fallback and runs only on demand — see

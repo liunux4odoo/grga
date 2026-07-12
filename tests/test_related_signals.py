@@ -1,20 +1,21 @@
-"""related-signals v2 contract tests.
+"""related-signals v3 contract tests.
 
-Replaces the pre-2026-07-12 ``tests/test_trace_signals.py`` which enforced
-the (now-removed) trace-signals v1 ``graph_actions`` action-log contract.
-The new contract focuses on **caller relevance judgement**, not walk
-visualisation, and is documented in ``docs/design/related-signals-v2.md``:
+v3 (2026-07-13, v9 keyword-primary) replaces the v2 contract:
 
-* ``related --json --mode graph`` returns ``results[]`` +
-  ``crossed_scopes_preview`` + ``expansion`` (query-level seeds + PPR
-  neighbours with ``ppr_score`` / ``hops_from_seed``).
-* Each result in graph mode carries ``keyword_contributions[]`` — per-doc
-  per-keyword occurrence evidence, sorted by ``(-occurrences, kw)``.
-* Hot-path verbs (``search`` / ``probe`` / ``expand``) MUST NOT carry any
-  ``expansion`` / ``keyword_contributions`` / ``graph_signals`` /
-  ``trace_signals_version`` / ``graph_actions`` field.
-* ``dir`` / ``heading`` modes and ``suggest`` never emit ``expansion`` or
-  ``keyword_contributions`` (graph-only signals).
+* ``related --json --mode graph`` returns ``{"results": [RelatedKeyword]}``
+  — candidate keywords + association evidence (kw / npmi / cooccur_count /
+  via_seed / chunk_df / source). The pre-v3 ``expansion`` block,
+  ``crossed_scopes_preview``, ``keyword_contributions``, and ``graph_signals``
+  are all gone (PPR + doc aggregation removed in Phase 3b-2).
+* ``related --json --mode heading`` returns ``{"results": [Related]}`` with
+  no ``keyword_contributions`` (that field was deleted from the dataclass).
+* ``--mode dir`` is removed (CLI rejects it).
+* Hot-path verbs (``search`` / ``probe`` / ``expand``) and ``suggest`` MUST
+  NOT carry any ``expansion`` / ``keyword_contributions`` / ``graph_signals``
+  / ``trace_signals_version`` / ``graph_actions`` field.
+
+Contract: ``schemas/related-signals-v3.json``; narrative:
+``docs/design/related-signals-v3.md``.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ from grga.graph.build import build_graph_index
 runner = CliRunner()
 
 SCHEMA_PATH = (
-    Path(__file__).resolve().parent.parent / "schemas" / "related-signals-v2.json"
+    Path(__file__).resolve().parent.parent / "schemas" / "related-signals-v3.json"
 )
 
 
@@ -72,13 +73,124 @@ def graph_scope(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# graph mode: candidate keywords + evidence (v3 contract)                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_related_graph_v3_envelope_shape(graph_scope, schema):
+    """graph mode returns ``{results: [RelatedKeyword]}`` — no envelope
+    metadata, no expansion, no crossed_scopes_preview."""
+    result = runner.invoke(
+        app,
+        ["related", "brew", "--mode", "graph",
+         "--db", str(graph_scope["db"]),
+         "-d", str(graph_scope["scope"]), "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    _validate(payload, schema)
+
+    # v3 envelope MUST be exactly {results}. Everything from v2 is gone.
+    assert set(payload.keys()) == {"results"}
+    for banned in (
+        "expansion", "crossed_scopes_preview", "trace_signals_version",
+        "graph_actions",
+    ):
+        assert banned not in payload, f"v2 field {banned!r} leaked into v3"
+
+
+def test_related_graph_v3_related_keyword_fields(graph_scope, schema):
+    """Each row is a RelatedKeyword with all required evidence fields."""
+    result = runner.invoke(
+        app,
+        ["related", "brew", "--mode", "graph",
+         "--db", str(graph_scope["db"]),
+         "-d", str(graph_scope["scope"]), "--json",
+         # min_npmi=0 so tiny corpus produces at least one candidate
+         "--min-npmi", "0.0"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    _validate(payload, schema)
+    if not payload["results"]:
+        pytest.skip("fixture corpus produced no candidates; shape check only")
+
+    for r in payload["results"]:
+        assert set(r.keys()) == {
+            "kw", "npmi", "cooccur_count", "via_seed", "chunk_df", "source",
+        }, f"unexpected RelatedKeyword shape: {sorted(r.keys())}"
+        assert isinstance(r["kw"], str) and r["kw"]
+        assert isinstance(r["npmi"], (int, float))
+        assert r["cooccur_count"] >= 0
+        assert r["via_seed"] == "brew"
+        assert r["chunk_df"] >= 0
+        assert r["source"] in ("chunk_cooccur", "llm_promoted")
+        # v3: no doc-oriented fields on RelatedKeyword
+        for banned in ("doc_path", "score", "mode", "reason", "keywords",
+                       "directory", "qualified_path", "keyword_contributions",
+                       "ppr_score", "hops_from_seed"):
+            assert banned not in r, f"v2 doc field {banned!r} on v3 RelatedKeyword"
+
+
+def test_related_graph_v3_multi_seed_no_fusion(graph_scope, schema):
+    """Multi-seed queries return per-seed rows; a candidate reachable from
+    both seeds appears twice with distinct ``via_seed`` values (design D4)."""
+    result = runner.invoke(
+        app,
+        ["related", "brew", "ripgrep", "--mode", "graph",
+         "--db", str(graph_scope["db"]),
+         "-d", str(graph_scope["scope"]), "--json",
+         "--min-npmi", "0.0"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    _validate(payload, schema)
+    seeds_seen = {r["via_seed"] for r in payload["results"]}
+    # At least one seed should have produced rows on this fixture; the
+    # invariant we care about is that every via_seed is one of the input
+    # seeds, no synthetic "fused" value ever appears.
+    assert seeds_seen <= {"brew", "ripgrep"}, (
+        f"unexpected via_seed values in multi-seed query: {seeds_seen}"
+    )
+
+
+def test_related_graph_v3_unknown_seed_empty(graph_scope, schema):
+    """Seed absent from the vocab (hub or misspelled) returns empty results,
+    still under the v3 envelope shape."""
+    result = runner.invoke(
+        app,
+        ["related", "totally_absent_xyz", "--mode", "graph",
+         "--db", str(graph_scope["db"]),
+         "-d", str(graph_scope["scope"]), "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    _validate(payload, schema)
+    assert payload["results"] == []
+
+
+def test_related_dir_mode_removed(graph_scope):
+    """``--mode dir`` was removed in Phase 3b-2. CLI must reject it."""
+    result = runner.invoke(
+        app,
+        ["related", "brew", "--mode", "dir",
+         "--db", str(graph_scope["db"]),
+         "-d", str(graph_scope["scope"]), "--json"],
+    )
+    assert result.exit_code != 0
+    # Typer's usage error path lists the valid choices in stderr.
+    combined = result.output + (result.stderr or "")
+    assert "graph" in combined and "heading" in combined
+
+
+# --------------------------------------------------------------------------- #
 # heading mode: no graph-only signals                                         #
 # (mode=dir removed in v8 Phase 3b-2; heading covers the "plain results,     #
 #  no expansion/contributions" invariant.)                                    #
 # --------------------------------------------------------------------------- #
 
 
-def test_related_heading_has_no_expansion_or_contributions(graph_scope):
+def test_related_heading_has_no_expansion_or_contributions(graph_scope, schema):
     result = runner.invoke(
         app,
         ["related", "brew", "--mode", "heading",
@@ -87,6 +199,7 @@ def test_related_heading_has_no_expansion_or_contributions(graph_scope):
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
+    _validate(payload, schema)
     assert "expansion" not in payload
     assert "graph_actions" not in payload
     for r in payload["results"]:

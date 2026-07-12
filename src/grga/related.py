@@ -128,7 +128,7 @@ class RelatedKeyword:
                        so callers can decide how to fuse (they can, we do
                        not).
         chunk_df:      candidate's own scope-level chunk df — hub-word
-                       discriminator (design §related-signals-v2 §chunk_df).
+                       discriminator (design §related-signals-v3 §chunk_df).
         source:        ``chunk_cooccur`` (npmi-scored) or ``llm_promoted``
                        (npmi may be NULL upstream but is stored 0.0 here for
                        consistent typing).

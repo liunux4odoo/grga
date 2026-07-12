@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://grga.dev/schemas/related-signals-v2.json",
-  "title": "grga related signals v2",
-  "description": "Contract for the expansion + keyword_contributions fields emitted by `grga related --json --mode graph`. See docs/design/related-signals-v2.md. v2.2 (2026-07-12): flattens `edges_to_seeds` — hop-1 neighbours inline `npmi` / `cooccur_count`, `source` only when not `chunk_cooccur`, `via_seeds` only in multi-seed queries with multi-edge neighbours. Replaces the archived trace-signals-v1.json (2026-07-09).",
+  "$id": "https://grga.dev/schemas/deprecated-related-signals-v2.json",
+  "title": "grga related signals v2 (DEPRECATED)",
+  "description": "DEPRECATED (2026-07-13). Superseded by schemas/related-signals-v3.json when the v9 keyword-primary architecture removed PPR + keyword_chunks + doc aggregation. Kept for historical evidence; NOT emitted by current code. See docs/design/deprecated/related-signals-v2.md and docs/design/related-signals-v3.md.",
   "type": "object",
   "required": [
     "results",

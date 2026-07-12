@@ -4,10 +4,52 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-13 · related 信号契约 v3（随 v9 keyword-primary 落地）
+
+**Plan step**：`related --json` 契约随 v9 keyword-primary（Phase 3b-2/3）
+从"文档 + PPR 元数据"重构为"候选关键字 + 关联证据"。规范见
+`docs/design/related-signals-v3.md` + `schemas/related-signals-v3.json`；
+v2 归档到 `docs/design/deprecated/related-signals-v2.md` +
+`schemas/deprecated-related-signals-v2.json`。
+
+**Decision**：`related --json` 走 v3 契约：
+
+1. `--mode graph` envelope 简化为 `{"results": [RelatedKeyword]}`，
+   每个 `RelatedKeyword = {kw, npmi, cooccur_count, via_seed, chunk_df,
+   source}`。v2 的 `expansion` / `crossed_scopes_preview` / `keyword_contributions`
+   / `graph_signals` 全部删除（对应 PPR + doc 聚合层的移除）。
+2. `--mode heading` envelope 保持 `{"results": [Related]}`，但 `Related`
+   dataclass 里的 `keyword_contributions` 字段已从 Python API 层删除
+   （随 `KeywordContribution` 一起，review F9）。
+3. `--mode dir` 彻底移除；`related(mode="dir")` 抛 `ValueError` 指向
+   `grga search --json`。
+4. `--alpha` / `--iters` / `--cross-scope` / `--preview` / `--edge-quantile`
+   CLI flag 全部删除（Phase 3b-2）。
+
+**Rationale**：
+
+- **信号暴露原则**：`RelatedKeyword` 的六字段是 caller 拿不到的内部证据
+  （build-time npmi + 存储层 chunk_df）；文档级证据从"grga 派生 doc 集"
+  变成"caller 用返回的关键字自己 ripgrep"。杠杆方向反了，把 doc 聚合
+  从共用层下放到 caller 侧。
+- **多 seed 不融合**（design D4）：`via_seed` 每行独占，同一 kw 若从多 seed
+  可达则重复出现。caller 自决合并策略。
+- **契约冻结与破变**：pre-1.0 项目、现有 caller 尚在少量、v2→v3 一次
+  性 major bump，无 fallback / 兼容路径。JSON schema 用 `anyOf` 覆盖
+  graph + heading 双 envelope，空 `results` 无歧义两侧都合法。
+
+**Impact**：
+- `schemas/related-signals-v3.json` 新增，`related-signals-v2.json`
+  → `schemas/deprecated-related-signals-v2.json`
+- `docs/design/related-signals-v3.md` 新增，v2 doc 归档
+- `tests/test_related_signals.py` 换用 v3 schema，加 5 项 graph-mode
+  形状/多 seed/未知 seed/mode=dir 拒绝验证
+- 相关 skill / navigation 引用同步（Phase 5）
+
 ## 2026-07-12 · related 信号契约 v2（撤 trace-signals，改 expansion + keyword_contributions）
 
 **Plan step**：`related --json` 的信号契约重构。完整规范见
-`docs/design/related-signals-v2.md`，旧契约归档于
+`docs/design/deprecated/related-signals-v2.md`（已归档），旧契约归档于
 `docs/design/deprecated/trace-signals.md`。
 
 **Decision**：移除 trace-signals v1（`trace_signals_version` +
