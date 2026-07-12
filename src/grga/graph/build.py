@@ -1623,14 +1623,23 @@ def recompute_pairs(
         b = int(row[1])
         c = int(row[2])
         npmi = _npmi(c, chunk_df.get(a, 0), chunk_df.get(b, 0), n_chunks)
-        # v8 write-gate: drop pairs below the npmi floor. ``_npmi`` returns
-        # None for degenerate inputs (co<=0 / df=0 / p_ab>=1) — treat those
-        # as failing the admission gate whenever a positive floor is set.
-        # A caller passing ``min_npmi=0.0`` explicitly opts out (used by
-        # tiny-corpus tests); production defaults to 0.2.
-        if npmi_floor > 0.0:
-            if npmi is None or npmi < npmi_floor:
-                continue
+        # v8 write-gate for chunk_cooccur:
+        # 1) Always drop NULL-npmi rows — these are degenerate cases
+        #    (co<=0, df=0, or p_ab>=1 when a pair covers every chunk); no
+        #    well-defined association strength means the row would be
+        #    invisible to ``WHERE npmi >= ?`` queries anyway, so writing
+        #    it just wastes space. This makes ``chunk_cooccur.npmi`` a
+        #    de-facto NOT NULL invariant that ``related_keywords`` relies
+        #    on. (llm_promoted rows, which do carry NULL npmi by design,
+        #    take a different code path and never reach this loop.)
+        # 2) Below the caller's floor: drop when the caller opted in to
+        #    a strict admission (min_npmi > 0). A caller passing
+        #    ``min_npmi=0.0`` still gets #1 above (NULL is dropped)
+        #    but keeps every real-valued npmi.
+        if npmi is None:
+            continue
+        if npmi_floor > 0.0 and npmi < npmi_floor:
+            continue
         pair_rows.append((scope_dir_id, a, b, float(c), npmi, now))
         if idx == total_surviving or idx % step == 0:
             _emit(

@@ -203,18 +203,35 @@ def test_neighbor_edges_exclude_seed_self(tmp_path):
 def test_chunk_mode_chars_plus_cross_scope(tmp_path):
     scope_a = tmp_path / "a"; scope_b = tmp_path / "b"
     scope_a.mkdir(); scope_b.mkdir()
+    # chars-mode targets 300-600 char chunks with blank-line boundaries.
+    # Build 3 blocks per doc (each >300 chars) so the doc spans multiple
+    # chunks and the bridge pair does NOT cover 100% of chunks (which since
+    # schema v8 gives an undefined npmi and is dropped at build time).
+    pad = "padding word filler text to reach the minimum char threshold. " * 6
     (scope_a / "a.md").write_text(
-        "# Title\n\n" + "alpha bridge word content here.\n" * 10, encoding="utf-8"
+        "# Title\n\n"
+        f"alpha bridge shared context here. {pad}\n"
+        "\n"
+        f"alpha standalone note without the bridge. {pad}\n"
+        "\n"
+        f"totally unrelated filler block. {pad}\n",
+        encoding="utf-8",
     )
     (scope_b / "b.md").write_text(
-        "# Title\n\n" + "bridge betaword info blob text.\n" * 10, encoding="utf-8"
+        "# Title\n\n"
+        f"bridge betaword shared blob here. {pad}\n"
+        "\n"
+        f"betaword standalone entry without bridge. {pad}\n"
+        "\n"
+        f"other filler content block. {pad}\n",
+        encoding="utf-8",
     )
     db = tmp_path / "graph.db"
     _index(scope_a, db, mode="chars")
     _index(scope_b, db, mode="chars")
     results = related(
         ["alpha"], mode="graph", db_path=db, directory=scope_a, cross_scope=True, limit=20,
-        # Synthetic mini-corpus: npmi is tiny across the board, so pin the
+        # Synthetic mini-corpus: npmi is small across the board, so pin the
         # threshold off to isolate cross-scope mechanics from the P1.2
         # default (0.2) which would drop every bridge edge here.
         min_npmi=0.0,

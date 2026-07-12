@@ -541,18 +541,21 @@ def test_build_write_time_gate_default_filters_low_score_pairs(sidecar_env, tmp_
 
 
 def test_build_min_npmi_opt_out(sidecar_env, tmp_path):
-    """min_npmi=0.0 disables the quality gate — pairs with any npmi survive."""
+    """min_npmi=0.0 disables the read-side floor — pairs with any real npmi survive.
+
+    Note: chunk_cooccur rows with mathematically undefined npmi (p_ab=1,
+    i.e. a pair covering every chunk) are dropped regardless of the floor
+    — that's a build-time invariant. Mix a solo chunk in to keep p_ab<1.
+    """
     scope = tmp_path / "corpus"
     scope.mkdir()
-    (scope / "doc.txt").write_text(
-        "\n".join(["alpha beta seen" for _ in range(6)]),
-        encoding="utf-8",
-    )
+    lines = ["alpha beta seen"] * 6 + ["alpha solo"]
+    (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
     db = tmp_path / "graph.db"
     stats = build_graph_index(
         scope, db_path=db, min_pair_count=5, min_npmi=0.0,
     )
-    assert stats.pairs_written > 0, "min_npmi=0.0 must admit pairs regardless of npmi"
+    assert stats.pairs_written > 0, "min_npmi=0.0 must admit pairs with defined npmi"
 
 
 def test_build_min_pair_count_opt_out(sidecar_env, tmp_path):

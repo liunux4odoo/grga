@@ -38,7 +38,7 @@ from grga.graph.ppr import (
     DEFAULT_ITERS,
     personalized_pagerank_indexed,
 )
-from grga.graph.schema import connect, ensure_schema
+from grga.graph.schema import connect, ensure_schema, CHUNK_COOCCUR_SOURCE
 
 VALID_MODES = ("graph", "dir", "heading")
 DEFAULT_LIMIT = 20
@@ -150,6 +150,298 @@ def _resolve_directory(directory: Optional[Union[str, Path]]) -> Optional[str]:
     if directory is None:
         return None
     return str(Path(directory).expanduser().resolve())
+
+
+# ---------------------------------------------------------------------------
+# v8 keyword-primary API (Phase 3a — additive; Phase 3b will retire the
+# doc-returning ``related(mode="graph")`` code path).
+# Design: docs/design/plan-2026-07-12-keyword-primary.md §4.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RelatedKeyword:
+    """A single candidate keyword expanded from a seed via co-occurrence.
+
+    The v8 ``related --mode graph`` return type. Replaces the pre-v8
+    document-oriented :class:`Related` for that mode: the graph produces
+    candidate *keywords* (with their association evidence), and the caller
+    turns those into passages by running ripgrep. Multi-seed queries return
+    per-seed rows (``via_seed`` disambiguates) — no cross-seed score fusion,
+    per user decision (design §7 · decision D4).
+
+    Fields:
+        kw:            casefold candidate keyword.
+        npmi:          Bouma npmi of the (via_seed, kw) chunk co-occurrence,
+                       as stored at build time (never recomputed at query
+                       time — see design §3.2).
+        cooccur_count: raw chunk co-occurrence count.
+        via_seed:      the seed that expanded to this candidate. Preserved
+                       so callers can decide how to fuse (they can, we do
+                       not).
+        chunk_df:      candidate's own scope-level chunk df — hub-word
+                       discriminator (design §related-signals-v2 §chunk_df).
+        source:        ``chunk_cooccur`` (npmi-scored) or ``llm_promoted``
+                       (npmi may be NULL upstream but is stored 0.0 here for
+                       consistent typing).
+    """
+
+    kw: str
+    npmi: float
+    cooccur_count: float
+    via_seed: str
+    chunk_df: int
+    source: str
+
+    def to_dict(self) -> dict:
+        return {
+            "kw": self.kw,
+            "npmi": round(float(self.npmi), 6),
+            "cooccur_count": float(self.cooccur_count),
+            "via_seed": self.via_seed,
+            "chunk_df": int(self.chunk_df),
+            "source": self.source,
+        }
+
+
+DEFAULT_LIMIT_PER_SEED = 30
+
+
+def related_keywords(
+    seeds: Sequence[str],
+    *,
+    limit_per_seed: int = DEFAULT_LIMIT_PER_SEED,
+    min_npmi: Optional[float] = None,
+    db_path: Union[str, Path, None] = None,
+    directory: Optional[Union[str, Path]] = None,
+) -> List[RelatedKeyword]:
+    """v8 graph-expansion primitive: seeds → candidate keywords + evidence.
+
+    For each seed keyword, load its top ``limit_per_seed`` neighbours from
+    ``keyword_pairs`` (ordered by stored ``npmi DESC``), tagged with which
+    seed they came from. **No PPR, no full-graph load, no adjacency cache.**
+    The index ``(dir_id, kw_a_id, npmi DESC)`` + its mirror on ``kw_b_id``
+    turn the double lookup into ``O(limit_per_seed)`` per seed, giving
+    sub-millisecond hot-path even on hub seeds (fanout 1500+).
+
+    Semantics:
+
+    * ``min_npmi`` may only *tighten* the write-time floor
+      (:data:`BUILD_MIN_NPMI` = 0.2). Passing a lower value has no effect —
+      pairs below the write floor were never memorised (design §3.3).
+    * Multi-seed queries return per-seed rows without fusion. Duplicate
+      candidates (same ``kw`` reached from multiple seeds) appear multiple
+      times with different ``via_seed`` values; caller decides how to
+      aggregate.
+    * ``directory`` is a per-scope filter: only pairs whose ``dir_id``
+      matches the resolved scope are returned. ``None`` = no filter
+      (cross-scope search).
+
+    Args:
+        seeds:          query seed keywords (casefold-normalised internally).
+        limit_per_seed: max candidates per seed. Default 30.
+        min_npmi:       optional read-side floor. ``None`` (default)
+                        resolves to :data:`DEFAULT_MIN_NPMI` or
+                        ``GRGA_PPR_MIN_NPMI``.
+        db_path:        SQLite path (defaults to shared deep-search DB).
+        directory:      optional scope filter (resolved absolute path).
+
+    Returns:
+        Flat list of :class:`RelatedKeyword`, sorted by
+        ``(via_seed, -npmi, kw)``. Empty when no seed resolves.
+    """
+    seed_folded = [s for s in (_fold(k) for k in seeds) if s]
+    if not seed_folded:
+        return []
+
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    scope_key = _resolve_directory(directory)
+    effective_min_npmi = (
+        _default_min_npmi() if min_npmi is None else float(min_npmi)
+    )
+    conn = connect(target_db)
+    try:
+        ensure_schema(conn)
+        return _related_keywords_impl(
+            conn,
+            seed_folded,
+            limit_per_seed=limit_per_seed,
+            min_npmi=effective_min_npmi,
+            scope_key=scope_key,
+        )
+    finally:
+        conn.close()
+
+
+def _related_keywords_impl(
+    conn: sqlite3.Connection,
+    seeds: Sequence[str],
+    *,
+    limit_per_seed: int,
+    min_npmi: float,
+    scope_key: Optional[str],
+) -> List[RelatedKeyword]:
+    """Core query path for :func:`related_keywords`.
+
+    Split out so tests can hand-inject a connection without going through
+    the DB-path resolver. The DB schema must already be at v8.
+    """
+    # Resolve dir_id filter (if any). Unknown scope → zero results.
+    dir_id: Optional[int] = None
+    if scope_key is not None:
+        row = conn.execute(
+            "SELECT id FROM directories WHERE path = ?", (scope_key,)
+        ).fetchone()
+        if row is None:
+            return []
+        dir_id = int(row[0])
+
+    # Resolve seeds → kw_ids in one batched query, preserving input order.
+    placeholders = ",".join("?" for _ in seeds)
+    seed_id_rows = list(
+        conn.execute(
+            f"SELECT id, kw FROM keywords WHERE kw IN ({placeholders})",
+            list(seeds),
+        )
+    )
+    text_to_id: Dict[str, int] = {str(r[1]): int(r[0]) for r in seed_id_rows}
+    seed_ids: List[Tuple[int, str]] = []
+    for s in seeds:
+        if s in text_to_id:
+            seed_ids.append((text_to_id[s], s))
+    if not seed_ids:
+        return []
+
+    dir_filter = ""
+    dir_params: List = []
+    if dir_id is not None:
+        dir_filter = "dir_id = ? AND "
+        dir_params = [dir_id]
+    # TODO(perf): cross-scope path (dir_id is None) currently full-scans
+    # idx_keyword_pairs_b because the (dir_id, kw_a_id, npmi DESC) composite
+    # cannot be used without a dir_id prefix. Warm cost ~700 ms on prod DB
+    # vs ~14 ms with a scope. Acceptable for the rare --cross-scope case,
+    # but worth revisiting (iterate known dir_ids and UNION, or add a
+    # non-prefixed npmi index for cross-scope) if it becomes a hot path.
+
+    seen_kw_ids: set = set()
+    per_seed_rows: List[Tuple[str, List[Tuple[int, str, float, float]]]] = []
+
+    for (seed_id, seed_text) in seed_ids:
+        # chunk_cooccur a-side + b-side; each ORDER BY npmi DESC LIMIT
+        # walks ``idx_kp_a_npmi`` / ``idx_kp_b_npmi`` in index order.
+        rows_a = conn.execute(
+            f"SELECT kw_b_id, npmi, cooccur_count, source "
+            f"FROM keyword_pairs "
+            f"WHERE {dir_filter}kw_a_id = ? AND source = ? AND npmi >= ? "
+            f"ORDER BY npmi DESC LIMIT ?",
+            (*dir_params, seed_id, CHUNK_COOCCUR_SOURCE,
+             float(min_npmi), int(limit_per_seed)),
+        ).fetchall()
+        rows_b = conn.execute(
+            f"SELECT kw_a_id, npmi, cooccur_count, source "
+            f"FROM keyword_pairs "
+            f"WHERE {dir_filter}kw_b_id = ? AND source = ? AND npmi >= ? "
+            f"ORDER BY npmi DESC LIMIT ?",
+            (*dir_params, seed_id, CHUNK_COOCCUR_SOURCE,
+             float(min_npmi), int(limit_per_seed)),
+        ).fetchall()
+        # llm_promoted: no npmi filter (may be NULL).
+        rows_llm_a = conn.execute(
+            f"SELECT kw_b_id, npmi, cooccur_count, source "
+            f"FROM keyword_pairs "
+            f"WHERE {dir_filter}kw_a_id = ? AND source = ?",
+            (*dir_params, seed_id, "llm_promoted"),
+        ).fetchall()
+        rows_llm_b = conn.execute(
+            f"SELECT kw_a_id, npmi, cooccur_count, source "
+            f"FROM keyword_pairs "
+            f"WHERE {dir_filter}kw_b_id = ? AND source = ?",
+            (*dir_params, seed_id, "llm_promoted"),
+        ).fetchall()
+
+        # Merge + dedupe within one seed. A pair with the same (kw_a, kw_b)
+        # but different ``source`` values keeps both provenance rows.
+        merged: Dict[Tuple[int, str], Tuple[float, float]] = {}
+        for r in list(rows_a) + list(rows_b) + list(rows_llm_a) + list(rows_llm_b):
+            nbr_id = int(r[0])
+            npmi_val = float(r[1]) if r[1] is not None else 0.0
+            cooccur = float(r[2])
+            src = str(r[3])
+            key = (nbr_id, src)
+            prev = merged.get(key)
+            if prev is None or npmi_val > prev[0]:
+                merged[key] = (npmi_val, cooccur)
+
+        ranked = sorted(
+            [
+                (nbr_id, src, npmi_val, cooccur)
+                for (nbr_id, src), (npmi_val, cooccur) in merged.items()
+            ],
+            key=lambda t: (-t[2], t[0]),
+        )[:limit_per_seed]
+
+        for (nbr_id, _src, _npmi_val, _cooccur) in ranked:
+            seen_kw_ids.add(nbr_id)
+        per_seed_rows.append((seed_text, ranked))
+
+    if not seen_kw_ids:
+        return []
+
+    # Batched translate: nbr kw_id → text + chunk_df. Chunk-partitioned to
+    # dodge SQLITE_MAX_VARIABLE_NUMBER. ``keyword_stats`` rows are per-scope;
+    # cross-scope (dir_id is None) sums across scopes.
+    kw_text: Dict[int, str] = {}
+    chunk_df_map: Dict[int, int] = {}
+    id_list = list(seen_kw_ids)
+    chunk = 900
+    for i in range(0, len(id_list), chunk):
+        piece = id_list[i:i + chunk]
+        ph = ",".join("?" for _ in piece)
+        for r in conn.execute(
+            f"SELECT id, kw FROM keywords WHERE id IN ({ph})", piece
+        ):
+            kw_text[int(r[0])] = str(r[1])
+        if dir_id is not None:
+            for r in conn.execute(
+                f"SELECT kw_id, chunk_df FROM keyword_stats "
+                f"WHERE kw_id IN ({ph}) AND dir_id = ?",
+                (*piece, dir_id),
+            ):
+                chunk_df_map[int(r[0])] = int(r[1])
+        else:
+            for r in conn.execute(
+                f"SELECT kw_id, SUM(chunk_df) FROM keyword_stats "
+                f"WHERE kw_id IN ({ph}) GROUP BY kw_id",
+                piece,
+            ):
+                chunk_df_map[int(r[0])] = int(r[1] or 0)
+
+    all_results: List[RelatedKeyword] = []
+    for seed_text, ranked in per_seed_rows:
+        for (nbr_id, src, npmi_val, cooccur) in ranked:
+            kw = kw_text.get(nbr_id, "")
+            if not kw:
+                continue
+            all_results.append(
+                RelatedKeyword(
+                    kw=kw,
+                    npmi=npmi_val,
+                    cooccur_count=cooccur,
+                    via_seed=seed_text,
+                    chunk_df=chunk_df_map.get(nbr_id, 0),
+                    source=src,
+                )
+            )
+    all_results.sort(key=lambda r: (r.via_seed, -r.npmi, r.kw))
+    return all_results
+
+
+# ---------------------------------------------------------------------------
+# Legacy ``related()`` API (Phase 3b will retire ``mode='graph'`` / ``dir``).
+# ---------------------------------------------------------------------------
 
 
 def related(
