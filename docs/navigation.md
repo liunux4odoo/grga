@@ -21,7 +21,6 @@ src/grga/
 ├── structure/                  # Markdown 章节解析 + sidecar 缓存
 ├── skills/, skill_install.py   # 内置 Skill 树 + 安装器
 ├── prompts/                    # suggest 的三个 intent 提示词
-├── trace.py                    # trace-signals v1 契约（related/suggest 的 graph_actions）
 ├── toolchain.py                # 外部工具 (rga/rg/pandoc/fzf) 下载与解析
 ├── runtime_env.py              # 交互性 / 离线 / prefer-system 判定
 ├── exit_codes.py               # 冻结的退出码契约 + JSON 错误 emit
@@ -122,12 +121,13 @@ Markdown 章节树 + 磁盘缓存 sidecar。为 `expand --level chapter` 和
 - `exit_codes.py`：**冻结的退出码契约**（0.2.0 起）。只加不改。JSON 错误 emit
   函数 (`emit_error` / `emit_warning`) 也在此。
 - `docs/exit-codes.md`：外部消费者可见的退出码列表。
-- `docs/design/trace-signals.md`：`related` / `suggest` 的 `graph_actions` 输出规范。
-- `trace.py`：trace-signals v1 的实现层。`GraphAction` 数据类 + 冻结的 op /
-  node 前缀词汇表 + node id 编码器 (`encode_keyword` / `encode_file` /
-  `encode_heading`) + `envelope()`。只有 `related`（graph 模式）与 `suggest`
-  在 `--json` 下 emit；热路径动词 (`search`/`probe`/`expand`/`deep-search`)
-  **绝不 emit**。契约由 `schemas/trace-signals-v1.json` 校验。
+- `docs/design/related-signals-v2.md`：`related --json --mode graph` 的
+  `expansion` + `keyword_contributions` 契约（2026-07-12 落地，替代
+  已归档的 trace-signals v1）。契约由 `schemas/related-signals-v2.json`
+  校验；热路径动词 (`search`/`probe`/`expand`/`deep-search`) 不 emit
+  任何相关字段。
+- `docs/design/deprecated/trace-signals.md`：**已废弃**的 trace-signals
+  v1 规范（`graph_actions` op log）。为什么撤见其头部说明。
 
 改任何 CLI 的 `--json` 输出前，先看这两份文件的冻结点。
 
@@ -166,7 +166,8 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/v2-design.md` | 五动词、三层扩展模型、设计哲学（**首读**） |
 | `docs/design/v2-plan.md` | v2 落地阶段拆分 |
 | `docs/design/decisions.md` | 关键决策留痕 |
-| `docs/design/trace-signals.md` | related/suggest 的 graph_actions 输出规范 |
+| `docs/design/related-signals-v2.md` | `related --json --mode graph` 的 expansion + keyword_contributions 契约 |
+| `docs/design/deprecated/trace-signals.md` | **已废弃** · 旧 graph_actions 契约（2026-07-12 撤除） |
 | `docs/design/release-0.2.0-plan.md` | 0.2.0 发版计划 |
 | `docs/adr/0001-md-parser.md` | 选用 markdown-it-py 的架构决策 |
 | `docs/design/plan-2026-07-11-schema-v5-normalization.md` | v5 规范化迁移设计 + 消费者/契约影响 |

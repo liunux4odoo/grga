@@ -38,7 +38,7 @@ DB=~/.config/grga/deep_keywords.db
 
 # ---- T2-bookend (session open, MANDATORY): expand the raw seed --------
 grga related "鉴权" --mode graph -d "$DIR" --db "$DB" --json > /tmp/seed0.json
-#   read results[] + neighbor_edges[] -> harvest low-DF neighbours
+#   read results[] + expansion.expanded_keywords[] -> harvest low-DF neighbours
 #   (token / session / middleware ...) into the working seed set
 
 # ---- T0: size the query cheaply -------------------------------------
@@ -76,12 +76,12 @@ grga related "鉴权 token session" --mode graph -d "$DIR" --db "$DB" --json > /
 
 | Tier | Read from JSON | Decide |
 |---|---|---|
-| T2-bookend (open) | `results[]`, `neighbor_edges[].npmi`, `graph_signals.seed_chunk_df` | harvest low-DF neighbours into the working seed set before T0 |
+| T2-bookend (open) | `results[]`, `expansion.expanded_keywords[].edges_to_seeds[].npmi`, `expansion.seeds[].chunk_df` | harvest low-DF neighbours into the working seed set before T0 |
 | T0 probe | `total_lines`, `file_count`, `per_file`, `sample.est_total_bytes` | 0 → loosen / reformulate; huge → tighten; band → proceed |
 | T1 search | `matches` length, `truncated`, `heading_path`, `nearby_hits` | empty → T0/T3; truncated → cap/tighten; thin → T2-escalate/T3; good → toward answer |
 | T2-escalate expand/related | returned `text` / neighbour `doc_path`s | sufficient → toward answer; corpus lacks material → T3 |
 | T3 suggest | `queries[]`, `keywords[]`, `ranking[]` | feed back to T0/T1, or reorder with `ranking[]` |
-| T2-bookend (pre-answer) | `results[]`, `neighbor_edges[]` | new doc/alias → fold in or dismiss; only then commit answer |
+| T2-bookend (pre-answer) | `results[]`, `expansion.expanded_keywords[]` | new doc/alias → fold in or dismiss; only then commit answer |
 
 ## Why probe first (and not just search)
 

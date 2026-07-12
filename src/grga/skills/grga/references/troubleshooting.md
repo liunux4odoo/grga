@@ -10,7 +10,7 @@ The graph index is either missing or does not cover the seed keywords.
 
 - Run `grga index build --scope <dir> --db <db>` first. `related --mode graph` needs `keyword_chunks` + `keyword_pairs`; `--mode heading` needs `heading_docs` (Markdown only).
 - Most likely cause: the seed keyword never entered `keyword_chunks`, or the scope name passed to `-d` is misspelled. Confirm with `grga graph inspect <keyword> --json` — if `total_docs` is 0 the term was never indexed.
-- Check the `graph_signals` block in `related --mode graph --json`: `seed_chunk_df` shows per-seed segment df, `total_chunks_in_scope` puts it in context. `df/total` near 1.0 means the seed is a hub (edges dominated by noise); a lower ratio typically gives sharper `neighbor_edges`.
+- Check the `expansion` block in `related --mode graph --json` (v2.1): `seeds[].chunk_df` shows per-seed segment df, `total_chunks_in_scope` puts it in context. `df/total` near 1.0 means the seed is a hub (edges dominated by noise); a lower ratio typically gives sharper `expanded_keywords[].edges_to_seeds`.
 - If the seed word is a stopword or shorter than 2 characters it never enters `keyword_chunks`. Use a longer/more concrete term or try `--mode dir` (filesystem proximity).
 - **Small / synthetic corpora**: since 2026-07-12 `--mode graph` filters edges by `npmi >= 0.2` (P1.2, `docs/design/plan-2026-07-12-related-perf.md`). On tiny fixtures npmi is dominated by noise and every bridge edge sits below the threshold, so PPR sees an empty graph. Pass `--min-npmi 0` (or `env GRGA_PPR_MIN_NPMI=0`) to disable the filter for that query.
 - To broaden scope, see `references/storage-model.md` for the `-d` / `--cross-scope` / `--mode heading` decision.

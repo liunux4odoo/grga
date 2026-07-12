@@ -19,7 +19,7 @@ from grga.graph.schema import (
     ensure_schema,
     read_schema_version,
 )
-from grga.related import DEFAULT_GRAPH_SIGNALS_LIMIT, related, related_graph_with_preview
+from grga.related import related, related_graph_with_preview
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +128,13 @@ def test_seed_chunk_df_reported_for_current_scope(tmp_path):
     _index(scope_a, db)
     _index(scope_b, db)
 
+    # v2.1: chunk_df now lives on expansion.seeds[].chunk_df, not per-doc.
     payload = related_graph_with_preview(["韩立"], db_path=db, directory=scope_a, limit=20)
-    results = payload["results"]
-    signals = results[0].graph_signals
-    assert signals is not None
-    # Scope-local df should reflect scope A's count, not the union.
-    assert signals["seed_chunk_df"]["韩立"] >= 4
+    exp = payload["expansion"]
+    seed_entries = {s["kw"]: s for s in exp["seeds"]}
+    assert "韩立" in seed_entries
+    # Scope-local df should reflect scope A\'s count, not the union.
+    assert seed_entries["韩立"]["chunk_df"] >= 4
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +175,18 @@ def test_neighbor_edges_exclude_seed_self(tmp_path):
     )
     db = tmp_path / "graph.db"
     _index(scope, db)
+    # v2.1: expanded_keywords excludes seeds by construction (see
+    # _build_expansion); the neighbour side of every edges_to_seeds entry
+    # is the parent expanded_keyword.kw itself, so this asserts the
+    # equivalent self-loop guard on the new structure.
     payload = related_graph_with_preview(["seed"], db_path=db, directory=scope, limit=20)
-    for r in payload["results"]:
-        signals = r.graph_signals
-        for edge in signals["neighbor_edges"]:
-            assert edge["b"] != "seed", edge
+    exp = payload["expansion"]
+    seed_kws = {s["kw"] for s in exp["seeds"]}
+    for entry in exp["expanded_keywords"]:
+        assert entry["kw"] not in seed_kws, entry
+        for edge in entry["edges_to_seeds"]:
+            assert edge["seed"] in seed_kws, edge
+            assert edge["seed"] != entry["kw"], edge
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +383,13 @@ def test_llm_promote_flow_marks_source_correctly(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_graph_signals_present_in_json_only(tmp_path):
+def test_expansion_block_shape(tmp_path):
+    """v2.1: query-level ``expansion`` replaces per-doc ``graph_signals``.
+
+    Each expanded keyword folds ``ppr_score`` / ``chunk_df`` /
+    ``hops_from_seed`` / ``edges_to_seeds`` into one entry; the
+    per-``Related`` ``graph_signals`` block has been removed.
+    """
     scope = tmp_path / "corpus"
     scope.mkdir()
     (scope / "a.md").write_text(
@@ -386,18 +400,26 @@ def test_graph_signals_present_in_json_only(tmp_path):
     payload = related_graph_with_preview(["alpha"], db_path=db, directory=scope, limit=5)
     for r in payload["results"]:
         d = r.to_dict()
-        assert "graph_signals" in d
-        sig = d["graph_signals"]
-        assert "seed_chunk_df" in sig
-        assert "total_chunks_in_scope" in sig
-        assert "neighbor_edges" in sig
-        for edge in sig["neighbor_edges"]:
-            assert "a" in edge and "b" in edge
+        assert "graph_signals" not in d, "graph_signals removed in v2.1"
+        assert "keyword_contributions" in d
+    exp = payload["expansion"]
+    assert "seeds" in exp and "expanded_keywords" in exp and "total_chunks_in_scope" in exp
+    for kw in exp["expanded_keywords"]:
+        assert "kw" in kw and "ppr_score" in kw and "edges_to_seeds" in kw
+        for edge in kw["edges_to_seeds"]:
+            assert "seed" in edge
             assert "npmi" in edge and "cooccur_count" in edge
             assert "source" in edge
 
 
-def test_graph_signals_limit_respected(tmp_path):
+def test_expanded_keywords_bounded_by_ppr_top_k(tmp_path):
+    """v2.1: the pre-2026-07-12 ``--graph-signals-limit`` knob is removed.
+
+    ``expanded_keywords`` is naturally bounded by the PPR ``top_k``
+    (``max(limit * 3, limit)``), so the deterministic cap emerges from
+    ``related --limit`` without an extra knob. This test asserts the
+    natural upper bound rather than restoring the removed parameter.
+    """
     scope = tmp_path / "corpus"
     scope.mkdir()
     body_lines = [
@@ -406,10 +428,9 @@ def test_graph_signals_limit_respected(tmp_path):
     (scope / "a.md").write_text("\n".join(body_lines) + "\n", encoding="utf-8")
     db = tmp_path / "graph.db"
     _index(scope, db)
-    results = related(
-        ["alpha"], mode="graph", db_path=db, directory=scope, limit=5,
-        graph_signals_limit=3,
+    payload = related_graph_with_preview(
+        ["alpha"], db_path=db, directory=scope, limit=5,
     )
-    assert results
-    sig = results[0].graph_signals
-    assert len(sig["neighbor_edges"]) <= 3
+    assert payload["results"]
+    # PPR requested top_k = max(limit*3, limit) = 15 non-seed keywords.
+    assert len(payload["expansion"]["expanded_keywords"]) <= 15

@@ -41,7 +41,6 @@ from grga.toolchain import (
     tools_root,
     update_tools,
 )
-from grga.trace import envelope as trace_envelope
 
 app = typer.Typer(no_args_is_help=True, help="Search files with ripgrep-all helpers.")
 tools_app = typer.Typer(no_args_is_help=True, help="Manage bundled command line tools.")
@@ -1461,8 +1460,7 @@ def suggest_command(
         raise typer.Exit(1)
 
     if json_output:
-        payload = trace_envelope(suggestion.to_dict(), suggestion.graph_actions)
-        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        typer.echo(json.dumps(suggestion.to_dict(), ensure_ascii=False, indent=2))
         return
     if suggestion.reason:
         typer.echo(f"# {suggestion.reason}", err=True)
@@ -1525,7 +1523,6 @@ def related_command(
     cross_scope: bool = typer.Option(False, "--cross-scope", help="mode=graph only: seed docs stay in --directory, PPR expansion crosses into every other scope."),
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
     preview: bool = typer.Option(False, "--preview", help="mode=graph only: also compute crossed_scopes_preview."),
-    graph_signals_limit: int = typer.Option(30, "--graph-signals-limit", help="mode=graph only: cap on neighbor_edges in the graph_signals JSON block."),
     min_npmi: Optional[float] = typer.Option(None, "--min-npmi", help="mode=graph only: drop chunk_cooccur edges with npmi below this before PPR. Default 0.2 (or $GRGA_PPR_MIN_NPMI). Mutually exclusive with --edge-quantile."),
     edge_quantile: Optional[float] = typer.Option(None, "--edge-quantile", help="mode=graph only: keep the top X fraction of edges by npmi (sampled). E.g. 0.1 keeps top 10%. Mutually exclusive with --min-npmi."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
@@ -1586,23 +1583,19 @@ def related_command(
             directory=str(directory) if directory else None,
             cross_scope=cross_scope,
             preview=preview,
-            collect_trace=json_output,
-            graph_signals_limit=graph_signals_limit,
             min_npmi=resolved_min_npmi,
         )
         results = payload["results"]
         if json_output:
-            out = trace_envelope(
-                {
-                    "results": [r.to_dict() for r in results],
-                    "crossed_scopes_preview": payload["crossed_scopes_preview"],
-                },
-                payload["graph_actions"],
-            )
+            out = {
+                "results": [r.to_dict() for r in results],
+                "crossed_scopes_preview": payload["crossed_scopes_preview"],
+                "expansion": payload["expansion"],
+            }
             typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
             return
-        # Human-readable output: never print graph_signals (contract HC3 —
-        # metadata is for --json / agents only).
+        # Human-readable output: never print graph_signals / expansion /
+        # keyword_contributions (contract — metadata is for --json / agents only).
         for item in results:
             kw = ("  <- " + ", ".join(item.keywords)) if item.keywords else ""
             typer.echo(f"{item.score:.4f}  {item.doc_path}{kw}")
@@ -1620,10 +1613,7 @@ def related_command(
         same_scope=same_scope,
     )
     if json_output:
-        out = trace_envelope(
-            {"results": [r.to_dict() for r in results]},
-            [],
-        )
+        out = {"results": [r.to_dict() for r in results]}
         typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
         return
     if not results:

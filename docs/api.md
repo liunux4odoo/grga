@@ -169,51 +169,115 @@ Deep-search also adds top-level `query`, `strategy`
 
 ## `grga related`
 
-`--mode dir` and `--mode heading` return a **JSON array** of `Related`
-objects sorted by `score` descending; `--mode graph` returns a
-**JSON envelope** carrying the same `Related` array plus an opt-in
-`crossed_scopes_preview` observability field.
+`--mode dir` and `--mode heading` return a JSON object `{"results": [...]}`
+whose `Related` entries are sorted by `score` descending; `--mode graph`
+returns an envelope carrying the same array plus opt-in
+`crossed_scopes_preview` observability and a query-level `expansion` block.
 
 `Related` objects always carry both `doc_path` (relative to the indexed
 scope) and `directory` (the resolved scope root the document was indexed
 under). `qualified_path` is the two joined together, filesystem-resolvable
 even when results span multiple scopes.
 
-```jsonc
-// --mode dir | --mode heading
-[
-  {
-    "doc_path": "docs/install.md",         // string — relative to `directory`
-    "score": 1.596026,                     // float — rounded to 6 dp
-    "mode": "graph",                       // string — graph | dir | heading
-    "reason": "ppr",                       // string — provenance tag
-    "keywords": ["brew","linux"],          // string[] — matched keywords/headings
-    "directory": "/abs/path/to/project_a", // string|null — indexed scope root
-    "qualified_path": "/abs/path/to/project_a/docs/install.md"
-  }
-]
+`--mode graph` results additionally carry per-doc per-keyword occurrence
+evidence (`keyword_contributions`), and the envelope carries a query-level
+`expansion` block folding every keyword-level graph signal (`chunk_df`,
+`ppr_score`, `hops_from_seed`, `edges_to_seeds`) into one entry per
+keyword. Together they let callers filter hub-word false positives
+without querying the DB — see `docs/design/related-signals-v2.md` for the
+full contract and rationale. (The pre-2026-07-12 per-doc `graph_signals`
+block and the `--graph-signals-limit` flag were removed as duplication.)
 
-// --mode graph
+```jsonc
+// --mode dir | --mode heading  (envelope)
 {
-  "results": [ /* Related[] as above */ ],
-  "crossed_scopes_preview": null           // null unless --preview was passed
+  "results": [
+    {
+      "doc_path": "docs/install.md",         // string — relative to `directory`
+      "score": 1.596026,                     // float — rounded to 6 dp
+      "mode": "dir",                         // string — dir | heading
+      "reason": "dir:docs",                  // string — provenance tag
+      "keywords": ["brew","linux"],          // string[] — matched keywords/headings
+      "directory": "/abs/path/to/project_a", // string|null — indexed scope root
+      "qualified_path": "/abs/path/to/project_a/docs/install.md"
+    }
+  ]
+}
+
+// --mode graph  (envelope)
+{
+  "results": [
+    {
+      "doc_path": "docs/install.md",
+      "score": 1.596026,
+      "mode": "graph",
+      "reason": "ppr",                       // "ppr" | "direct-seed"
+      "keywords": ["brew","linux"],          // sorted, mirrors keyword_contributions[].kw
+      "directory": "/abs/path/to/project_a",
+      "qualified_path": "/abs/path/to/project_a/docs/install.md",
+      "keyword_contributions": [             // per-doc per-kw evidence
+        {"kw": "brew",  "occurrences": 5},   // sorted (-occurrences, kw)
+        {"kw": "linux", "occurrences": 2}
+      ]
+    }
+  ],
+  "crossed_scopes_preview": null,            // null unless --preview was passed
+  "expansion": {                             // query-level graph evidence
+    "seeds": [
+      {"kw": "brew", "chunk_df": 12}         // seed + its in-scope chunk df
+    ],
+    "expanded_keywords": [                   // non-seed PPR neighbours
+      {
+        "kw": "install",
+        "ppr_score": 0.0421,
+        "hops_from_seed": 1,                 // omitted if unreachable
+        "chunk_df": 340,                     // hub-word signal
+        "edges_to_seeds": [                  // direct edges back to seed(s)
+          {"seed": "brew", "npmi": 0.42,
+           "cooccur_count": 8, "source": "chunk_cooccur"}
+        ]
+      },
+      {
+        "kw": "pandoc",
+        "ppr_score": 0.0189,
+        "hops_from_seed": 2,
+        "chunk_df": 55,
+        "edges_to_seeds": []                 // empty when hop >= 2
+      }
+      // sorted by (-ppr_score, kw)
+    ],
+    "total_chunks_in_scope": 100000          // context for chunk_df
+  }
   //
-  // When --preview is passed together with -d, this becomes:
+  // When --preview is passed together with -d, crossed_scopes_preview becomes:
   // {
-  //   "would_add": 47,               // additional docs reachable if
-  //                                  //   --cross-scope were enabled
-  //   "top_other_scopes": [          // scopes contributing those docs
+  //   "would_add": 47,
+  //   "top_other_scopes": [
   //     {"scope": "/abs/path/to/papers", "count": 32},
   //     {"scope": "/abs/path/to/notes",  "count": 15}
   //   ],
-  //   "top_bridge_keywords": [       // keywords bridging into other scopes
+  //   "top_bridge_keywords": [
   //     {"keyword": "attention", "cross_weight": 0.42, "suspected_polysemy": true},
   //     {"keyword": "model",     "cross_weight": 0.31, "suspected_polysemy": false}
   //   ]
   // }
-  // It stays null when --directory is omitted (query already spans every
-  // scope) or when --preview is not passed.
 }
+```
+
+**Caller-side false-positive filter** — the intent of the `expansion` +
+`keyword_contributions` split. Drop results that never mention any actual
+seed (and optionally treat high-`chunk_df` expansions as hub noise):
+
+```python
+seeds = {s["kw"] for s in payload["expansion"]["seeds"]}
+kept = [
+    r for r in payload["results"]
+    if any(c["kw"] in seeds for c in r["keyword_contributions"])
+]
+
+# Or a stricter cut: ignore expansions that are corpus-wide hub words.
+hub = {e["kw"] for e in payload["expansion"]["expanded_keywords"]
+       if e.get("chunk_df", 0) > 10000}   # threshold is the caller's call
 ```
 
 `reason` values by mode:

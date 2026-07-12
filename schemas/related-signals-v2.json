@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grga.dev/schemas/related-signals-v2.json",
+  "title": "grga related signals v2",
+  "description": "Contract for the expansion + keyword_contributions fields emitted by `grga related --json --mode graph`. See docs/design/related-signals-v2.md. v2.1 (2026-07-12) folds all keyword-level graph signals (chunk_df, ppr_score, hops_from_seed, edges_to_seeds) into the query-level expansion block and drops the per-doc graph_signals block. Replaces the archived trace-signals-v1.json (2026-07-09).",
+  "type": "object",
+  "required": [
+    "results",
+    "expansion"
+  ],
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/related_graph"
+      }
+    },
+    "crossed_scopes_preview": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object"
+        }
+      ]
+    },
+    "expansion": {
+      "$ref": "#/$defs/expansion"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "expansion": {
+      "type": "object",
+      "required": [
+        "seeds",
+        "expanded_keywords",
+        "total_chunks_in_scope"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "seeds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/seed_keyword"
+          }
+        },
+        "expanded_keywords": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/expanded_keyword"
+          }
+        },
+        "total_chunks_in_scope": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "seed_keyword": {
+      "type": "object",
+      "required": [
+        "kw"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kw": {
+          "type": "string",
+          "minLength": 1
+        },
+        "chunk_df": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "expanded_keyword": {
+      "type": "object",
+      "required": [
+        "kw",
+        "ppr_score",
+        "edges_to_seeds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kw": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ppr_score": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "hops_from_seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunk_df": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edges_to_seeds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/seed_edge"
+          }
+        }
+      }
+    },
+    "seed_edge": {
+      "type": "object",
+      "required": [
+        "seed",
+        "npmi",
+        "cooccur_count",
+        "source"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "seed": {
+          "type": "string",
+          "minLength": 1
+        },
+        "npmi": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cooccur_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "keyword_contribution": {
+      "type": "object",
+      "required": [
+        "kw",
+        "occurrences"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kw": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurrences": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "related_graph": {
+      "type": "object",
+      "required": [
+        "doc_path",
+        "score",
+        "mode",
+        "reason",
+        "keywords",
+        "directory",
+        "qualified_path",
+        "keyword_contributions"
+      ],
+      "properties": {
+        "doc_path": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "mode": {
+          "const": "graph"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "directory": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "qualified_path": {
+          "type": "string"
+        },
+        "keyword_contributions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/keyword_contribution"
+          }
+        }
+      }
+    }
+  }
+}

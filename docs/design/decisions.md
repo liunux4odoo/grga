@@ -4,6 +4,86 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-12 · related 信号契约 v2（撤 trace-signals，改 expansion + keyword_contributions）
+
+**Plan step**：`related --json` 的信号契约重构。完整规范见
+`docs/design/related-signals-v2.md`，旧契约归档于
+`docs/design/deprecated/trace-signals.md`。
+
+**Decision**：移除 trace-signals v1（`trace_signals_version` +
+`graph_actions` op log）与其 `suggest` 侧的 `llm_propose`，改为聚焦
+"caller 关联判断证据"的两块新信号：
+
+1. `related --json --mode graph` 顶层新增 `expansion`：
+   `{seeds, expanded_keywords[{kw, ppr_score, hops_from_seed?}]}`——查询级
+   PPR 扩展状态。
+2. 每条 graph 模式 `results[]` 内嵌 `keyword_contributions`：
+   `[{kw, occurrences}]`——文档级 per-kw 命中明细。
+3. `related --mode dir|heading` 与 `suggest --json` 去掉 trace envelope。
+
+**Rationale**：
+
+- **信号暴露原则**（AGENTS.md）：旧契约里 `file:` 级 `score_node` =
+  `related[].score`（重复），`keyword_doc` 边权 = 关键字级 PPR 分 ×
+  `keywords`（派生），`llm_propose` = `Suggestion.keywords`（派生）。三者都是
+  caller 能自己派生的，按第 1 条不该占共用层。真正拿不到的只有 PPR 分、
+  BFS hops、per-doc-per-kw occurrences 三样。
+- **用途错位**：旧契约瞄准"图游走可视化"，但生产实测 caller 的痛点是
+  "判断 related 结果是不是噪声"（稀有种子经 PPR 扩展拉入通用词命中的假阳性，
+  如 `苍坤` seed 拉入《三体》）。linear op log 无法表达这种证据；per-doc
+  命中矩阵 + 查询级扩展表可以，caller ~5 行即可过滤。
+- **热路径保护不变**：`search`/`probe`/`expand`/`deep-search` 的 `--json`
+  仍一字节不动。
+
+**Impact**：
+
+- **BREAKING**：`trace_signals_version` / `graph_actions` 从
+  `related --json` 与 `suggest --json` 移除；graph 模式增 `expansion` +
+  `keyword_contributions`；dir/heading/suggest 去 envelope。pre-1.0 直接
+  声明破坏性，无兼容路径。
+- 删除 `src/grga/trace.py`、`schemas/trace-signals-v1.json`、
+  `schemas/trace-viz-session-v1.json`；新增 `schemas/related-signals-v2.json`。
+- 移除依赖 `graph_actions` 的两个内置 skill 工件（`skills/grga-trace-viz/`
+  与 `skills/grga/workflows/trace-viewer/`）。
+- 性能：删 `_build_graph_trace` BFS-tree 重建，改为轻量 `_compute_hops`；
+  `keyword_contributions` 复用 doc-agg 已有 rowmap，零新增 SQL。
+
+**Files**：
+- `docs/design/related-signals-v2.md`（新规范；v2.1 同日 revision）
+- `docs/design/deprecated/trace-signals.md`（归档 + 撤销说明）
+- `src/grga/related.py`（`KeywordContribution` / `expansion` / `_compute_hops`
+  / `_chunk_df_for_kws` / `_edges_by_neighbor`）
+- `src/grga/suggest.py`、`src/grga/cli.py`（去 trace envelope；v2.1 去 `--graph-signals-limit`）
+- `schemas/related-signals-v2.json`、`tests/test_related_signals.py`（替代 `test_trace_signals.py`）
+
+### 2026-07-12（同日）· v2.1 · graph_signals 折叠进 expansion
+
+**触发**：v2.0 落地后 caller 反馈两处冗余：
+1. `graph_signals.neighbor_edges[].a` 恒等于 seed，纯回显 caller 输入；
+2. 关键字级信号散落在三处 —— `expanded_keywords[].ppr_score` /
+   `neighbor_edges` 里的 `{npmi, cooccur_count, source}` / 无处的
+   `chunk_df` —— caller 要 join 三个数组才能拼出一个关键字的完整档案。
+
+**决定**：把所有关键字级图信号一体化到 `expansion`：
+- `seeds: List[{kw, chunk_df?}]`；
+- `expanded_keywords[i]` 增 `chunk_df?` + `edges_to_seeds: [{seed, npmi,
+  cooccur_count, source}]`（每条邻居自带回 seed 的直接边集）；
+- `total_chunks_in_scope` 从 `graph_signals` 提升到 `expansion` 顶层；
+- `Related.graph_signals` 整块删除（原是查询级常量在每条 Related 里的
+  引用重复）；
+- `--graph-signals-limit` CLI 参数删除（`expanded_keywords` 由 PPR
+  `top_k = max(limit*3, limit)` 自然限长，不需要额外旋钮）。
+
+**关键增值**：`chunk_df` 是 hub 词识别的直接信号。三体假阳性场景里
+`上古` 的 `chunk_df ≈ 45k` vs `苍坤` 的 `chunk_df = 3`，比例本身就是
+最强判据；caller 三行 Python 即可过滤。
+
+**HC2 合规**：`chunk_df` 是既有 `keyword_chunks` 的 `COUNT(*) GROUP BY`
+派生，零新语料先验。查询次数无净增（seed_chunk_df 那次 batch 里顺带查
+neighbours）。
+
+---
+
 ## 2026-07-12 · `related --mode graph` 性能优化(冷 3s / 热 200ms)
 
 **Plan step**:生产 `related --mode graph` 冷启动 109.7s / 热启动 48.1s 的性能治理。

@@ -72,10 +72,10 @@ def test_aggregate_docs_id_native_matches_legacy(indexed_two_scope):
         kw_score = {row["kw"]: (idx + 1) * 0.5 for idx, row in enumerate(rows)}
 
         legacy = _aggregate_docs_text_legacy(
-            conn, kw_score, doc_scope_key=None, graph_signals=None
+            conn, kw_score, doc_scope_key=None
         )
         native = _aggregate_docs_id_native(
-            conn, kw_score, doc_scope_key=None, graph_signals=None
+            conn, kw_score, doc_scope_key=None
         )
     finally:
         conn.close()
@@ -108,10 +108,10 @@ def test_scoped_aggregation_matches_legacy(indexed_two_scope):
         kw_score = {row["kw"]: 1.0 for row in rows}
         scope_a = str(indexed_two_scope["a"])
         legacy = _aggregate_docs_text_legacy(
-            conn, kw_score, doc_scope_key=scope_a, graph_signals=None
+            conn, kw_score, doc_scope_key=scope_a
         )
         native = _aggregate_docs_id_native(
-            conn, kw_score, doc_scope_key=scope_a, graph_signals=None
+            conn, kw_score, doc_scope_key=scope_a
         )
     finally:
         conn.close()
@@ -125,8 +125,8 @@ def test_scoped_aggregation_matches_legacy(indexed_two_scope):
 def test_empty_kw_score_returns_empty():
     """Both paths short-circuit on empty ``kw_score``."""
     # No conn needed — both should bail before any SQL.
-    assert _aggregate_docs_id_native(None, {}, None, graph_signals=None) == []
-    assert _aggregate_docs_text_legacy(None, {}, None, graph_signals=None) == []
+    assert _aggregate_docs_id_native(None, {}, None) == []
+    assert _aggregate_docs_text_legacy(None, {}, None) == []
 
 
 def test_end_to_end_env_toggle_produces_same_top_docs(

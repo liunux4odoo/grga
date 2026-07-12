@@ -4,6 +4,40 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
+### BREAKING · related 信号契约 v2 / v2.1（docs/design/related-signals-v2.md）
+
+分两步落地：v2.0 撤 trace-signals v1（"图游走可视化"），v2.1 同日
+收敛冗余（把 `graph_signals` 折叠进顶层 `expansion`，去 `neighbor_edges`
+里 `a=seed` 的重复，每个关键字带 `chunk_df` 做 hub 识别）。动机：生产
+实测稀有种子经 PPR 扩展会拉入通用词命中的假阳性文档（`苍坤` seed 拉进
+《三体》），旧 `graph_actions` op log 无法帮 caller 识别；且 v2.0
+的 `graph_signals`/`neighbor_edges`/`ppr_score` 三处分别描述同一个关键
+字，caller 要 join 三个数组。
+
+- **移除**：`trace_signals_version` + `graph_actions` 从
+  `grga related --json` 与 `grga suggest --json` 撤除。
+- **移除（v2.1）**：`Related.graph_signals` 整块（含 `seed_chunk_df` /
+  `neighbor_edges` / 里面的 `total_chunks_in_scope`），`--graph-signals-limit`
+  CLI 参数。
+- **移除**：`src/grga/trace.py`、`schemas/trace-signals-v1.json`、
+  `schemas/trace-viz-session-v1.json`，以及依赖 `graph_actions` 的两个内置
+  skill 工件（`skills/grga-trace-viz/`、`skills/grga/workflows/trace-viewer/`）。
+- **新增**：`grga related --json --mode graph` 顶层 `expansion` 一体化承载：
+  * `seeds: List[{kw, chunk_df?}]` — 每个 seed 附加 in-scope chunk df。
+  * `expanded_keywords: List[{kw, ppr_score, hops_from_seed?, chunk_df?,
+    edges_to_seeds: [{seed, npmi, cooccur_count, source}]}]` — 每个 PPR
+    邻居一处出现，直接边并入本条记录，无跨数组 join。
+  * `total_chunks_in_scope: int` — `chunk_df` 的分母。
+- **新增**：graph 模式每条 `results[]` 内嵌 `keyword_contributions`
+  （`[{kw, occurrences}]`，按 `(-occurrences, kw)` 排序）。
+- **变更**：`related --mode dir|heading` 与 `suggest --json` 去 envelope，
+  现返回 `{"results": [...]}` 对象。
+- **不变**：`search` / `probe` / `expand` / `deep-search` 的 `--json` 输出。
+- caller 用 `expansion.seeds` + `keyword_contributions` 即可 ~5 行过滤
+  "仅由 PPR 扩展词命中" 的假阳性；加 `expanded_keywords[].chunk_df` 阈值
+  可再叠一层 hub-word 剪枝。契约 schema：`schemas/related-signals-v2.json`。
+  旧规范归档于 `docs/design/deprecated/trace-signals.md`。
+
 ### 性能 · `related --mode graph` 优化 (docs/design/plan-2026-07-12-related-perf.md)
 
 7 项独立优化叠加，把冷启动从 ~110s 压到 ~3s、生产热启动预期 ~200ms。

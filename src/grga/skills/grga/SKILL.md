@@ -278,15 +278,6 @@ Composition notes:
 - Not a replacement for `rg` / `rga` — for raw byte-level search prefer
   `rg` directly; grga adds structure and graph on top.
 
-## Optional workflows
-
-Opt-in companion tools under `workflows/`:
-
-- **`workflows/trace-viewer/`** — turn a multi-turn grga session into a
-  self-contained HTML page visualising co-occurrence graph expansion
-  over successive `related` / `suggest` calls. Start at
-  `workflows/trace-viewer/README.md`.
-
 ## References
 
 Detailed material loaded on demand:

@@ -15,10 +15,13 @@ tables (schema v4):
 All modes are read-only, deterministic, and never touch an LLM. Each
 returns a list of :class:`Related` records sorted by ``score`` desc.
 
-The ``graph`` mode additionally reports a ``graph_signals`` metadata block
-(seed segment-df, total-chunks-in-scope, top neighbour edges with npmi /
-raw count / source) so callers can classify seeds (hub / domain / rare)
-and re-rank neighbours themselves. See §4.1 of the chunk-migration plan.
+The ``graph`` mode additionally emits a query-level ``expansion`` block
+(``seeds[]`` and ``expanded_keywords[]``, each carrying ``chunk_df``,
+``ppr_score``, ``hops_from_seed``, ``edges_to_seeds``) plus a
+per-document ``keyword_contributions`` list. Together these let callers
+classify seeds (hub / domain / rare) and filter noisy expansions
+(e.g. rare-seed PPR pulling in generic hub words) without querying the
+DB. See ``docs/design/related-signals-v2.md``.
 """
 from __future__ import annotations
 
@@ -35,11 +38,9 @@ from grga.graph.ppr import (
     personalized_pagerank_indexed,
 )
 from grga.graph.schema import connect, ensure_schema
-from grga.trace import GraphAction
 
 VALID_MODES = ("graph", "dir", "heading")
 DEFAULT_LIMIT = 20
-DEFAULT_GRAPH_SIGNALS_LIMIT = 30
 # P1.2 (plan-2026-07-12-related-perf §2.4): default npmi threshold on
 # chunk_cooccur edges. 0.2 empirically de-noises hub function-word edges
 # without hurting top-K recall (experiment F4). Override via CLI
@@ -60,6 +61,29 @@ def _default_min_npmi() -> float:
 
 
 @dataclass
+class KeywordContribution:
+    """Per-``(document, keyword)`` evidence block for ``mode=graph``.
+
+    Emitted inside :attr:`Related.keyword_contributions` so callers can
+    tell "the seed hit this doc N times" apart from "a generic PPR
+    expansion word grazed this doc once". Together with ``expansion``
+    at the payload root, this is enough to filter false positives that
+    ride in only on hub words (three-body-style noise).
+
+    Fields:
+        kw: the (case-folded) keyword string.
+        occurrences: summed ``keyword_chunks.occurrence_count`` for this
+            keyword in this document, within the current scope.
+    """
+
+    kw: str
+    occurrences: int
+
+    def to_dict(self) -> dict:
+        return {"kw": self.kw, "occurrences": int(self.occurrences)}
+
+
+@dataclass
 class Related:
     """A single related document (or keyword) with provenance.
 
@@ -68,6 +92,18 @@ class Related:
     disambiguates: it holds the resolved scope root the document was
     indexed under (``None`` when unknown / not tracked). ``qualified_path``
     joins the two into a filesystem-resolvable path.
+
+    ``keyword_contributions`` (``mode=graph`` only) is the per-doc
+    per-keyword occurrence breakdown documented in
+    ``docs/design/related-signals-v2.md``. ``keywords`` remains populated in
+    ``mode=dir`` (seeds) and ``mode=heading`` (matched heading paths)
+    where per-keyword occurrence has no natural meaning.
+
+    All query-level graph signals (``ppr_score`` / ``chunk_df`` /
+    ``hops_from_seed`` / ``edges_to_seeds`` / ``total_chunks_in_scope``)
+    now live once at the payload root under ``expansion``. The pre-v2.1
+    per-doc ``graph_signals`` block was removed as pure duplication (it
+    was a query-level constant shared by every ``Related`` in a call).
     """
 
     doc_path: str
@@ -76,9 +112,9 @@ class Related:
     reason: str = ""
     keywords: List[str] = field(default_factory=list)
     directory: Optional[str] = None
-    # ``mode='graph'`` only: the chunk-level metadata block described in
-    # the chunk-migration plan §4.1. ``None`` for other modes.
-    graph_signals: Optional[dict] = None
+    # ``mode='graph'`` only: per-keyword occurrence breakdown. ``None`` in
+    # other modes so callers key on presence (design §related-signals-v2).
+    keyword_contributions: Optional[List[KeywordContribution]] = None
 
     @property
     def qualified_path(self) -> str:
@@ -97,8 +133,10 @@ class Related:
             "directory": self.directory,
             "qualified_path": self.qualified_path,
         }
-        if self.graph_signals is not None:
-            out["graph_signals"] = self.graph_signals
+        if self.keyword_contributions is not None:
+            out["keyword_contributions"] = [
+                c.to_dict() for c in self.keyword_contributions
+            ]
         return out
 
 
@@ -123,7 +161,6 @@ def related(
     iters: int = DEFAULT_ITERS,
     cross_scope: bool = False,
     same_scope: bool = False,
-    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
     min_npmi: Optional[float] = None,
 ) -> List[Related]:
     """Return documents related to ``keywords`` under the chosen ``mode``.
@@ -138,8 +175,6 @@ def related(
         alpha / iters: PPR knobs (``graph`` mode only).
         cross_scope: ``mode=graph`` only.
         same_scope: ``mode=heading`` only.
-        graph_signals_limit: cap on ``neighbor_edges`` inside the
-            ``graph_signals`` metadata (``mode=graph`` only).
         min_npmi: ``mode=graph`` only. Drop ``chunk_cooccur`` edges with
             ``npmi < min_npmi`` before running PPR. ``None`` (default)
             resolves to :data:`DEFAULT_MIN_NPMI` (0.2) or the
@@ -167,7 +202,6 @@ def related(
             return _related_graph(
                 conn, seeds, limit, scope_key, alpha, iters,
                 cross_scope=cross_scope, db_path=target_db,
-                graph_signals_limit=graph_signals_limit,
                 min_npmi=effective_min_npmi,
             )
         if mode == "dir":
@@ -229,12 +263,19 @@ def _docs_for_keywords_chunks(
     return out
 
 
-def _seed_chunk_df(
+def _chunk_df_for_kws(
     conn: sqlite3.Connection,
     keywords: Sequence[str],
     scope_key: Optional[str],
 ) -> Dict[str, int]:
-    """Return ``{keyword: chunk_df}`` — distinct chunks each keyword hits."""
+    """Return ``{keyword: chunk_df}`` — distinct chunks each keyword hits.
+
+    Used for both the seed side and the PPR-expanded neighbour side of the
+    ``expansion`` block (v2.1: 2026-07-12). ``chunk_df`` is the direct
+    hub-word signal callers use to filter noisy expansions — a rare seed
+    like ``苍坤`` (df=3) versus an omnipresent neighbour like ``上古``
+    (df~45k) is the discriminator that ``ppr_score`` alone cannot expose.
+    """
     if not keywords:
         return {}
     placeholders = ",".join("?" for _ in keywords)
@@ -273,22 +314,30 @@ def _total_chunks_in_scope(
     return int(row["n"]) if row else 0
 
 
-def _neighbor_edges_for_seeds(
+def _edges_by_neighbor(
     conn: sqlite3.Connection,
     seeds: Sequence[str],
     neighbor_keywords: Sequence[str],
     scope_key: Optional[str],
-    limit: int,
-) -> List[dict]:
-    """Return ``keyword_pairs`` rows connecting seeds to their PPR neighbours.
+) -> Dict[str, List[dict]]:
+    """Return ``{neighbor_kw: [{seed, npmi, cooccur_count, source}, ...]}``.
 
-    Each row carries ``a`` / ``b`` / ``npmi`` / ``cooccur_count`` /
-    ``source``. Ordered by ``npmi DESC NULLS LAST`` then ``cooccur_count
-    DESC`` for determinism, capped at ``limit``. Joins ``keywords`` back
-    to text so ``a`` / ``b`` remain keyword strings (contract).
+    Replaces the pre-v2.1 ``_neighbor_edges_for_seeds`` which flattened
+    every seed<->neighbour pair into ``[{a, b, npmi, ...}]`` where ``a``
+    was always the seed (pure redundancy) and ``b`` the neighbour. The
+    new shape lets each expanded keyword carry its own edge set in the
+    ``expansion`` block, keyed by neighbour, so callers look up "how did
+    this word attach to my query" in one place instead of joining two
+    arrays.
+
+    Edge lists per neighbour are sorted deterministically by
+    ``(npmi desc NULLS last, cooccur_count desc, seed asc)``. Neighbours
+    with no direct seed edge (hop >= 2 in the PPR expansion) simply do
+    not appear in the returned dict; callers treat a missing key as an
+    empty edge list.
     """
-    if not seeds or not neighbor_keywords or limit <= 0:
-        return []
+    if not seeds or not neighbor_keywords:
+        return {}
     seed_ph = ",".join("?" for _ in seeds)
     nbr_ph = ",".join("?" for _ in neighbor_keywords)
     params: List = [*seeds, *neighbor_keywords, *neighbor_keywords, *seeds]
@@ -309,39 +358,36 @@ def _neighbor_edges_for_seeds(
         params,
     ).fetchall()
     seed_set = set(seeds)
-    out: List[dict] = []
+    by_neighbor: Dict[str, List[dict]] = {}
     for row in rows:
         a, b = row["keyword_a"], row["keyword_b"]
-        # Orient (a, b) so ``a`` is the seed side (for caller convenience).
+        # Orient so the seed lands on the ``seed`` field.
         if a in seed_set:
-            oa, ob = a, b
+            seed_kw, neighbor_kw = a, b
         else:
-            oa, ob = b, a
+            seed_kw, neighbor_kw = b, a
         npmi = row["npmi"]
-        out.append(
+        by_neighbor.setdefault(neighbor_kw, []).append(
             {
-                "a": oa,
-                "b": ob,
+                "seed": seed_kw,
                 "npmi": float(npmi) if npmi is not None else None,
-                "cooccur_count": float(row["cooccur_count"] or 0.0),
+                "cooccur_count": int(row["cooccur_count"] or 0),
                 "source": row["source"],
             }
         )
-    # Deterministic ordering: npmi desc (None last), then cooccur desc,
-    # then (a, b) lexicographic.
+
     def _sort_key(edge: dict):
         npmi = edge["npmi"]
-        # Non-None npmi should sort before None (higher priority); within
-        # non-None, higher is better; ties broken by cooccur_count then a/b.
         return (
             0 if npmi is not None else 1,
             -(npmi if npmi is not None else 0.0),
             -edge["cooccur_count"],
-            edge["a"],
-            edge["b"],
+            edge["seed"],
         )
-    out.sort(key=_sort_key)
-    return out[:limit]
+
+    for edges in by_neighbor.values():
+        edges.sort(key=_sort_key)
+    return by_neighbor
 
 
 # ---------------------------------------------------------------------------
@@ -359,71 +405,46 @@ def _related_graph(
     *,
     cross_scope: bool = False,
     db_path: Optional[Path] = None,
-    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
     min_npmi: float = 0.0,
 ) -> List[Related]:
     results, _, _ = _related_graph_impl(
         conn, seeds, limit, scope_key, alpha, iters,
         cross_scope=cross_scope, db_path=db_path,
-        graph_signals_limit=graph_signals_limit,
         min_npmi=min_npmi,
     )
     return results
 
 
-def _build_graph_trace(
+def _compute_hops(
     indexed,
     seeds: Sequence[str],
     kw_score: Dict[str, float],
-    results: Sequence[Related],
-    *,
-    fallback: bool = False,
-) -> List["GraphAction"]:
-    """Reconstruct a walk trace from a finished ``mode=graph`` computation.
+) -> Dict[str, int]:
+    """BFS on the indexed co-occurrence graph, returning ``{kw: hops_from_seed}``.
 
-    (Same algorithm as the doc-level implementation; only the underlying
-    graph source changed. The trace contract remains a deterministic BFS
-    tree over the co-occurrence graph.)
+    Only keywords the caller actually asks about (i.e. present in
+    ``kw_score`` plus the seeds themselves) are returned. Traversal is
+    deterministic: neighbours are visited in ``(-weight, node_id)`` order,
+    matching the ordering used everywhere else in this module so hop
+    numbers stay stable across runs.
+
+    Replaces the pre-2026-07-12 ``_build_graph_trace`` which reconstructed
+    a full BFS-tree action log for the (now-removed) trace-signals v1
+    contract. See ``docs/design/related-signals-v2.md`` for the rationale
+    behind the switch to per-keyword ``hops_from_seed`` in
+    :func:`related_graph_with_preview`'s ``expansion`` block.
     """
     from collections import deque
-
-    from grga import trace as _trace
-
-    actions: List[_trace.GraphAction] = []
-    seed_set = {s for s in seeds}
-
-    if fallback:
-        for r in results:
-            file_node = _trace.encode_file(r.doc_path)
-            for kw in sorted(r.keywords):
-                if kw not in seed_set:
-                    continue
-                actions.append(
-                    _trace.traverse_edge(
-                        _trace.encode_keyword(kw), file_node,
-                        edge_kind="keyword_doc", weight=r.score, hop=1,
-                    )
-                )
-            actions.append(
-                _trace.score_node(
-                    file_node, algo="direct-seed",
-                    score=r.score, hops_from_seed=1,
-                )
-            )
-        return actions
 
     node_index = getattr(indexed, "node_index", {})
     node_ids = getattr(indexed, "node_ids", [])
     neighbors = getattr(indexed, "neighbors", [])
 
-    wanted = {
-        node_index[kw] for kw in kw_score if kw in node_index
-    }
+    wanted = {node_index[kw] for kw in kw_score if kw in node_index}
     seed_ids = [node_index[s] for s in seeds if s in node_index]
-    seed_id_set = set(seed_ids)
+    wanted.update(seed_ids)
 
     hop: Dict[int, int] = {sid: 0 for sid in seed_ids}
-    parent: Dict[int, Tuple[int, float]] = {}
     dq: deque = deque(seed_ids)
     while dq:
         cur = dq.popleft()
@@ -431,82 +452,83 @@ def _build_graph_trace(
             neighbors[cur],
             key=lambda t: (-t[1], node_ids[t[0]]),
         )
-        for j, w in ordered:
+        for j, _w in ordered:
             if j in hop:
                 continue
             hop[j] = hop[cur] + 1
-            parent[j] = (cur, w)
             dq.append(j)
 
-    emitted: Dict[Tuple[int, int], Tuple[float, int]] = {}
-    for target in wanted:
-        if target in seed_id_set or target not in hop:
-            continue
-        node = target
-        while node in parent:
-            par, w = parent[node]
-            key = (par, node)
-            if key in emitted:
-                break
-            emitted[key] = (w, hop[node])
-            node = par
+    return {node_ids[idx]: h for idx, h in hop.items() if idx in wanted}
 
-    for (frm, to), (weight, h) in sorted(
-        emitted.items(),
-        key=lambda item: (item[1][1], node_ids[item[0][0]], node_ids[item[0][1]]),
-    ):
-        actions.append(
-            _trace.traverse_edge(
-                _trace.encode_keyword(node_ids[frm]),
-                _trace.encode_keyword(node_ids[to]),
-                edge_kind="co_occurrence", weight=weight, hop=h,
-            )
-        )
 
-    hop_by_kw = {node_ids[idx]: h for idx, h in hop.items()}
+def _build_expansion(
+    seeds: Sequence[str],
+    kw_score: Dict[str, float],
+    hops_by_kw: Dict[str, int],
+    chunk_df: Dict[str, int],
+    edges_by_neighbor: Dict[str, List[dict]],
+    total_chunks_in_scope: int,
+) -> dict:
+    """Assemble the query-level ``expansion`` block (contract v2.1).
 
-    ranked = sorted(
+    Consolidates every per-keyword signal into one flat object per
+    keyword. ``seeds[i]`` and ``expanded_keywords[j]`` are the only two
+    places any keyword-level graph signal lives; callers do not have to
+    join across ``neighbor_edges`` / ``seed_chunk_df`` arrays anymore
+    (see ``docs/design/related-signals-v2.md``).
+
+    Sort orders (deterministic):
+    * ``seeds``: verbatim caller order (case-folded upstream).
+    * ``expanded_keywords``: ``(-ppr_score, kw)``.
+
+    Fields per entry:
+    * ``kw``           - the (case-folded) keyword string.
+    * ``chunk_df``     - distinct chunks the keyword hits in-scope.
+                         Missing when the keyword is absent from
+                         ``keyword_chunks`` under the scope (rare;
+                         means PPR reached it but no chunk carries it,
+                         which happens with ``llm_promoted`` edges).
+    * ``ppr_score``    - PPR score (expanded only).
+    * ``hops_from_seed`` - BFS distance from any seed (expanded only,
+                           omitted when unreachable via the filtered graph).
+    * ``edges_to_seeds`` - list of direct edges back to seed(s), each
+                           ``{seed, npmi, cooccur_count, source}``.
+                           Empty list when hop >= 2 (indirect neighbour)
+                           or when no seed edge survived the min_npmi
+                           filter.
+    """
+    seed_list = list(seeds)
+    seed_entries = []
+    for kw in seed_list:
+        entry: Dict[str, object] = {"kw": kw}
+        df = chunk_df.get(kw)
+        if df is not None:
+            entry["chunk_df"] = int(df)
+        seed_entries.append(entry)
+
+    seed_set = set(seed_list)
+    expanded = []
+    for kw, sc in sorted(
         ((kw, sc) for kw, sc in kw_score.items() if kw not in seed_set),
         key=lambda item: (-item[1], item[0]),
-    )
-    for kw, sc in ranked:
-        h = hop_by_kw.get(kw)
-        if h is None:
-            continue
-        actions.append(
-            _trace.score_node(
-                _trace.encode_keyword(kw), algo="ppr",
-                score=sc, hops_from_seed=h,
-            )
-        )
-
-    for r in sorted(results, key=lambda x: (-x.score, x.doc_path, x.directory or "")):
-        file_node = _trace.encode_file(r.doc_path)
-        contributing = sorted(
-            r.keywords,
-            key=lambda kw: (-kw_score.get(kw, 0.0), kw),
-        )
-        min_kw_hop = None
-        for kw in contributing:
-            kw_hop = hop_by_kw.get(kw)
-            edge_hop = (kw_hop + 1) if kw_hop is not None else 1
-            if min_kw_hop is None or edge_hop < min_kw_hop:
-                min_kw_hop = edge_hop
-            actions.append(
-                _trace.traverse_edge(
-                    _trace.encode_keyword(kw), file_node,
-                    edge_kind="keyword_doc",
-                    weight=kw_score.get(kw, 0.0), hop=edge_hop,
-                )
-            )
-        actions.append(
-            _trace.score_node(
-                file_node, algo="ppr",
-                score=r.score,
-                hops_from_seed=min_kw_hop if min_kw_hop is not None else 1,
-            )
-        )
-    return actions
+    ):
+        entry: Dict[str, object] = {
+            "kw": kw,
+            "ppr_score": round(float(sc), 6),
+        }
+        h = hops_by_kw.get(kw)
+        if h is not None:
+            entry["hops_from_seed"] = int(h)
+        df = chunk_df.get(kw)
+        if df is not None:
+            entry["chunk_df"] = int(df)
+        entry["edges_to_seeds"] = list(edges_by_neighbor.get(kw, []))
+        expanded.append(entry)
+    return {
+        "seeds": seed_entries,
+        "expanded_keywords": expanded,
+        "total_chunks_in_scope": int(total_chunks_in_scope),
+    }
 
 
 def _related_graph_impl(
@@ -519,26 +541,31 @@ def _related_graph_impl(
     *,
     cross_scope: bool = False,
     db_path: Optional[Path] = None,
-    collect_trace: bool = False,
-    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
     min_npmi: float = 0.0,
-) -> Tuple[List[Related], Dict[str, float], List["GraphAction"]]:
-    """Run PPR + doc collection and return ``(results, kw_score, trace)``.
+) -> Tuple[List[Related], Dict[str, float], dict]:
+    """Run PPR + doc collection and return ``(results, kw_score, expansion)``.
 
-    Chunk-level: seed → doc resolution goes through ``keyword_chunks``
-    instead of ``keyword_docs``; each result carries a ``graph_signals``
-    metadata block with segment-df and neighbour-edge details.
+    Chunk-level: seed -> doc resolution goes through ``keyword_chunks``
+    instead of ``keyword_docs``. Each result carries a
+    ``keyword_contributions`` per-doc breakdown; every keyword-level
+    graph signal (``chunk_df``, ``ppr_score``, ``hops_from_seed``,
+    ``edges_to_seeds``) is collected once into the query-level
+    ``expansion`` block, not per-doc (see
+    ``docs/design/related-signals-v2.md``).
 
     ``min_npmi`` (default 0.0 from the internal callers; public API
     resolves to :data:`DEFAULT_MIN_NPMI` via :func:`related`) filters
-    ``chunk_cooccur`` edges before PPR — see plan-2026-07-12-related-perf
+    ``chunk_cooccur`` edges before PPR - see plan-2026-07-12-related-perf
     §2.4.
     """
+    def _empty_expansion() -> dict:
+        return _build_expansion(seeds, {}, {}, {}, {}, 0)
+
     # In cross-scope mode the seeds must still originate from ``scope_key``.
     if cross_scope and scope_key is not None:
         seed_docs = _docs_for_keywords_chunks(conn, seeds, scope_key)
         if not seed_docs:
-            return [], {}, []
+            return [], {}, _empty_expansion()
         edge_scope_key: Optional[str] = None
         doc_scope_key: Optional[str] = None
         signals_scope_key: Optional[str] = None
@@ -566,70 +593,64 @@ def _related_graph_impl(
             seeds, indexed, top_k=max(limit * 3, limit), alpha=alpha, iters=iters
         )
 
-    # Segment-df / total-chunks / neighbour-edges are computed once per
-    # call. All results in a single call share the same ``graph_signals``
-    # block by reference (immutable dict) so the JSON payload stays compact.
-    seed_chunk_df = _seed_chunk_df(conn, seeds, signals_scope_key)
     total_chunks = _total_chunks_in_scope(conn, signals_scope_key)
-    if ranked_keywords:
-        neighbor_kws = [kw for kw, _ in ranked_keywords]
-    else:
-        neighbor_kws = []
-    neighbor_edges = _neighbor_edges_for_seeds(
-        conn, seeds, neighbor_kws, edge_scope_key, graph_signals_limit,
+    neighbor_kws = [kw for kw, _ in ranked_keywords]
+    # One batched chunk_df query covers seeds + neighbours in a single SQL.
+    all_kws_for_df = list({*seeds, *neighbor_kws})
+    chunk_df_map = _chunk_df_for_kws(conn, all_kws_for_df, signals_scope_key)
+    edges_by_nbr = _edges_by_neighbor(
+        conn, seeds, neighbor_kws, edge_scope_key,
     )
-    graph_signals = {
-        "seed_chunk_df": {kw: int(seed_chunk_df.get(kw, 0)) for kw in seeds},
-        "total_chunks_in_scope": int(total_chunks),
-        "neighbor_edges": neighbor_edges,
-    }
 
     if not ranked_keywords:
-        # No graph signal: fall back to documents that directly contain the
-        # seed keywords via ``keyword_chunks``.
+        # No graph signal: fall back to documents that directly contain
+        # the seed keywords via ``keyword_chunks``. Build per-doc
+        # keyword_contributions from the seed-only aggregate.
         direct = _docs_for_keywords_chunks(conn, seeds, doc_scope_key)
-        results = [
-            Related(
-                doc_path=doc,
-                score=score,
-                mode="graph",
-                reason="direct-seed",
-                keywords=sorted(kws),
-                directory=directory,
-                graph_signals=graph_signals,
+        seed_kw_score = {s: 1.0 for s in seeds}
+        seed_contributions = _keyword_contributions_by_doc(
+            conn, seed_kw_score, doc_scope_key,
+        )
+        results: List[Related] = []
+        for (directory, doc), (score, kws) in direct.items():
+            key = (directory, doc)
+            contribs = seed_contributions.get(key, [])
+            results.append(
+                Related(
+                    doc_path=doc,
+                    score=score,
+                    mode="graph",
+                    reason="direct-seed",
+                    keywords=sorted(kws),
+                    directory=directory,
+                    keyword_contributions=contribs,
+                )
             )
-            for (directory, doc), (score, kws) in direct.items()
-        ]
         results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
         capped = results[:limit]
-        trace = (
-            _build_graph_trace(indexed, seeds, {}, capped, fallback=True)
-            if collect_trace else []
+        expansion = _build_expansion(
+            seeds, {}, {}, chunk_df_map, edges_by_nbr, total_chunks,
         )
-        return capped, {}, trace
+        return capped, {}, expansion
 
     kw_score = {kw: score for kw, score in ranked_keywords}
     for seed in seeds:
         kw_score.setdefault(seed, max(kw_score.values()) if kw_score else 1.0)
 
-    doc_results = _aggregate_docs(
-        conn, kw_score, doc_scope_key, graph_signals=graph_signals,
-    )
+    doc_results = _aggregate_docs(conn, kw_score, doc_scope_key)
     doc_results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
     capped = doc_results[:limit]
-    trace = (
-        _build_graph_trace(indexed, seeds, kw_score, capped)
-        if collect_trace else []
+    hops_by_kw = _compute_hops(indexed, seeds, kw_score)
+    expansion = _build_expansion(
+        seeds, kw_score, hops_by_kw, chunk_df_map, edges_by_nbr, total_chunks,
     )
-    return capped, kw_score, trace
+    return capped, kw_score, expansion
 
 
 def _aggregate_docs(
     conn: sqlite3.Connection,
     kw_score: Dict[str, float],
     doc_scope_key: Optional[str],
-    *,
-    graph_signals: Optional[dict],
 ) -> List["Related"]:
     """Dispatch to id-native (P2.3, default) or legacy text-IN path.
 
@@ -637,20 +658,87 @@ def _aggregate_docs(
     (``k.kw IN (text)`` with the docs+keywords double-JOIN).
     """
     if os.environ.get("GRGA_DOC_AGG_LEGACY"):
-        return _aggregate_docs_text_legacy(
-            conn, kw_score, doc_scope_key, graph_signals=graph_signals,
+        return _aggregate_docs_text_legacy(conn, kw_score, doc_scope_key)
+    return _aggregate_docs_id_native(conn, kw_score, doc_scope_key)
+
+
+def _contribs_from_rowmap(
+    rowmap: Dict[Tuple[Optional[str], str], Dict[str, int]],
+) -> Dict[Tuple[Optional[str], str], List["KeywordContribution"]]:
+    """Turn ``{doc_key: {kw: occurrences}}`` into sorted contribution lists.
+
+    Sort key is ``(-occurrences, kw)`` so the strongest evidence surfaces
+    first inside each ``Related``. The ordering is stable across runs and
+    across the id-native / legacy aggregation paths, which is what the
+    equivalence contract in ``tests/test_related_doc_agg.py`` relies on.
+    """
+    out: Dict[Tuple[Optional[str], str], List["KeywordContribution"]] = {}
+    for key, kw_map in rowmap.items():
+        contribs = [
+            KeywordContribution(kw=kw, occurrences=int(occ))
+            for kw, occ in kw_map.items()
+        ]
+        contribs.sort(key=lambda c: (-c.occurrences, c.kw))
+        out[key] = contribs
+    return out
+
+
+def _keyword_contributions_by_doc(
+    conn: sqlite3.Connection,
+    kw_score: Dict[str, float],
+    doc_scope_key: Optional[str],
+) -> Dict[Tuple[Optional[str], str], List["KeywordContribution"]]:
+    """Return ``{(directory, doc_path): [KeywordContribution, ...]}``.
+
+    Used by the ``direct-seed`` fallback branch of :func:`_related_graph_impl`
+    where no PPR ranking is available (isolated seeds) — the main
+    aggregation paths already have the same rowmap in hand and build
+    contributions inline for zero extra SQL.
+    """
+    if not kw_score:
+        return {}
+    kw_texts = list(kw_score.keys())
+    ph = ",".join("?" for _ in kw_texts)
+    kw_id_to_text: Dict[int, str] = {
+        int(r["id"]): _fold(r["kw"])
+        for r in conn.execute(
+            f"SELECT id, kw FROM keywords WHERE kw IN ({ph})", kw_texts
         )
-    return _aggregate_docs_id_native(
-        conn, kw_score, doc_scope_key, graph_signals=graph_signals,
-    )
+    }
+    if not kw_id_to_text:
+        return {}
+    kw_ids = list(kw_id_to_text.keys())
+    ph_id = ",".join("?" for _ in kw_ids)
+    params: List = list(kw_ids)
+    where = f"kc.kw_id IN ({ph_id})"
+    if doc_scope_key is not None:
+        where += " AND dir.path = ?"
+        params.append(doc_scope_key)
+    rows = conn.execute(
+        f"SELECT kc.kw_id AS kw_id, "
+        f"       dir.path AS directory, d.doc_path AS doc_path, "
+        f"       SUM(kc.occurrence_count) AS total "
+        f"FROM keyword_chunks kc "
+        f"JOIN docs d ON d.id = kc.doc_id "
+        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"WHERE {where} "
+        f"GROUP BY dir.path, d.doc_path, kc.kw_id",
+        params,
+    ).fetchall()
+    rowmap: Dict[Tuple[Optional[str], str], Dict[str, int]] = {}
+    for row in rows:
+        kw = kw_id_to_text.get(int(row["kw_id"]))
+        if kw is None:
+            continue
+        key = (row["directory"], row["doc_path"])
+        rowmap.setdefault(key, {})[kw] = int(row["total"] or 0)
+    return _contribs_from_rowmap(rowmap)
 
 
 def _aggregate_docs_id_native(
     conn: sqlite3.Connection,
     kw_score: Dict[str, float],
     doc_scope_key: Optional[str],
-    *,
-    graph_signals: Optional[dict],
 ) -> List["Related"]:
     """P2.3 doc aggregation — aggregate on ``kw_id`` (integer PK).
 
@@ -662,8 +750,11 @@ def _aggregate_docs_id_native(
     ``docs/design/plan-2026-07-12-related-perf.md`` §2.2 and
     ``experiments/related_perf_2026_07_12/FINDINGS.md`` §F1.
 
-    The output is byte-identical to :func:`_aggregate_docs_text_legacy`
-    (verified in experiments as Jaccard=1.0 on top-20).
+    The output score is byte-identical to
+    :func:`_aggregate_docs_text_legacy` (verified in experiments as
+    Jaccard=1.0 on top-20). ``keyword_contributions`` is populated from
+    the same rowmap the aggregation walks — free per-doc evidence for
+    the caller (see ``docs/design/related-signals-v2.md``).
     """
     if not kw_score:
         return []
@@ -705,7 +796,7 @@ def _aggregate_docs_id_native(
     ).fetchall()
 
     doc_score: Dict[tuple, float] = {}
-    doc_keywords: Dict[tuple, set] = {}
+    doc_rowmap: Dict[tuple, Dict[str, int]] = {}
     for row in rows:
         kw = kw_id_to_text.get(int(row["kw_id"]))
         if kw is None:
@@ -713,20 +804,22 @@ def _aggregate_docs_id_native(
         weight = kw_score.get(kw, 0.0)
         if weight <= 0:
             continue
+        total = int(row["total"] or 0)
         key = (row["directory"], row["doc_path"])
-        contribution = weight * math.log1p(float(row["total"] or 0.0))
+        contribution = weight * math.log1p(float(total))
         doc_score[key] = doc_score.get(key, 0.0) + contribution
-        doc_keywords.setdefault(key, set()).add(kw)
+        doc_rowmap.setdefault(key, {})[kw] = total
 
+    contribs_by_doc = _contribs_from_rowmap(doc_rowmap)
     return [
         Related(
             doc_path=doc,
             score=score,
             mode="graph",
             reason="ppr",
-            keywords=sorted(doc_keywords.get((directory, doc), set())),
+            keywords=sorted(doc_rowmap[(directory, doc)].keys()),
             directory=directory,
-            graph_signals=graph_signals,
+            keyword_contributions=contribs_by_doc.get((directory, doc), []),
         )
         for (directory, doc), score in doc_score.items()
     ]
@@ -736,8 +829,6 @@ def _aggregate_docs_text_legacy(
     conn: sqlite3.Connection,
     kw_score: Dict[str, float],
     doc_scope_key: Optional[str],
-    *,
-    graph_signals: Optional[dict],
 ) -> List["Related"]:
     """Pre-P2.3 doc aggregation — ``k.kw IN (text)`` path.
 
@@ -766,26 +857,28 @@ def _aggregate_docs_text_legacy(
     ).fetchall()
 
     doc_score: Dict[tuple, float] = {}
-    doc_keywords: Dict[tuple, set] = {}
+    doc_rowmap: Dict[tuple, Dict[str, int]] = {}
     for row in rows:
         kw = _fold(row["keyword"])
         weight = kw_score.get(kw, 0.0)
         if weight <= 0:
             continue
+        total = int(row["total"] or 0)
         key = (row["directory"], row["doc_path"])
-        contribution = weight * math.log1p(float(row["total"] or 0.0))
+        contribution = weight * math.log1p(float(total))
         doc_score[key] = doc_score.get(key, 0.0) + contribution
-        doc_keywords.setdefault(key, set()).add(kw)
+        doc_rowmap.setdefault(key, {})[kw] = total
 
+    contribs_by_doc = _contribs_from_rowmap(doc_rowmap)
     return [
         Related(
             doc_path=doc,
             score=score,
             mode="graph",
             reason="ppr",
-            keywords=sorted(doc_keywords.get((directory, doc), set())),
+            keywords=sorted(doc_rowmap[(directory, doc)].keys()),
             directory=directory,
-            graph_signals=graph_signals,
+            keyword_contributions=contribs_by_doc.get((directory, doc), []),
         )
         for (directory, doc), score in doc_score.items()
     ]
@@ -1174,21 +1267,32 @@ def related_graph_with_preview(
     iters: int = DEFAULT_ITERS,
     cross_scope: bool = False,
     preview: bool = False,
-    collect_trace: bool = False,
-    graph_signals_limit: int = DEFAULT_GRAPH_SIGNALS_LIMIT,
     min_npmi: Optional[float] = None,
 ) -> dict:
     """``mode=graph`` variant returning results plus cross-scope observability.
 
     Returns ``{"results": List[Related], "crossed_scopes_preview": dict|None,
-    "graph_actions": List[GraphAction]}``.
+    "expansion": dict}``. The ``expansion`` block carries the query-level
+    keyword-expansion evidence (seeds + PPR-scored neighbours, each with
+    ``chunk_df`` / ``ppr_score`` / ``hops_from_seed`` / ``edges_to_seeds``)
+    that callers use - together with each result's ``keyword_contributions``
+    - to judge relevance and filter hub-word false positives. See
+    ``docs/design/related-signals-v2.md``.
 
     ``min_npmi`` follows the same semantics as :func:`related`: ``None``
     resolves to :data:`DEFAULT_MIN_NPMI` / ``GRGA_PPR_MIN_NPMI`` env.
     """
     seeds = [s for s in (_fold(k) for k in keywords) if s]
     if not seeds:
-        return {"results": [], "crossed_scopes_preview": None, "graph_actions": []}
+        return {
+            "results": [],
+            "crossed_scopes_preview": None,
+            "expansion": {
+                "seeds": [],
+                "expanded_keywords": [],
+                "total_chunks_in_scope": 0,
+            },
+        }
 
     from grga.deep_search import DEFAULT_DB_PATH
 
@@ -1198,11 +1302,9 @@ def related_graph_with_preview(
     conn = connect(target_db)
     try:
         ensure_schema(conn)
-        results, _, trace = _related_graph_impl(
+        results, _, expansion = _related_graph_impl(
             conn, seeds, limit, scope_key, alpha, iters,
             cross_scope=cross_scope, db_path=target_db,
-            collect_trace=collect_trace,
-            graph_signals_limit=graph_signals_limit,
             min_npmi=effective_min_npmi,
         )
         crossed_preview = None
@@ -1214,7 +1316,7 @@ def related_graph_with_preview(
         return {
             "results": results,
             "crossed_scopes_preview": crossed_preview,
-            "graph_actions": trace,
+            "expansion": expansion,
         }
     finally:
         conn.close()
