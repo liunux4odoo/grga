@@ -4,15 +4,16 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
-### BREAKING · related 信号契约 v2 / v2.1（docs/design/related-signals-v2.md）
+### BREAKING · related 信号契约 v2 / v2.1 / v2.2（docs/design/related-signals-v2.md）
 
-分两步落地：v2.0 撤 trace-signals v1（"图游走可视化"），v2.1 同日
-收敛冗余（把 `graph_signals` 折叠进顶层 `expansion`，去 `neighbor_edges`
-里 `a=seed` 的重复，每个关键字带 `chunk_df` 做 hub 识别）。动机：生产
-实测稀有种子经 PPR 扩展会拉入通用词命中的假阳性文档（`苍坤` seed 拉进
-《三体》），旧 `graph_actions` op log 无法帮 caller 识别；且 v2.0
-的 `graph_signals`/`neighbor_edges`/`ppr_score` 三处分别描述同一个关键
-字，caller 要 join 三个数组。
+同日三步落地：v2.0 撤 trace-signals v1（"图游走可视化"），v2.1 把
+`graph_signals` 折叠进顶层 `expansion`（去 `neighbor_edges` 里 `a=seed`
+重复），v2.2 进一步扁平化 `edges_to_seeds` 列表包装（单 seed 查询里
+"数组包一个字典包一个 seed 回显" 的三层嵌套 → 顶层内联 `npmi` /
+`cooccur_count`）。动机：生产实测稀有种子经 PPR 扩展会拉入通用词命中
+的假阳性文档（`苍坤` seed 拉进《三体》），旧 `graph_actions` op log
+无法帮 caller 识别；同时每一次 caller 反馈都指向"信号一处收，去嵌套
+去回显"。
 
 - **移除**：`trace_signals_version` + `graph_actions` 从
   `grga related --json` 与 `grga suggest --json` 撤除。
@@ -22,12 +23,19 @@ All notable changes to `grga` are recorded here.
 - **移除**：`src/grga/trace.py`、`schemas/trace-signals-v1.json`、
   `schemas/trace-viz-session-v1.json`，以及依赖 `graph_actions` 的两个内置
   skill 工件（`skills/grga-trace-viz/`、`skills/grga/workflows/trace-viewer/`）。
-- **新增**：`grga related --json --mode graph` 顶层 `expansion` 一体化承载：
+- **新增（v2.1）**：`grga related --json --mode graph` 顶层 `expansion` 一体化承载：
   * `seeds: List[{kw, chunk_df?}]` — 每个 seed 附加 in-scope chunk df。
   * `expanded_keywords: List[{kw, ppr_score, hops_from_seed?, chunk_df?,
-    edges_to_seeds: [{seed, npmi, cooccur_count, source}]}]` — 每个 PPR
-    邻居一处出现，直接边并入本条记录，无跨数组 join。
+    ...}]` — 每个 PPR 邻居一处出现，无跨数组 join。
   * `total_chunks_in_scope: int` — `chunk_df` 的分母。
+- **变更（v2.2）**：`expanded_keywords[i]` 里最强直接边扁平化，dropping
+  `edges_to_seeds` 列表包装：
+  * `npmi` / `cooccur_count`：内联在 entry 自身（两字段一起出现或一起
+    缺席）。存在条件：该邻居在 `keyword_pairs` 有直接 seed 边（与
+    `hops_from_seed` 解耦，允许"低 npmi 直接边被 PPR 绕开"的信号透过）。
+  * `source`：只在 != `"chunk_cooccur"` 时 emit（即 `llm_promoted`）。
+  * `via_seeds`：只在**多 seed 查询里 + 邻居有 >=2 条直接边**时出现，
+    按 npmi desc 列出被桥接的 seed 名。
 - **新增**：graph 模式每条 `results[]` 内嵌 `keyword_contributions`
   （`[{kw, occurrences}]`，按 `(-occurrences, kw)` 排序）。
 - **变更**：`related --mode dir|heading` 与 `suggest --json` 去 envelope，

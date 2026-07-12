@@ -17,7 +17,8 @@ returns a list of :class:`Related` records sorted by ``score`` desc.
 
 The ``graph`` mode additionally emits a query-level ``expansion`` block
 (``seeds[]`` and ``expanded_keywords[]``, each carrying ``chunk_df``,
-``ppr_score``, ``hops_from_seed``, ``edges_to_seeds``) plus a
+``ppr_score``, ``hops_from_seed``, and — for hop-1 neighbours — the
+strongest direct-edge ``npmi`` / ``cooccur_count`` inlined) plus a
 per-document ``keyword_contributions`` list. Together these let callers
 classify seeds (hub / domain / rare) and filter noisy expansions
 (e.g. rare-seed PPR pulling in generic hub words) without querying the
@@ -100,10 +101,11 @@ class Related:
     where per-keyword occurrence has no natural meaning.
 
     All query-level graph signals (``ppr_score`` / ``chunk_df`` /
-    ``hops_from_seed`` / ``edges_to_seeds`` / ``total_chunks_in_scope``)
-    now live once at the payload root under ``expansion``. The pre-v2.1
-    per-doc ``graph_signals`` block was removed as pure duplication (it
-    was a query-level constant shared by every ``Related`` in a call).
+    ``hops_from_seed`` / ``npmi`` / ``cooccur_count`` / ``source`` /
+    ``via_seeds`` / ``total_chunks_in_scope``) now live once at the
+    payload root under ``expansion``. The pre-v2.1 per-doc
+    ``graph_signals`` block was removed as pure duplication (it was a
+    query-level constant shared by every ``Related`` in a call).
     """
 
     doc_path: str
@@ -322,19 +324,15 @@ def _edges_by_neighbor(
 ) -> Dict[str, List[dict]]:
     """Return ``{neighbor_kw: [{seed, npmi, cooccur_count, source}, ...]}``.
 
-    Replaces the pre-v2.1 ``_neighbor_edges_for_seeds`` which flattened
-    every seed<->neighbour pair into ``[{a, b, npmi, ...}]`` where ``a``
-    was always the seed (pure redundancy) and ``b`` the neighbour. The
-    new shape lets each expanded keyword carry its own edge set in the
-    ``expansion`` block, keyed by neighbour, so callers look up "how did
-    this word attach to my query" in one place instead of joining two
-    arrays.
+    Internal helper. Edge lists per neighbour are sorted deterministically
+    by ``(npmi desc NULLS last, cooccur_count desc, seed asc)`` so that
+    :func:`_build_expansion` can trust ``edges[0]`` as "the strongest
+    direct edge" and inline its ``npmi`` / ``cooccur_count`` onto each
+    expanded keyword (v2.2 flattening).
 
-    Edge lists per neighbour are sorted deterministically by
-    ``(npmi desc NULLS last, cooccur_count desc, seed asc)``. Neighbours
-    with no direct seed edge (hop >= 2 in the PPR expansion) simply do
-    not appear in the returned dict; callers treat a missing key as an
-    empty edge list.
+    Neighbours with no direct seed edge (hop >= 2 in the PPR expansion,
+    or all edges filtered by ``min_npmi``) simply do not appear in the
+    returned dict; callers treat a missing key as an empty edge list.
     """
     if not seeds or not neighbor_keywords:
         return {}
@@ -469,13 +467,20 @@ def _build_expansion(
     edges_by_neighbor: Dict[str, List[dict]],
     total_chunks_in_scope: int,
 ) -> dict:
-    """Assemble the query-level ``expansion`` block (contract v2.1).
+    """Assemble the query-level ``expansion`` block (contract v2.2).
 
     Consolidates every per-keyword signal into one flat object per
     keyword. ``seeds[i]`` and ``expanded_keywords[j]`` are the only two
-    places any keyword-level graph signal lives; callers do not have to
-    join across ``neighbor_edges`` / ``seed_chunk_df`` arrays anymore
-    (see ``docs/design/related-signals-v2.md``).
+    places any keyword-level graph signal lives (see
+    ``docs/design/related-signals-v2.md``).
+
+    v2.2 flattens the pre-existing ``edges_to_seeds`` list. For a hop-1
+    neighbour the *strongest* direct edge (npmi desc) is inlined as
+    ``npmi`` / ``cooccur_count`` on the entry itself, dropping the
+    single-element list wrapper and the redundant ``seed`` echo that
+    dominated single-seed queries. ``source`` and ``via_seeds`` follow
+    zero-value / single-value omission rules so the common case stays
+    terse.
 
     Sort orders (deterministic):
     * ``seeds``: verbatim caller order (case-folded upstream).
@@ -483,21 +488,36 @@ def _build_expansion(
 
     Fields per entry:
     * ``kw``           - the (case-folded) keyword string.
-    * ``chunk_df``     - distinct chunks the keyword hits in-scope.
-                         Missing when the keyword is absent from
-                         ``keyword_chunks`` under the scope (rare;
-                         means PPR reached it but no chunk carries it,
-                         which happens with ``llm_promoted`` edges).
     * ``ppr_score``    - PPR score (expanded only).
     * ``hops_from_seed`` - BFS distance from any seed (expanded only,
                            omitted when unreachable via the filtered graph).
-    * ``edges_to_seeds`` - list of direct edges back to seed(s), each
-                           ``{seed, npmi, cooccur_count, source}``.
-                           Empty list when hop >= 2 (indirect neighbour)
-                           or when no seed edge survived the min_npmi
-                           filter.
+    * ``chunk_df``     - distinct chunks the keyword hits in-scope.
+                         Omitted when the keyword is absent from
+                         ``keyword_chunks`` under the scope (rare; PPR
+                         reached it via an ``llm_promoted`` edge that
+                         carries no chunk).
+    * ``npmi`` / ``cooccur_count`` - the strongest direct seed edge.
+                         Present whenever a direct edge exists in
+                         ``keyword_pairs`` (which ignores ``min_npmi``,
+                         see trace-signals archive §7.1), independent of
+                         ``hops_from_seed``. Absence means "no direct
+                         edge at all"; presence with ``hops_from_seed > 1``
+                         means "direct edge exists but PPR routed around
+                         it because ``min_npmi`` filtered it out — likely
+                         weak / noisy". ``npmi`` may be ``null`` on
+                         ``llm_promoted`` edges.
+    * ``source``       - edge provenance, **only emitted when it is not
+                         the default ``"chunk_cooccur"``** (i.e. only for
+                         ``llm_promoted``); absence means chunk_cooccur.
+    * ``via_seeds``    - **only in multi-seed queries** and only when the
+                         neighbour has direct edges to more than one seed;
+                         lists those seed strings (npmi desc). Single-seed
+                         queries omit it (the seed is
+                         ``seeds[0].kw``). A single-edge neighbour in a
+                         multi-seed query omits it too (unambiguous).
     """
     seed_list = list(seeds)
+    multi_seed = len(set(seed_list)) > 1
     seed_entries = []
     for kw in seed_list:
         entry: Dict[str, object] = {"kw": kw}
@@ -522,7 +542,23 @@ def _build_expansion(
         df = chunk_df.get(kw)
         if df is not None:
             entry["chunk_df"] = int(df)
-        entry["edges_to_seeds"] = list(edges_by_neighbor.get(kw, []))
+
+        # Flatten the strongest direct seed edge onto the entry. Edges are
+        # already sorted (npmi desc NULLS last, cooccur desc, seed asc) by
+        # :func:`_edges_by_neighbor`, so the first one is the strongest.
+        edges = edges_by_neighbor.get(kw, [])
+        if edges:
+            best = edges[0]
+            entry["npmi"] = best["npmi"]
+            entry["cooccur_count"] = best["cooccur_count"]
+            # Zero-value omission: only emit source when it deviates from
+            # the overwhelmingly common ``chunk_cooccur``.
+            if best["source"] != "chunk_cooccur":
+                entry["source"] = best["source"]
+            # Multi-seed bridge signal: only when >1 seed is directly
+            # linked (single-seed queries and single-edge neighbours omit).
+            if multi_seed and len(edges) > 1:
+                entry["via_seeds"] = [e["seed"] for e in edges]
         expanded.append(entry)
     return {
         "seeds": seed_entries,
@@ -548,9 +584,9 @@ def _related_graph_impl(
     Chunk-level: seed -> doc resolution goes through ``keyword_chunks``
     instead of ``keyword_docs``. Each result carries a
     ``keyword_contributions`` per-doc breakdown; every keyword-level
-    graph signal (``chunk_df``, ``ppr_score``, ``hops_from_seed``,
-    ``edges_to_seeds``) is collected once into the query-level
-    ``expansion`` block, not per-doc (see
+    graph signal (``chunk_df``, ``ppr_score``, ``hops_from_seed``, and
+    the strongest direct-edge ``npmi`` / ``cooccur_count``) is collected
+    once into the query-level ``expansion`` block, not per-doc (see
     ``docs/design/related-signals-v2.md``).
 
     ``min_npmi`` (default 0.0 from the internal callers; public API
@@ -1273,10 +1309,12 @@ def related_graph_with_preview(
 
     Returns ``{"results": List[Related], "crossed_scopes_preview": dict|None,
     "expansion": dict}``. The ``expansion`` block carries the query-level
-    keyword-expansion evidence (seeds + PPR-scored neighbours, each with
-    ``chunk_df`` / ``ppr_score`` / ``hops_from_seed`` / ``edges_to_seeds``)
-    that callers use - together with each result's ``keyword_contributions``
-    - to judge relevance and filter hub-word false positives. See
+    keyword-expansion evidence (seeds + PPR-scored neighbours; hop-1
+    neighbours inline their strongest direct-edge ``npmi`` /
+    ``cooccur_count``, and ``source`` / ``via_seeds`` follow zero-value
+    omission rules for the common single-seed / chunk_cooccur case) that
+    callers use — together with each result's ``keyword_contributions``
+    — to judge relevance and filter hub-word false positives. See
     ``docs/design/related-signals-v2.md``.
 
     ``min_npmi`` follows the same semantics as :func:`related`: ``None``

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grga.dev/schemas/related-signals-v2.json",
   "title": "grga related signals v2",
-  "description": "Contract for the expansion + keyword_contributions fields emitted by `grga related --json --mode graph`. See docs/design/related-signals-v2.md. v2.1 (2026-07-12) folds all keyword-level graph signals (chunk_df, ppr_score, hops_from_seed, edges_to_seeds) into the query-level expansion block and drops the per-doc graph_signals block. Replaces the archived trace-signals-v1.json (2026-07-09).",
+  "description": "Contract for the expansion + keyword_contributions fields emitted by `grga related --json --mode graph`. See docs/design/related-signals-v2.md. v2.2 (2026-07-12): flattens `edges_to_seeds` — hop-1 neighbours inline `npmi` / `cooccur_count`, `source` only when not `chunk_cooccur`, `via_seeds` only in multi-seed queries with multi-edge neighbours. Replaces the archived trace-signals-v1.json (2026-07-09).",
   "type": "object",
   "required": [
     "results",
@@ -79,8 +79,7 @@
       "type": "object",
       "required": [
         "kw",
-        "ppr_score",
-        "edges_to_seeds"
+        "ppr_score"
       ],
       "additionalProperties": false,
       "properties": {
@@ -100,29 +99,8 @@
           "type": "integer",
           "minimum": 0
         },
-        "edges_to_seeds": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/seed_edge"
-          }
-        }
-      }
-    },
-    "seed_edge": {
-      "type": "object",
-      "required": [
-        "seed",
-        "npmi",
-        "cooccur_count",
-        "source"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "seed": {
-          "type": "string",
-          "minLength": 1
-        },
         "npmi": {
+          "description": "Strongest direct edge npmi (hop-1 only). Null on llm_promoted edges.",
           "oneOf": [
             {
               "type": "number"
@@ -133,11 +111,22 @@
           ]
         },
         "cooccur_count": {
+          "description": "Strongest direct edge cooccur count (hop-1 only).",
           "type": "integer",
           "minimum": 0
         },
         "source": {
+          "description": "Edge source; only emitted when != 'chunk_cooccur' (i.e. llm_promoted).",
           "type": "string"
+        },
+        "via_seeds": {
+          "description": "Present only in multi-seed queries when the neighbour has direct edges to >1 seed. Ordered npmi desc.",
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },

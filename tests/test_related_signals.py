@@ -91,9 +91,12 @@ def test_related_graph_json_has_expansion_block(graph_scope, schema):
     assert "trace_signals_version" not in payload
     assert "graph_actions" not in payload
 
-    # Query-level expansion block: seeds carry per-kw chunk_df, expanded
-    # entries fold ppr_score + hops + chunk_df + edges_to_seeds into a
-    # single object per keyword (contract v2.1).
+    # Query-level expansion block: seeds carry per-kw chunk_df; expanded
+    # entries fold ppr_score + hops + chunk_df + (for hop-1) the strongest
+    # direct-edge npmi/cooccur_count into a single flat object per
+    # keyword (contract v2.2 — the pre-v2.2 ``edges_to_seeds`` list
+    # wrapper was dropped as pure nesting overhead in the single-seed
+    # common case).
     exp = payload["expansion"]
     assert [s["kw"] for s in exp["seeds"]] == ["brew"]
     seed_kws = {s["kw"] for s in exp["seeds"]}
@@ -109,25 +112,30 @@ def test_related_graph_json_has_expansion_block(graph_scope, schema):
     if exp["expanded_keywords"]:
         scores = [kw["ppr_score"] for kw in exp["expanded_keywords"]]
         assert scores == sorted(scores, reverse=True)
+        # Single-seed query: no via_seeds / no source field on any entry.
         for kw in exp["expanded_keywords"]:
             assert kw["kw"] not in seed_kws, "seeds must not repeat in expanded"
             assert isinstance(kw["ppr_score"], (int, float))
-            assert "edges_to_seeds" in kw, (
-                "every expanded keyword must carry edges_to_seeds (may be empty)"
+            assert "edges_to_seeds" not in kw, (
+                "v2.2: edges_to_seeds list wrapper is gone"
             )
-            assert isinstance(kw["edges_to_seeds"], list)
-            for edge in kw["edges_to_seeds"]:
-                assert edge["seed"] in seed_kws, (
-                    f"edge.seed {edge['seed']!r} not in query seeds {seed_kws}"
-                )
-                # npmi may be null (llm_promoted edges); cooccur_count is int
-                assert isinstance(edge["cooccur_count"], int)
-                assert edge["cooccur_count"] >= 0
-                assert isinstance(edge["source"], str)
+            assert "via_seeds" not in kw, (
+                "v2.2: via_seeds is multi-seed-only"
+            )
             if "hops_from_seed" in kw:
                 assert kw["hops_from_seed"] >= 0
             if "chunk_df" in kw:
                 assert kw["chunk_df"] >= 0
+            # Inlined edge fields present iff a direct seed edge exists
+            # in ``keyword_pairs`` (ignores min_npmi, so a hop >= 2
+            # neighbour can still expose its below-threshold direct edge).
+            has_edge = "npmi" in kw or "cooccur_count" in kw
+            if has_edge:
+                assert "npmi" in kw and "cooccur_count" in kw, (
+                    "npmi and cooccur_count must appear together"
+                )
+                assert isinstance(kw["cooccur_count"], int)
+                assert kw["cooccur_count"] >= 0
 
 
 def test_related_graph_isolated_seed_emits_empty_expansion(graph_scope, schema):

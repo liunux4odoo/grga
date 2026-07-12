@@ -175,18 +175,18 @@ def test_neighbor_edges_exclude_seed_self(tmp_path):
     )
     db = tmp_path / "graph.db"
     _index(scope, db)
-    # v2.1: expanded_keywords excludes seeds by construction (see
-    # _build_expansion); the neighbour side of every edges_to_seeds entry
-    # is the parent expanded_keyword.kw itself, so this asserts the
-    # equivalent self-loop guard on the new structure.
+    # v2.2: expanded_keywords excludes seeds by construction (see
+    # _build_expansion). The self-loop guard is now: no expanded entry\'s
+    # kw is itself a seed, and (for the multi-seed case) any via_seeds
+    # entries must be actual seeds, never the neighbour\'s own kw.
     payload = related_graph_with_preview(["seed"], db_path=db, directory=scope, limit=20)
     exp = payload["expansion"]
     seed_kws = {s["kw"] for s in exp["seeds"]}
     for entry in exp["expanded_keywords"]:
         assert entry["kw"] not in seed_kws, entry
-        for edge in entry["edges_to_seeds"]:
-            assert edge["seed"] in seed_kws, edge
-            assert edge["seed"] != entry["kw"], edge
+        for via in entry.get("via_seeds", []):
+            assert via in seed_kws, via
+            assert via != entry["kw"], via
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +384,13 @@ def test_llm_promote_flow_marks_source_correctly(tmp_path):
 
 
 def test_expansion_block_shape(tmp_path):
-    """v2.1: query-level ``expansion`` replaces per-doc ``graph_signals``.
+    """v2.2: query-level ``expansion`` replaces per-doc ``graph_signals``.
 
     Each expanded keyword folds ``ppr_score`` / ``chunk_df`` /
-    ``hops_from_seed`` / ``edges_to_seeds`` into one entry; the
-    per-``Related`` ``graph_signals`` block has been removed.
+    ``hops_from_seed`` into one entry; hop-1 neighbours additionally
+    inline the strongest direct edge as ``npmi`` / ``cooccur_count`` on
+    the entry itself (the pre-v2.2 ``edges_to_seeds`` list wrapper was
+    dropped as pure nesting overhead).
     """
     scope = tmp_path / "corpus"
     scope.mkdir()
@@ -405,11 +407,17 @@ def test_expansion_block_shape(tmp_path):
     exp = payload["expansion"]
     assert "seeds" in exp and "expanded_keywords" in exp and "total_chunks_in_scope" in exp
     for kw in exp["expanded_keywords"]:
-        assert "kw" in kw and "ppr_score" in kw and "edges_to_seeds" in kw
-        for edge in kw["edges_to_seeds"]:
-            assert "seed" in edge
-            assert "npmi" in edge and "cooccur_count" in edge
-            assert "source" in edge
+        assert "kw" in kw and "ppr_score" in kw
+        assert "edges_to_seeds" not in kw, "v2.2: dropped list wrapper"
+        # Inlined edge fields present iff a direct edge exists in
+        # keyword_pairs (independent of hops_from_seed — the pairs
+        # query ignores min_npmi by design). npmi/cooccur_count always
+        # appear together.
+        if "npmi" in kw or "cooccur_count" in kw:
+            assert "npmi" in kw and "cooccur_count" in kw, (
+                f"npmi and cooccur_count must appear together: {kw}"
+            )
+            assert isinstance(kw["cooccur_count"], int)
 
 
 def test_expanded_keywords_bounded_by_ppr_top_k(tmp_path):

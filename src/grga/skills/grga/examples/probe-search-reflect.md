@@ -76,7 +76,7 @@ grga related "鉴权 token session" --mode graph -d "$DIR" --db "$DB" --json > /
 
 | Tier | Read from JSON | Decide |
 |---|---|---|
-| T2-bookend (open) | `results[]`, `expansion.expanded_keywords[].edges_to_seeds[].npmi`, `expansion.seeds[].chunk_df` | harvest low-DF neighbours into the working seed set before T0 |
+| T2-bookend (open) | `results[]`, `expansion.expanded_keywords[].npmi`, `expansion.seeds[].chunk_df` | harvest low-DF neighbours into the working seed set before T0 |
 | T0 probe | `total_lines`, `file_count`, `per_file`, `sample.est_total_bytes` | 0 → loosen / reformulate; huge → tighten; band → proceed |
 | T1 search | `matches` length, `truncated`, `heading_path`, `nearby_hits` | empty → T0/T3; truncated → cap/tighten; thin → T2-escalate/T3; good → toward answer |
 | T2-escalate expand/related | returned `text` / neighbour `doc_path`s | sufficient → toward answer; corpus lacks material → T3 |

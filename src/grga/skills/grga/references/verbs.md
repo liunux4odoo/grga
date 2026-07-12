@@ -95,9 +95,16 @@ related(keywords: list[str], *, mode="graph"|"dir"|"heading",
                              top_bridge_keywords} | null,
    expansion: {
      seeds: [{kw, chunk_df?}],
-     expanded_keywords: [{kw, ppr_score, hops_from_seed?, chunk_df?,
-                          edges_to_seeds: [{seed, npmi, cooccur_count,
-                                             source}]}],
+     expanded_keywords: [
+       {kw, ppr_score,
+        hops_from_seed?, chunk_df?,
+        # inlined strongest direct seed edge (hop-1 typically):
+        npmi?, cooccur_count?,
+        # omitted when equal to default 'chunk_cooccur':
+        source?,
+        # multi-seed queries only, when neighbour bridges >=2 seeds:
+        via_seeds?}
+     ],
      total_chunks_in_scope}}
 ```
 
@@ -107,7 +114,7 @@ relative paths collide (e.g. two `README.md`) remain distinct.
 
 Modes:
 
-- `graph` — Personalized PageRank over the segment co-occurrence graph (`keyword_pairs`, `source='chunk_cooccur'`), then materialised to documents through `keyword_chunks`. Best for "conceptually related" navigation. Every `--json` result carries a `keyword_contributions` array of `{kw, occurrences}` (per-doc per-keyword hit counts, sorted `(-occurrences, kw)`). All query-level graph signals live once at the payload root under `expansion`: each seed carries `chunk_df`; each expanded keyword carries `ppr_score`, `hops_from_seed`, `chunk_df`, and `edges_to_seeds: [{seed, npmi, cooccur_count, source}]`. `total_chunks_in_scope` puts `chunk_df` into context. Together these let a caller filter hub-word false positives (e.g. drop expansions with `chunk_df` above a threshold) without querying the DB — see `docs/design/related-signals-v2.md`. Default is scope-isolated; add `--cross-scope` to reach other corpora, and read `crossed_scopes_preview` first (see `references/storage-model.md`).
+- `graph` — Personalized PageRank over the segment co-occurrence graph (`keyword_pairs`, `source='chunk_cooccur'`), then materialised to documents through `keyword_chunks`. Best for "conceptually related" navigation. Every `--json` result carries a `keyword_contributions` array of `{kw, occurrences}` (per-doc per-keyword hit counts, sorted `(-occurrences, kw)`). All query-level graph signals live once at the payload root under `expansion`: each seed carries `chunk_df`; each expanded keyword carries `ppr_score`, `hops_from_seed`, `chunk_df`, and — when a direct seed edge exists in `keyword_pairs` — the strongest edge's `npmi` / `cooccur_count` inlined onto the entry itself. `source` is only emitted when != `chunk_cooccur` (i.e. `llm_promoted`), and `via_seeds` only appears in multi-seed queries when a neighbour has direct edges to more than one seed. `total_chunks_in_scope` puts `chunk_df` into context. Together these let a caller filter hub-word false positives (e.g. drop expansions with `chunk_df` above a threshold, or with `npmi < 0.2`) without querying the DB — see `docs/design/related-signals-v2.md`. Default is scope-isolated; add `--cross-scope` to reach other corpora, and read `crossed_scopes_preview` first (see `references/storage-model.md`).
 - `dir`   — documents that live in the **same directory** as documents containing the seed keywords. Best for local repository navigation. Cross-scope has no meaning here (directory proximity is intrinsically scope-local).
 - `heading` — documents that share a full or leaf **Markdown heading path** with a seed-carrying document. Cross-scope by default (heading paths are structural filters that resist same-name-different-meaning noise). Add `--same-scope` to keep matches inside `-d`.
 

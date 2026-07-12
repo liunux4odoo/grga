@@ -181,12 +181,15 @@ even when results span multiple scopes.
 
 `--mode graph` results additionally carry per-doc per-keyword occurrence
 evidence (`keyword_contributions`), and the envelope carries a query-level
-`expansion` block folding every keyword-level graph signal (`chunk_df`,
-`ppr_score`, `hops_from_seed`, `edges_to_seeds`) into one entry per
-keyword. Together they let callers filter hub-word false positives
-without querying the DB — see `docs/design/related-signals-v2.md` for the
-full contract and rationale. (The pre-2026-07-12 per-doc `graph_signals`
-block and the `--graph-signals-limit` flag were removed as duplication.)
+`expansion` block folding every keyword-level graph signal (`ppr_score`,
+`hops_from_seed`, `chunk_df`, and — for hop-1 neighbours with a surviving
+direct edge — the strongest edge's `npmi` / `cooccur_count`) directly
+onto each entry. Together they let callers filter hub-word false
+positives without querying the DB — see
+`docs/design/related-signals-v2.md` for the full contract and rationale.
+(The pre-2026-07-12 per-doc `graph_signals` block, the
+`--graph-signals-limit` flag, and the transient v2.1 `edges_to_seeds`
+list wrapper were all removed as pure duplication / nesting overhead.)
 
 ```jsonc
 // --mode dir | --mode heading  (envelope)
@@ -232,19 +235,25 @@ block and the `--graph-signals-limit` flag were removed as duplication.)
         "ppr_score": 0.0421,
         "hops_from_seed": 1,                 // omitted if unreachable
         "chunk_df": 340,                     // hub-word signal
-        "edges_to_seeds": [                  // direct edges back to seed(s)
-          {"seed": "brew", "npmi": 0.42,
-           "cooccur_count": 8, "source": "chunk_cooccur"}
-        ]
+        "npmi": 0.42,                        // strongest direct seed edge
+        "cooccur_count": 8                   // (both together or neither)
+        // "source"    — omitted; defaults to "chunk_cooccur"
+        // "via_seeds" — omitted; single-seed query
       },
       {
         "kw": "pandoc",
         "ppr_score": 0.0189,
         "hops_from_seed": 2,
-        "chunk_df": 55,
-        "edges_to_seeds": []                 // empty when hop >= 2
+        "chunk_df": 55
+        // no direct seed edge in keyword_pairs → no npmi / cooccur_count
       }
       // sorted by (-ppr_score, kw)
+      //
+      // Multi-seed queries: a neighbour with direct edges to >1 seed
+      // additionally carries e.g. "via_seeds": ["ripgrep", "brew"]
+      // (npmi desc). Single-edge neighbours in multi-seed queries omit
+      // via_seeds (unambiguous). "source" only appears when it deviates
+      // from "chunk_cooccur" (i.e. only for llm_promoted edges).
     ],
     "total_chunks_in_scope": 100000          // context for chunk_df
   }

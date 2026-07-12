@@ -1,29 +1,36 @@
 # related 信号契约 v2
 
-> **版本**：v2.1（2026-07-12 · 同日 refactor）
+> **版本**：v2.2（2026-07-12 · 同日第二次 refactor）
 > **状态**：已实现（`src/grga/related.py` + `related --json --mode graph`
 > 的 `expansion` 顶层块 / 每条 `results[]` 内嵌 `keyword_contributions`）
 > **替代**：`docs/design/deprecated/trace-signals.md`（v0.2, 2026-07-09）
 > **前置**：`docs/design/v2-design.md` §4.2 / §7.3；AGENTS.md §信号暴露原则
 >
-> **v2.1 相对 v2.0 变化**：把 `Related.graph_signals` 整块并入顶层
-> `expansion`，seeds 与 expanded_keywords 各自携带 `chunk_df`；
-> `neighbor_edges` 数组（每条冗余带 `a=seed`）折叠为
-> `expanded_keywords[].edges_to_seeds`；删除 `--graph-signals-limit` CLI
-> 参数。见 §2.6 变更说明。
+> **变更史**（未发版，同日三次收敛）：
+> * **v2.0**：撤 trace-signals v1（`graph_actions` op log）。
+> * **v2.1**：把 `Related.graph_signals` 整块并入顶层 `expansion`，
+>   seeds/expanded_keywords 各带 `chunk_df`；`neighbor_edges` 数组
+>   （每条冗余带 `a=seed`）折叠为 `expanded_keywords[].edges_to_seeds`；
+>   删除 `--graph-signals-limit` CLI 参数。
+> * **v2.2**：把 `edges_to_seeds` 列表拆封——hop-1 邻居的**最强直接边**
+>   的 `npmi` / `cooccur_count` 直接内联到 `expanded_keywords[]` 条目，
+>   `source` 只在 ≠ `chunk_cooccur` 时出现（零值省略），`via_seeds`
+>   只在多 seed 查询中的多边邻居里出现。见 §2.7。
 
 ---
 
 ## 0. TL;DR
 
-- **移除**：`trace_signals_version` + `graph_actions` 顶层字段，从
-  `related --json` 与 `suggest --json` 全部撤除。
-- **移除（v2.1）**：`Related.graph_signals` 块（含 `seed_chunk_df` /
-  `neighbor_edges`）与 `--graph-signals-limit` CLI 参数。
-- **新增**：`related --json --mode graph` 顶层 `expansion` 一体化承载
-  所有关键字级图信号（seed/expanded 各带 `chunk_df`；expanded 增
-  `edges_to_seeds`；顶层带 `total_chunks_in_scope`）+ 每条 `results[]`
-  内嵌 `keyword_contributions`（文档级 per-kw 命中）。
+- **v2.0 移除**：`trace_signals_version` + `graph_actions` 顶层字段。
+- **v2.1 移除**：`Related.graph_signals` 块与 `--graph-signals-limit` CLI 参数。
+- **v2.2 移除**：`edges_to_seeds` 列表包装（内联到 entry 自身）。
+- **v2.2 新增**：`expanded_keywords[i]` 直接携带最强边的 `npmi` /
+  `cooccur_count`；`source` 与 `via_seeds` 走零值省略策略。
+- **一处收信号**：seed 的 `chunk_df` 在 `expansion.seeds[i]`；每个 PPR
+  邻居的所有信号（`ppr_score`, `hops_from_seed`, `chunk_df`, `npmi`,
+  `cooccur_count`, `source`, `via_seeds`）扁平在 `expansion.expanded_keywords[i]`。
+- **文档级证据**：每条 `results[]` 内嵌 `keyword_contributions`
+  （文档级 per-kw 命中）。
 - **不动**：hot-path 动词（`probe` / `search` / `expand` /
   `deep-search`）的 `--json` 输出。
 - **caller 收益**：拿到返回体后 ~5 行 Python 就能过滤"仅由 PPR 扩展
@@ -55,56 +62,79 @@ graph --json` 返回结果包含《三体》，`score = 0.03931`，
 
 ### 2.1 `related --json --mode graph`（envelope）
 
+**单 seed 查询**（大部分调用长这样）：
+
 ```jsonc
 {
   "results": [ /* Related[]，见 §2.2 */ ],
-  "crossed_scopes_preview": null,  // 与既有 --preview 契约一致
+  "crossed_scopes_preview": null,
   "expansion": {
     "seeds": [
-      { "kw": "苍坤", "chunk_df": 3 }               // seed 也带 df
+      { "kw": "苍坤", "chunk_df": 3 }
     ],
     "expanded_keywords": [
       {
         "kw": "上古",
         "ppr_score": 0.00234,
         "hops_from_seed": 1,
-        "chunk_df": 45312,                           // hub 词识别的核心信号
-        "edges_to_seeds": [
-          { "seed": "苍坤", "npmi": 0.42,
-            "cooccur_count": 3, "source": "chunk_cooccur" }
-        ]
+        "chunk_df": 45312,
+        "npmi": 0.42,                                 // 内联最强直接边
+        "cooccur_count": 3
+        // source 省略：默认 "chunk_cooccur"
+        // via_seeds 省略：单 seed 查询不需要
       },
       {
         "kw": "方法",
         "ppr_score": 0.001894,
         "hops_from_seed": 2,
-        "chunk_df": 128940,
-        "edges_to_seeds": []                         // hop≥2 无直接 seed 边
+        "chunk_df": 128940
+        // npmi / cooccur_count 省略：与该 seed 无直接 keyword_pairs 边
       }
-      /* PPR 参与打分的所有非-seed 关键字，按 ppr_score desc, kw asc 排序 */
     ],
-    "total_chunks_in_scope": 100000                  // chunk_df 的分母
+    "total_chunks_in_scope": 100000
   }
 }
 ```
 
+**多 seed 查询**（例：`[brew, ripgrep]`），只在**同一邻居桥接多个 seed**
+时才出现 `via_seeds`：
+
+```jsonc
+{
+  "kw": "pandoc",
+  "ppr_score": 0.166,
+  "hops_from_seed": 1,
+  "chunk_df": 2,
+  "npmi": 0.999,                                     // 最强边 npmi
+  "cooccur_count": 2,
+  "via_seeds": ["ripgrep", "brew"]                   // 按 npmi desc 排序
+}
+```
+
 **`expansion` 字段规则**：
-- `seeds[]`：`{kw, chunk_df?}` 数组，`kw` 按 caller 传入顺序保留（
-  case-folded）。`chunk_df` 是该 seed 在 scope 内命中的 chunk 数；当
-  seed 不在 `keyword_chunks` 里（罕见：拼错、未 index）时字段缺席。
-- `expanded_keywords[]`：所有参与本次 PPR 打分的**非-seed** 关键字，含
-  低分节点。排序 `(-ppr_score, kw)`；每项固定字段：
-  * `kw` / `ppr_score` / `edges_to_seeds`（必有，后者可为空数组）。
-  * `hops_from_seed`（可选）：BFS 距离；缺失表示不与任何 seed 连通。
-  * `chunk_df`（可选）：同 seeds，缺席条件相同。
-- `edges_to_seeds[]`：`{seed, npmi, cooccur_count, source}`。只暴露
-  **直接边**——多跳路径已经融进 `ppr_score`，再暴露会退回旧 trace 老路。
-  `npmi` 可为 `null`（`llm_promoted` 边通常无 npmi）；`cooccur_count`
-  是整数。空数组表示"这个词是 hop ≥ 2 邻居，或与所有 seed 只经 npmi
-  过滤后被剪掉的边相连"。
-- `total_chunks_in_scope`：scope 内 chunk 总数，作为 `chunk_df` 的分母。
-- 空邻居时：`expanded_keywords = []`，`seeds` 与 `total_chunks_in_scope`
-  仍在。
+- `seeds[]`：`{kw, chunk_df?}` 数组，`kw` 按 caller 传入顺序保留
+  （case-folded）。`chunk_df` 缺席条件：seed 不在 `keyword_chunks`
+  （拼错或未 index）。
+- `expanded_keywords[]`：所有参与本次 PPR 打分的**非-seed** 关键字，
+  排序 `(-ppr_score, kw)`。每项字段：
+  * **必有**：`kw`, `ppr_score`。
+  * **hops_from_seed**（可选）：BFS 距离；缺失表示不与任何 seed 连通。
+  * **chunk_df**（可选）：同 seeds 规则。
+  * **npmi + cooccur_count**（一起出现或一起缺席）：**最强**的直接
+    seed 边（npmi desc, cooccur desc, seed asc 排序取第一条）。存在
+    条件：`keyword_pairs` 表里该 neighbour 与至少一个 seed 有直接边。
+    注意 `_edges_by_neighbor` 查询**不受 `min_npmi` 过滤**，所以有可能
+    出现"hop >= 2 但仍带 npmi"的情况——含义是"存在直接边，但因 npmi
+    低于阈值被 PPR 绕开"，是一种"弱直接连接"信号。`npmi` 可为
+    `null`（`llm_promoted` 边）。
+  * **source**（可选）：**仅在 ≠ "chunk_cooccur" 时 emit**（即
+    `llm_promoted`）。缺席 = `chunk_cooccur`（零值省略）。
+  * **via_seeds**（可选）：**仅在多 seed 查询里且邻居有 ≥ 2 条直接边**
+    时出现，列出这些 seed 名（按 npmi desc）。单 seed 查询与单边邻居
+    都省略（无歧义）。
+- `total_chunks_in_scope`：scope 内 chunk 总数，`chunk_df` 的分母。
+- 空邻居时：`expanded_keywords = []`，`seeds` 与
+  `total_chunks_in_scope` 仍在。
 
 ### 2.2 `results[]` — `Related`（graph 模式增字段）
 
@@ -193,30 +223,30 @@ trace-signals envelope。
 
 ```python
 seeds = {s["kw"] for s in payload["expansion"]["seeds"]}
-kept = []
-for r in payload["results"]:
-    seed_hits = sum(
-        c["occurrences"] for c in r["keyword_contributions"]
-        if c["kw"] in seeds
-    )
-    if seed_hits == 0:
-        # 全靠 PPR 扩展词命中的文档 —— 三体这类噪声在这里被过滤
-        continue
-    kept.append(r)
+kept = [
+    r for r in payload["results"]
+    if any(c["kw"] in seeds for c in r["keyword_contributions"])
+]
+# 三体这类"全靠 PPR 扩展词命中"的文档在这里被过滤
 ```
 
-更严格的一步：把 corpus-wide 的 hub 词（高 `chunk_df`）也从"有效命中"
-里剔除：
+再叠一层 hub 剪枝（`chunk_df` / 总 chunk 数比例）：
 
 ```python
 total = payload["expansion"]["total_chunks_in_scope"]
-hub = {e["kw"] for e in payload["expansion"]["expanded_keywords"]
-       if e.get("chunk_df", 0) / max(total, 1) > 0.1}  # 阈值 caller 定
+hub_kws = {e["kw"] for e in payload["expansion"]["expanded_keywords"]
+           if e.get("chunk_df", 0) / max(total, 1) > 0.1}  # 阈值 caller 定
 ```
 
-**关键**：策略是 caller 的决定，grga 只暴露信号。除了 `seed_hits >= 1`
-外，caller 还可以选比例阈值、按 `ppr_score` 分层加权、或者用
-`edges_to_seeds[].npmi` 做二次过滤。
+按直接边强度二次过滤——v2.2 里 `npmi` 已经是顶层字段，一行搞定：
+
+```python
+strong = [e for e in payload["expansion"]["expanded_keywords"]
+          if (e.get("npmi") or 0) > 0.5]
+```
+
+**关键**：策略是 caller 的决定，grga 只暴露信号。`ppr_score` /
+`chunk_df` / `npmi` / `hops_from_seed` 四路信号一处收，caller 拼装。
 
 ---
 
@@ -232,6 +262,9 @@ hub = {e["kw"] for e in payload["expansion"]["expanded_keywords"]
 | **v2.1** `expansion.expanded_keywords[i]` | 增 `chunk_df` + `edges_to_seeds` | additive（在同一次 major 内） |
 | **v2.1** `expansion.total_chunks_in_scope` | 新增（原在 `graph_signals` 内） | additive |
 | **v2.1** `--graph-signals-limit` CLI 参数 | 删除 | **BREAKING**（无 caller 已知使用） |
+| **v2.2** `edges_to_seeds` 数组 | 删除；最强边的 `npmi`/`cooccur_count` 内联到 entry | **BREAKING**（同版本内演进，未发版）|
+| **v2.2** `source` 字段 | 只在 != `chunk_cooccur` 时 emit（零值省略）| additive-compatible（新增缺席语义）|
+| **v2.2** `via_seeds` 字段 | 新增；仅多 seed + 多边邻居出现 | additive |
 | `suggest --json` 顶层 | 去 `trace_signals_version` / `graph_actions` | **BREAKING** |
 | `search` / `probe` / `expand` / `deep-search --json` | 无变化 | — |
 | `Suggestion.graph_actions` 数据类字段 | 删除 | 内部 API，无外部消费者 |
@@ -294,11 +327,18 @@ v1 一并归档，参见 `docs/design/deprecated/trace-signals.md`；若未来�
    显式传该 flag 会被 typer 拒绝并 exit 2（unknown option）。v2.0 → v2.1
    同版本内落地，CHANGELOG 与 decisions.md 均记录；无 fallback。
 
-4. **`edges_to_seeds` 只暴露"直接边"**。hop ≥ 2 的邻居返回 `edges_to_seeds:
-   []`，不做多跳路径推断。理由：多跳路径强度已融进 `ppr_score`，重新暴
-   露会走回 trace-signals v1 的老路（linear op log 冗余）。若 caller 真
+4. **只暴露"直接边"**。多跳路径的强度已融进 `ppr_score`，不重新
+   emit——避免走回 trace-signals v1 的 linear op log 老路。若 caller 真
    要看"这个远邻怎么和 seed 连上的"，应查 `hops_from_seed` + 用
-   `graph inspect` 反向探针，而不是让 grga 组装图路径。
+   `graph inspect` 反向探针。
+
+5. **v2.2 · `hops_from_seed > 1` 也可能带 `npmi`**。`_edges_by_neighbor`
+   查 `keyword_pairs` 时**不受 `min_npmi` 过滤**（跟 v2.1 一样，保留
+   完整边信息），而 PPR / BFS 用的是过滤后的图。因此存在"直接边低于
+   `min_npmi`、PPR 绕开走长路径" 的邻居——此时 `hops_from_seed >= 2`
+   但仍带内联 `npmi`（数值必然 < `min_npmi`）。含义是"这条边真实存在
+   但被判定为噪声连接"，是一种给 caller 的**弱连接信号**，允许 caller
+   在需要时反过来相信这条边（例如放宽 `--min-npmi` 重试）。
 
 ---
 
@@ -307,6 +347,10 @@ v1 一并归档，参见 `docs/design/deprecated/trace-signals.md`；若未来�
 - **新加字段**（如 `keyword_contributions[].chunk_df`）：走 additive
   MINOR bump，但**只在 caller 侧派生代码明显重复的证据触发**（AGENTS.md
   §信号暴露原则）。
+- **多 seed 多边的完整 npmi 明细**：v2.2 保留 `via_seeds` 名字列表但丢
+  弃每条边的独立 npmi。若真的出现多 caller 需要"这个邻居到 seedA 是
+  0.8，到 seedB 是 0.3"的用例，加 `via_seed_edges: List[{seed, npmi}]`
+  additive 字段（不复活旧 `edges_to_seeds` 列表）。
 - **重新引入图游走可视化**：如果真的成为需求，应先定义"消费者拿不到的
   内部图状态是什么"再讨论；不要复活旧的 `traverse_edge`/`score_node` op
   log 契约，因为它包含大量派生冗余。

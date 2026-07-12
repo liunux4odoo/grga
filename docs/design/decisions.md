@@ -56,6 +56,55 @@ and the rationale.
 - `src/grga/suggest.py`、`src/grga/cli.py`（去 trace envelope；v2.1 去 `--graph-signals-limit`）
 - `schemas/related-signals-v2.json`、`tests/test_related_signals.py`（替代 `test_trace_signals.py`）
 
+### 2026-07-12（同日）· v2.2 · edges_to_seeds 扁平化到 entry 自身
+
+**触发**：v2.1 落地后 caller 立即反馈：`edges_to_seeds` 数组在**单 seed
+查询**（大部分调用）时永远是"一个数组包一个字典"，字典里 `seed` 字段
+只是种子名回显；`source` 又几乎恒为 `"chunk_cooccur"`。3 层嵌套里只有
+2 个字段（`npmi` / `cooccur_count`）承载真实信号，密度极低。
+
+**决定**：
+- **删 `edges_to_seeds` 列表包装**。每个 `expanded_keywords[i]` 直接携带
+  **最强直接边**（npmi desc, cooccur desc, seed asc 排序取第一条）的
+  `npmi` + `cooccur_count`，两字段一起出现或一起缺席。
+- **`source` 零值省略**：只在 != `"chunk_cooccur"` 时 emit（即
+  `llm_promoted`）。缺席即默认。
+- **`via_seeds` 只在多 seed + 多边邻居里出现**：单 seed 查询直接省略
+  （从 `seeds[0].kw` 就知道），单边邻居也省略（无歧义）。真正需要它的
+  场景是"这个邻居桥接了我 2 个以上的 seed"——这才是"跨 seed 关联度"
+  的有价值信号。
+- **hop-1 门与 npmi 门解耦**：`_edges_by_neighbor` 查 `keyword_pairs`
+  时保持不受 `min_npmi` 过滤（v2.1 既有行为）。因此存在"直接边低于阈
+  值、PPR 绕开走长路径" 的邻居：此时 `hops_from_seed >= 2` 但仍带内联
+  `npmi`（数值必然 < `min_npmi`）。含义是"真实存在但弱"，作为反向探
+  针信号保留。
+
+**丢弃了什么**：多 seed 时每条边的独立 npmi 明细。极端场景"邻居 X 到
+seedA 0.8, 到 seedB 0.3" 的旧 `edges_to_seeds` 表达消失，v2.2 只保留
+"X 桥接了 [seedA, seedB]"（按 npmi desc 排序）的名字列表，最强边的
+npmi 内联。理由：多 seed 时 caller 通常要的是"这个邻居有没有跨 seed
+桥接价值"，是 bit 级信息，不是完整数值。若未来出现明确用例可加
+`via_seed_edges: [{seed, npmi}]` additive 字段（不复活旧列表）。
+
+**Impact**：
+- 单 seed hop-1 邻居的 JSON 体积净减 ~40%（3 层嵌套 → 平铺）。
+- caller 判断连接强度：`e["npmi"] > 0.5` 一行，从原来的
+  `next((edge["npmi"] for edge in e["edges_to_seeds"]), 0)` 简化。
+- 契约变更：BREAKING（未发版内演进）。
+
+**Files**：
+- `docs/design/related-signals-v2.md`（升到 v2.2，追加 §2.1 + §7 + §6.1.5）
+- `src/grga/related.py::_build_expansion`（结构调整；`_edges_by_neighbor`
+  语义不变，只是消费方式改变）
+- `schemas/related-signals-v2.json`（`edges_to_seeds` → 顶层 `npmi` /
+  `cooccur_count` / `source?` / `via_seeds?`）
+- `tests/test_related_signals.py`、`tests/graph/test_chunk_migration.py`
+  （断言迁移）
+- `docs/api.md`、`src/grga/skills/grga/references/{verbs,reflection-loop}.md`、
+  `src/grga/skills/grga/examples/probe-search-reflect.md`（同步）
+
+---
+
 ### 2026-07-12（同日）· v2.1 · graph_signals 折叠进 expansion
 
 **触发**：v2.0 落地后 caller 反馈两处冗余：

@@ -102,7 +102,7 @@ and are **not interchangeable** for T2 exploration:
 
 | Verb | Answers | Output | When |
 |---|---|---|---|
-| `related <seed> --mode graph` | "What **documents** are conceptually near this seed?" | Ranked doc paths (PPR) + `expansion.expanded_keywords[].edges_to_seeds` (npmi-weighted) | **T2-bookend** (session-open + pre-answer, mandatory) and **T2-escalate** (mid-session widening) |
+| `related <seed> --mode graph` | "What **documents** are conceptually near this seed?" | Ranked doc paths (PPR) + `expansion.expanded_keywords[].npmi` (strongest direct edge) | **T2-bookend** (session-open + pre-answer, mandatory) and **T2-escalate** (mid-session widening) |
 | `graph inspect <keyword>` | "What is this **keyword** like — scope distribution, top co-occurring words, polysemy?" | Metadata on the *keyword*, no documents | Diagnostic only: seed-quality check, cross-scope pollution audit, "why is my `related` empty?" |
 
 **Failure mode observed in practice**: caller runs `graph inspect` on a
@@ -142,7 +142,7 @@ seed isn't a keyword — confirm via T1 `search`, pick a nearby low-DF
 surrogate).
 
 **Meta-rule**: seed selection is a **caller judgment**, not a grga
-policy. The verb surfaces the numbers (`chunk_df`, `ppr_score`, `npmi`); the
+policy. The verb surfaces the numbers (`chunk_df`, `ppr_score`, `npmi` on the entry itself); the
 caller decides whether to keep the seed or swap.
 
 ### Seed-quality decision table for `related --mode graph`
@@ -154,13 +154,13 @@ decide:
 | Signal | Reading | Action |
 |---|---|---|
 | `expansion.seeds[i].chunk_df` missing or 0 | Seed is not a keyword in the index | Run T1 `search` to confirm the term exists in corpus text; if yes, the tokenizer skipped it — pick a co-appearing indexed term as surrogate |
-| `expansion.seeds[i].chunk_df` 1-few | Rare seed; usually strong signal | Proceed; check `expanded_keywords[].edges_to_seeds[].npmi` > 0.5 |
+| `expansion.seeds[i].chunk_df` 1-few | Rare seed; usually strong signal | Proceed; check `expanded_keywords[].npmi` > 0.5 |
 | `expansion.seeds[i].chunk_df` tens - low hundreds | **Sweet spot on a large corpus** | Proceed; expect a tight neighbourhood |
 | `expansion.seeds[i].chunk_df` thousands+ | Hub word — co-occurs with everything | Swap seed; use `graph inspect <seed>` to *confirm* stopword-dominated `top_cooccurring_keywords`, then pick a low-DF specific surrogate |
 | `results: []` with `expansion.seeds[i].chunk_df` > 0 | Seed indexed but isolated (no chunk-cooccur edges above threshold) | Add another co-appearing seed; or fall back to `--mode dir` / `--mode heading` |
-| `expanded_keywords[].edges_to_seeds[].npmi > 0.5` | Strong semantic link | Trust; consider adding the neighbour as a follow-up seed |
-| `expanded_keywords[].edges_to_seeds[].npmi` 0.2-0.5 | Weak-to-moderate | Cross-check the neighbour with T1 `search` before trusting |
-| `expanded_keywords[].edges_to_seeds[].npmi < 0.2` | Noise-adjacent | Ignore unless corroborated by other signals |
+| `expanded_keywords[].npmi > 0.5` | Strong semantic link | Trust; consider adding the neighbour as a follow-up seed |
+| `expanded_keywords[].npmi` 0.2-0.5 | Weak-to-moderate | Cross-check the neighbour with T1 `search` before trusting |
+| `expanded_keywords[].npmi < 0.2` | Noise-adjacent | Ignore unless corroborated by other signals |
 | Neighbours dominated by discourse markers / stopwords | Seed is a hub (even if DF looks modest) | Swap seed for a low-DF specific noun; multi-seed passes help |
 
 **Multi-seed rule of thumb**: 2–4 diverse specifics fused into one call
