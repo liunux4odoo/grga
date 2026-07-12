@@ -46,19 +46,19 @@
 ## 快速开始
 
 ```bash
-# 安装（源码目录内）
+# 1. 安装 grga（详细见下方"安装方式"）
 python -m pip install -e .
 
-# 首次使用先装外部工具
+# 2. 首次使用先装外部工具
 grga tools install
 
-# 基础全文搜索
+# 3. 基础全文搜索
 grga search "面壁计划"
 
-# 图形界面
+# 4. 图形界面
 grga gui
 
-# 想用共现关系图？先建立索引（增量，首次跑全量，之后只处理变化的文件）
+# 5. 想用共现关系图？先建立索引（增量，首次跑全量，之后只处理变化的文件）
 grga index build --scope ./my-notes
 grga related 面壁计划 --directory ./my-notes
 ```
@@ -67,36 +67,21 @@ grga related 面壁计划 --directory ./my-notes
 
 ### 从源码安装
 
-进入项目目录后安装：
-
 ```bash
 python -m pip install -e .
 ```
 
-如需构建独立可执行文件，安装额外依赖：
+可选依赖：
+
+- `.[standalone]`：构建独立可执行文件所需
+- `.[perf]`：加速 `grga related --mode graph` 在大图上的 PPR 计算（numpy CSR + `np.bincount`），缺失时自动退回纯 Python
 
 ```bash
 python -m pip install -e '.[standalone]'
-```
-
-如需加速 `grga related --mode graph` 在大图上的 PPR 计算（numpy CSR + `np.bincount`），可选安装 `perf` 依赖（不影响功能，缺失时自动退回纯 Python）：
-
-```bash
 python -m pip install -e '.[perf]'
 ```
 
-安装后会提供两个入口：
-
-```bash
-grga --help
-grga-gui
-```
-
-也可以在源码目录中通过模块方式运行：
-
-```bash
-python -m grga.cli --help
-```
+安装后提供两个入口：`grga` 与 `grga-gui`；也可用 `python -m grga.cli` 在源码目录中运行。
 
 ### 工具的下载与解析
 
@@ -175,9 +160,7 @@ grga 的另一条设计线是把自己做成 **agent 友好的检索原语**—�
 - **L2**（共现关系图）：离线预建的关键词共现图，查询快，对应 `grga index` / `grga related` / `grga graph`
 - **L3**（LLM 语义扩展）：只在 L1/L2 无功时召唤，贵，对应 `grga suggest` / `grga deep-search`
 
-**详细设计规范** → [`docs/design/v2-design.md`](docs/design/v2-design.md)
-**为什么 grga 不做 rerank（给未来贡献者的护栏）** → [`docs/design/graph-l2-postmortem-2026-07-10.md`](docs/design/graph-l2-postmortem-2026-07-10.md)
-**增量索引 / 遗忘机制** → [`docs/design/plan-2026-07-11-build-vs-rebuild.md`](docs/design/plan-2026-07-11-build-vs-rebuild.md)
+**详细设计规范** → 见 [`docs/`](docs/) 下的设计文档。
 
 ## 致谢
 
