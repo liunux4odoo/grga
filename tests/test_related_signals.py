@@ -76,6 +76,13 @@ def graph_scope(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.xfail(
+    reason="v8 keyword-primary (Phase 3b-1): --mode graph now returns "
+    "candidate keywords, not documents. The old `expansion` block, "
+    "`keyword_contributions`, and `ppr_score` fields are gone. Phase 4 "
+    "will rewrite this test against related-signals-v3.",
+    strict=True,
+)
 def test_related_graph_json_has_expansion_block(graph_scope, schema):
     result = runner.invoke(
         app,
@@ -138,6 +145,12 @@ def test_related_graph_json_has_expansion_block(graph_scope, schema):
                 assert kw["cooccur_count"] >= 0
 
 
+@pytest.mark.xfail(
+    reason="v8 keyword-primary (Phase 3b-1): --mode graph result envelope "
+    "has no `expansion` block anymore. Phase 4 v3 contract will "
+    "define the empty-expansion equivalent.",
+    strict=True,
+)
 def test_related_graph_isolated_seed_emits_empty_expansion(graph_scope, schema):
     """Isolated seed → PPR yields nothing → expansion.expanded_keywords is []."""
     result = runner.invoke(
@@ -164,6 +177,12 @@ def test_related_graph_isolated_seed_emits_empty_expansion(graph_scope, schema):
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.xfail(
+    reason="v8 keyword-primary (Phase 3b-1): graph-mode results are "
+    "RelatedKeyword rows (no doc_path, no keyword_contributions). "
+    "This test asserts on the pre-v8 doc-oriented contract.",
+    strict=True,
+)
 def test_related_graph_results_carry_keyword_contributions(graph_scope, schema):
     result = runner.invoke(
         app,

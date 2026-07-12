@@ -101,22 +101,25 @@ def test_related_graph_json_contract(graph_db: Path):
     )
     assert result.exit_code == 0, result.output
     payload = _parse(result.output)
-    # graph mode envelope carries results + crossed_scopes_preview +
-    # expansion (query-level PPR evidence). trace-signals v1 fields are
-    # gone; see docs/design/related-signals-v2.md.
+    # v8 keyword-primary (Phase 3b-1): graph mode returns *candidate
+    # keywords*, not documents. The old envelope
+    # (results/crossed_scopes_preview/expansion) is gone; there is now a
+    # single ``results`` array of RelatedKeyword dicts. See
+    # docs/design/plan-2026-07-12-keyword-primary.md §4.
     assert isinstance(payload, dict)
     assert isinstance(payload["results"], list)
-    assert "crossed_scopes_preview" in payload
-    assert "expansion" in payload
+    assert "crossed_scopes_preview" not in payload
+    assert "expansion" not in payload
     assert "trace_signals_version" not in payload
-    assert "graph_actions" not in payload
-    exp = payload["expansion"]
-    assert isinstance(exp["seeds"], list)
-    assert isinstance(exp["expanded_keywords"], list)
     for r in payload["results"]:
-        # graph-mode results MUST carry per-doc per-keyword occurrence
-        # evidence for caller-side relevance judgement.
-        assert isinstance(r["keyword_contributions"], list)
+        # RelatedKeyword fields (see related.py).
+        for key in ("kw", "npmi", "cooccur_count", "via_seed",
+                    "chunk_df", "source"):
+            assert key in r, f"missing {key}"
+        # Legacy per-doc contract fields must not appear.
+        assert "doc_path" not in r
+        assert "keyword_contributions" not in r
+        assert "ppr_score" not in r
 
 
 def test_index_build_json_contract(cross_heading_fixture: Path, tmp_path, sidecar_env):

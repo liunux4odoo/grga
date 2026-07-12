@@ -59,7 +59,13 @@ def two_scope_db(monkeypatch, tmp_path):
 
 
 def test_preview_without_json_prints_summary(two_scope_db):
-    """``--preview`` without ``--json`` prints a stderr summary line."""
+    """``--preview`` used to print a stderr summary line (pre-v8 PPR mode).
+
+    v8 keyword-primary (Phase 3b-1): ``--preview`` no longer applies to
+    ``--mode graph`` — graph now returns candidate keywords, not documents,
+    so ``crossed_scopes_preview`` has no meaning. The flag is accepted for
+    CLI backward-compat and emits a deprecation note; the summary is gone.
+    """
     result = runner.invoke(
         app,
         [
@@ -69,19 +75,25 @@ def test_preview_without_json_prints_summary(two_scope_db):
             "-d", str(two_scope_db["a"]),
             "--preview",
             # Synthetic mini-corpus: pin off the P1.2 default so the shared
-            # bridgeword survives as a PPR bridge (test targets preview
-            # output shape, not threshold policy).
+            # bridgeword survives (test targets flag semantics, not policy).
             "--min-npmi", "0",
         ],
     )
     assert result.exit_code == 0, _err(result)
-    assert "# preview:" in _err(result)
-    assert "--cross-scope would add" in _err(result)
-    assert "bridge keywords" in _err(result)
+    # Deprecation note surfaces the flag becoming a no-op.
+    assert "--preview" in _err(result)
+    assert "ignored" in _err(result)
+    # Legacy summary is gone.
+    assert "# preview:" not in _err(result)
 
 
 def test_preview_without_json_still_prints_results(two_scope_db):
-    """Preview summary must not swallow the normal results output."""
+    """``--preview`` no-op still lets the normal results flow through.
+
+    Note: v8 graph results are keyword candidates (RelatedKeyword), not
+    document rows — assertions on ``a1.md`` would target the pre-v8
+    contract.
+    """
     result = runner.invoke(
         app,
         [
@@ -94,12 +106,16 @@ def test_preview_without_json_still_prints_results(two_scope_db):
         ],
     )
     assert result.exit_code == 0
-    # Isolated results (default) still surface a1.md on stdout.
-    assert "a1.md" in result.output
+    # bridgeword is alpha's strongest partner in this fixture — it should
+    # show up as a candidate keyword in stdout.
+    assert "bridgeword" in result.output
 
 
 def test_preview_no_scope_prints_note(two_scope_db):
-    """No ``-d`` -> preview is None; render a short note, not a blank line."""
+    """``--preview`` without ``-d`` used to print a summary note (pre-v8).
+
+    v8: same as above — flag is a no-op, only the deprecation note fires.
+    """
     result = runner.invoke(
         app,
         [
@@ -111,8 +127,8 @@ def test_preview_no_scope_prints_note(two_scope_db):
         ],
     )
     assert result.exit_code == 0
-    assert "# preview:" in _err(result)
-    assert "no --directory scope active" in _err(result)
+    assert "--preview" in _err(result)
+    assert "# preview:" not in _err(result)
 
 
 def test_preview_rejected_for_non_graph_mode(two_scope_db):

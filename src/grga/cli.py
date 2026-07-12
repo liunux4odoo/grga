@@ -1536,7 +1536,7 @@ def related_command(
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List documents related to the given keywords via the L2 graph."""
-    from grga.related import VALID_MODES, related as related_docs, related_graph_with_preview
+    from grga.related import VALID_MODES, related as related_docs
 
     if mode not in VALID_MODES:
         typer.echo(f"mode must be one of: {', '.join(VALID_MODES)}", err=True)
@@ -1584,31 +1584,56 @@ def related_command(
         )
 
     if mode == "graph":
-        payload = related_graph_with_preview(
+        # v8 keyword-primary (Phase 3b-1): graph mode returns candidate
+        # keywords + association evidence, NOT documents. The caller turns
+        # keywords into passages with ripgrep. See
+        # docs/design/plan-2026-07-12-keyword-primary.md §4.
+        #
+        # The pre-v8 PPR flags (--alpha/--iters/--cross-scope/--preview/
+        # --edge-quantile) no longer affect graph mode. They are accepted
+        # for CLI backward-compatibility but ignored; a later phase removes
+        # them. --min-npmi still applies (read-side floor).
+        from grga.related import related_keywords
+
+        deprecated_used = [
+            name for name, used in (
+                ("--cross-scope", cross_scope),
+                ("--preview", preview),
+                ("--edge-quantile", edge_quantile is not None),
+            ) if used
+        ]
+        if deprecated_used:
+            typer.echo(
+                "note: " + ", ".join(deprecated_used)
+                + " no longer affect --mode graph in the v8 keyword-primary "
+                "model (graph now returns candidate keywords, not documents); "
+                "ignored.",
+                err=True,
+            )
+
+        kw_results = related_keywords(
             seeds,
-            limit=limit,
+            limit_per_seed=limit,
             db_path=str(db_path) if db_path else None,
             directory=str(directory) if directory else None,
-            cross_scope=cross_scope,
-            preview=preview,
             min_npmi=resolved_min_npmi,
         )
-        results = payload["results"]
         if json_output:
-            out = {
-                "results": [r.to_dict() for r in results],
-                "crossed_scopes_preview": payload["crossed_scopes_preview"],
-                "expansion": payload["expansion"],
-            }
+            out = {"results": [r.to_dict() for r in kw_results]}
             typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
             return
-        # Human-readable output: never print graph_signals / expansion /
-        # keyword_contributions (contract — metadata is for --json / agents only).
-        for item in results:
-            kw = ("  <- " + ", ".join(item.keywords)) if item.keywords else ""
-            typer.echo(f"{item.score:.4f}  {item.doc_path}{kw}")
-        _echo_preview_summary(payload["crossed_scopes_preview"])
-        typer.echo(f"{len(results)} related documents ({mode})", err=True)
+        if not kw_results:
+            typer.echo("no related keywords found", err=True)
+            raise typer.Exit(0)
+        # Human-readable: one candidate per line with its evidence.
+        for r in kw_results:
+            typer.echo(
+                f"{r.npmi:.4f}  {r.kw}"
+                f"  (via {r.via_seed}, co={int(r.cooccur_count)}, df={r.chunk_df})"
+            )
+        typer.echo(
+            f"{len(kw_results)} related keywords ({mode})", err=True
+        )
         return
 
     results = related_docs(
