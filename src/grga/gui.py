@@ -1175,6 +1175,9 @@ def _enable_process_dpi_awareness():
             pass
 
 def main():
+    from grga.env_loader import ensure_env
+
+    ensure_env()
     _enable_process_dpi_awareness()
     app = GrgaSearchApp()
     app.mainloop()

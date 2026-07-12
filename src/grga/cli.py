@@ -1626,4 +1626,7 @@ def graph_inspect_command(
 
 
 def main():
+    from grga.env_loader import ensure_env
+
+    ensure_env()
     app()
