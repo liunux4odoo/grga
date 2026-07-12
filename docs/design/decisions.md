@@ -4,6 +4,59 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-12 · `related --mode graph` 性能优化(冷 3s / 热 200ms)
+
+**Plan step**:生产 `related --mode graph` 冷启动 109.7s / 热启动 48.1s 的性能治理。
+完整规范见 `docs/design/plan-2026-07-12-related-perf.md`,实验证据见
+`experiments/related_perf_2026_07_12/`。
+
+**Decision**:7 项独立优化叠加,按落地优先级:
+
+1. **P2.3 doc-agg id-native**(最大单项收益 -78%):`aggregate_docs` 的
+   `k.kw IN (文本)` 换成 `kw_id IN (整数)`,直接命中 `keyword_chunks` 复合主键
+   `(kw_id, doc_id, chunk_id)`,doc_agg 从 11s → 53ms(实测 SQL 单查询 279×)。
+2. **P3 numpy CSR + `np.bincount` backend**(-46%):PPR 35s → 96ms;
+   numpy 作 optional-dependency(`grga[perf]`),不进 install_requires,无 scipy。
+3. **P1.2 min_npmi 默认 0.2**(-38%):边 310 万 → 43 万;且质量提升——
+   npmi=0.1 的 PPR top-k 被功能词污染,0.2 全是语义词。
+4. **P2.2 id-native 图构建**(-5%,P2.3 前置):加载边直接用 int id,
+   跳过 JOIN + casefold,`IndexedGraph.node_ids` 仍填 str(契约零改动)。
+5. **P2.1 删热路径 `build_adjacency`**:从不使用的死代码,生产 310 万边省 ~2.7s。
+6. **P1.1 stopword ∪ core_boundaries**:索引层复用已有 26 字 `_CORE_STOP_BOUNDARIES`,
+   零新增语料先验;收益小(-10%),定位为质量兜底而非性能主力。
+7. **P1.4a `edge_quantile`**:min_npmi 的便捷入口糖,opt-in,与 min_npmi 互斥。
+
+**Rationale**:
+
+- **实验催生新阶段**:P2.3 不在最初三阶段方案(P1/P2/P3)里。它是 v2 阶段(PPR 用
+  numpy 加速后)才暴露的新瓶颈——doc_agg 从"被 PPR 掩盖"变成占比 90% 的头部成本
+  (Amdahl's law"尾巴变头")。方案设计必须允许多阶段优化中途增补,不能一次性 freeze。
+- **code review 的价值**:v1 首跑后 review 发现 6 处测量偏差(warm_p50 实为 max、
+  numpy tie-break 与 py 不一致、CSR 构建时间误计入 PPR、`np.add.at` 慢 10-100 倍、
+  id_aggregate/fold_aggregate 时序不对称、stopword 过滤层不对称)。修正后重跑,
+  backend 等价性从"可能虚假的 1.0"变成真 1.0,单项归因数字才可信。
+- **HC2 无语料先验合规**:全部优化是数学信号(npmi 显著性、已有词表复用、SQL 执行
+  计划、算法后端替换),无新增语料先验。
+- **P4 Forward Push 归档**:PPR 已 96ms,局部扩散算法不需要,归 `docs/design/future/`。
+
+**Impact**:
+
+- 冷启动 68s(bench)→ 3.1s(-95.5%),生产热启动 adjacency_cache 命中后预期 ~200ms
+- top-20 doc Jaccard = 1.0(P2.3/P2.2/P3 全保序),backend 等价性 1.0
+- 契约:`graph_signals.neighbor_edges` 门槛语义微变(npmi≥0.2),trace-signals.md 补版本说明;
+  其余字段字节级不变
+- 依赖:numpy 加 optional-dependency,不进必需依赖
+
+**Files**:
+- `docs/design/plan-2026-07-12-related-perf.md`(新增,完整规范 + 8 阶段落地清单)
+- `experiments/related_perf_2026_07_12/`(实验目录:SPEC/QUESTIONS/FINDINGS + bench + 11 变体数据)
+- 代码层待落地:`src/grga/graph/ppr.py`(load_edges_indexed + numpy backend)、
+  `src/grga/related.py`(doc-agg id-native + min_npmi 透传)、
+  `src/grga/graph/adjacency_cache.py`(删 build_adjacency)、
+  `src/grga/graph/build.py`(stopword union)、`src/grga/cli.py`(--min-npmi/--edge-quantile)
+
+---
+
 ## 2026-07-11 · 增量 build / rebuild / forget + 知识资产分层
 
 **Plan step**：`grga index build` 的增量化需求 + `auto_ngram_dict` /

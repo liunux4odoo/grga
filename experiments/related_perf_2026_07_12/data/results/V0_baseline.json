@@ -1,0 +1,364 @@
+{
+  "variant": "V0_baseline",
+  "config": {
+    "apply_stopword_union": false,
+    "min_npmi": 0.0,
+    "edge_quantile": null,
+    "skip_build_adjacency": false,
+    "id_native": false,
+    "ppr_backend": "py"
+  },
+  "groups": {
+    "hub": {
+      "seeds": [
+        "韩立",
+        "修士",
+        "神通",
+        "元婴",
+        "法宝"
+      ],
+      "cold_total_ms": 70066.83,
+      "warm_p50_ms": 68097.51,
+      "runs": [
+        {
+          "kind": "cold",
+          "idx": 0,
+          "total_ms": 70066.83,
+          "wall_ms": 71693.52,
+          "step_ms": {
+            "sql_fetch": 6513.42,
+            "fold_aggregate": 7338.4,
+            "build_indexed_graph": 3256.67,
+            "build_adjacency": 2716.03,
+            "ppr": 35066.65,
+            "doc_agg_sql": 14635.9
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 1,
+          "total_ms": 68097.51,
+          "wall_ms": 69575.75,
+          "step_ms": {
+            "sql_fetch": 6790.69,
+            "fold_aggregate": 7358.75,
+            "build_indexed_graph": 3392.51,
+            "build_adjacency": 2691.73,
+            "ppr": 35895.85,
+            "doc_agg_sql": 11419.8
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 2,
+          "total_ms": 68165.49,
+          "wall_ms": 69708.34,
+          "step_ms": {
+            "sql_fetch": 6568.4,
+            "fold_aggregate": 7353.36,
+            "build_indexed_graph": 3356.52,
+            "build_adjacency": 2744.83,
+            "ppr": 36270.17,
+            "doc_agg_sql": 11341.49
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 3,
+          "total_ms": 67301.91,
+          "wall_ms": 68834.58,
+          "step_ms": {
+            "sql_fetch": 6670.25,
+            "fold_aggregate": 7561.23,
+            "build_indexed_graph": 3370.84,
+            "build_adjacency": 2779.31,
+            "ppr": 35158.54,
+            "doc_agg_sql": 11213.1
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        }
+      ],
+      "top_keywords": [
+        "是",
+        "也",
+        "在",
+        "有",
+        "这",
+        "但",
+        "我",
+        "就",
+        "都",
+        "他",
+        "说道",
+        "不",
+        "中",
+        "还",
+        "人",
+        "上",
+        "没有",
+        "对",
+        "被",
+        "让"
+      ],
+      "top_docs": [
+        {
+          "doc_path": "《凡人修仙传》（精校全本）作者：忘语.txt",
+          "score": 0.7671398829940068
+        },
+        {
+          "doc_path": "三体.txt",
+          "score": 0.5012546862177114
+        }
+      ],
+      "n_edges": 3102801,
+      "n_nodes": 35686,
+      "ppr_backend_used": "py",
+      "quantile_cutoff": null
+    },
+    "mid": {
+      "seeds": [
+        "罗辑",
+        "程心",
+        "叶文洁",
+        "智子",
+        "汪淼"
+      ],
+      "cold_total_ms": 66700.15,
+      "warm_p50_ms": 66576.18,
+      "runs": [
+        {
+          "kind": "cold",
+          "idx": 0,
+          "total_ms": 66700.15,
+          "wall_ms": 68177.97,
+          "step_ms": {
+            "sql_fetch": 6539.68,
+            "fold_aggregate": 7378.45,
+            "build_indexed_graph": 3334.93,
+            "build_adjacency": 2862.62,
+            "ppr": 34671.37,
+            "doc_agg_sql": 11392.19
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 1,
+          "total_ms": 66176.46,
+          "wall_ms": 67662.59,
+          "step_ms": {
+            "sql_fetch": 6501.03,
+            "fold_aggregate": 7366.98,
+            "build_indexed_graph": 3401.12,
+            "build_adjacency": 2693.86,
+            "ppr": 34370.85,
+            "doc_agg_sql": 11319.58
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 2,
+          "total_ms": 66576.18,
+          "wall_ms": 68060.29,
+          "step_ms": {
+            "sql_fetch": 6674.59,
+            "fold_aggregate": 7534.45,
+            "build_indexed_graph": 3367.73,
+            "build_adjacency": 2732.67,
+            "ppr": 34288.36,
+            "doc_agg_sql": 11426.58
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 3,
+          "total_ms": 73463.53,
+          "wall_ms": 75017.4,
+          "step_ms": {
+            "sql_fetch": 6679.9,
+            "fold_aggregate": 7510.08,
+            "build_indexed_graph": 3430.91,
+            "build_adjacency": 3107.57,
+            "ppr": 40874.68,
+            "doc_agg_sql": 11324.27
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        }
+      ],
+      "top_keywords": [
+        "是",
+        "在",
+        "上",
+        "都",
+        "中",
+        "他",
+        "有",
+        "但",
+        "她",
+        "这",
+        "着",
+        "也",
+        "像",
+        "很",
+        "把",
+        "地",
+        "对",
+        "到",
+        "不",
+        "人"
+      ],
+      "top_docs": [
+        {
+          "doc_path": "三体.txt",
+          "score": 0.6614155711519389
+        },
+        {
+          "doc_path": "《凡人修仙传》（精校全本）作者：忘语.txt",
+          "score": 0.6544647484048375
+        }
+      ],
+      "n_edges": 3102801,
+      "n_nodes": 35686,
+      "ppr_backend_used": "py",
+      "quantile_cutoff": null
+    },
+    "rare": {
+      "seeds": [
+        "伊文斯",
+        "水滴",
+        "红岸",
+        "太阳系",
+        "冬眠"
+      ],
+      "cold_total_ms": 67217.5,
+      "warm_p50_ms": 65274.3,
+      "runs": [
+        {
+          "kind": "cold",
+          "idx": 0,
+          "total_ms": 67217.5,
+          "wall_ms": 68693.38,
+          "step_ms": {
+            "sql_fetch": 6704.29,
+            "fold_aggregate": 7395.17,
+            "build_indexed_graph": 3338.65,
+            "build_adjacency": 2694.13,
+            "ppr": 35370.41,
+            "doc_agg_sql": 11185.69
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 1,
+          "total_ms": 65274.3,
+          "wall_ms": 66756.68,
+          "step_ms": {
+            "sql_fetch": 6680.69,
+            "fold_aggregate": 7452.15,
+            "build_indexed_graph": 3317.63,
+            "build_adjacency": 2696.66,
+            "ppr": 33834.36,
+            "doc_agg_sql": 10762.76
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 2,
+          "total_ms": 65486.75,
+          "wall_ms": 67011.97,
+          "step_ms": {
+            "sql_fetch": 6419.15,
+            "fold_aggregate": 7378.04,
+            "build_indexed_graph": 3267.92,
+            "build_adjacency": 2624.16,
+            "ppr": 34485.42,
+            "doc_agg_sql": 10798.99
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        },
+        {
+          "kind": "warm",
+          "idx": 3,
+          "total_ms": 62394.72,
+          "wall_ms": 63696.47,
+          "step_ms": {
+            "sql_fetch": 6562.98,
+            "fold_aggregate": 7466.95,
+            "build_indexed_graph": 3303.73,
+            "build_adjacency": 2704.03,
+            "ppr": 31953.94,
+            "doc_agg_sql": 9873.38
+          },
+          "n_edges": 3102801,
+          "n_nodes": 35686,
+          "ppr_backend_used": "py"
+        }
+      ],
+      "top_keywords": [
+        "是",
+        "在",
+        "都",
+        "但",
+        "上",
+        "有",
+        "中",
+        "这",
+        "也",
+        "对",
+        "地球",
+        "很",
+        "世界",
+        "不",
+        "像",
+        "把",
+        "三体",
+        "它",
+        "可能",
+        "人类"
+      ],
+      "top_docs": [
+        {
+          "doc_path": "三体.txt",
+          "score": 0.6540774930784213
+        },
+        {
+          "doc_path": "《凡人修仙传》（精校全本）作者：忘语.txt",
+          "score": 0.6280025624791172
+        }
+      ],
+      "n_edges": 3102801,
+      "n_nodes": 35686,
+      "ppr_backend_used": "py",
+      "quantile_cutoff": null
+    }
+  }
+}
