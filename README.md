@@ -1,5 +1,7 @@
 # grga
 
+> **一款向文档学习、却不依赖文档的检索器。** — 索引期从你的语料中学到词与词的关系，查询期直接靠预建的图和统计出结果，不必再回头扫全文。
+
 `grga` 是一个基于 `ripgrep-all` 的全文搜索工具，提供命令行入口和 Tkinter 图形界面。它封装 `rga`、`rg` 等底层工具，支持在普通文本、Markdown、PDF、Office 文档等文件中搜索内容，也支持只按文件路径搜索。
 
 项目目标是把常用搜索能力、工具链检查和内置工具管理集成到一个 Python 包中，尽量减少用户手动配置系统命令的成本。
@@ -70,6 +72,8 @@ grga related 面壁计划 --directory ./my-notes
 ```bash
 python -m pip install -e .
 ```
+
+安装完成后即可**直接搜索纯文本类文件**（`.txt` / `.md` / 源码 / 日志 / JSON / CSV 等），无需额外配置。若需要搜索 **PDF / Office / 电子书**（`.pdf` / `.docx` / `.xlsx` / `.pptx` / `.epub` / `.odt` …），再运行一次 `grga tools install` 安装 `rga` / `pandoc` / `pdftotext` 等工具链即可。
 
 可选依赖：
 
