@@ -182,6 +182,8 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/adr/0001-md-parser.md` | 选用 markdown-it-py 的架构决策 |
 | `docs/design/plan-2026-07-11-schema-v5-normalization.md` | v5 规范化迁移设计 + 消费者/契约影响 |
 | `AGENTS.md` | 硬规则、路径约定、工作流偏好 |
+| `docs/install-and-usage.md` | 完整安装、工具下载、镜像/打包构建、面向 AI Agent 的进阶说明（README 的详细版） |
+| `docs/env-vars.md` | 所有可识别的环境变量清单（LLM 凭据、工具缓存、图查询阈值、GUI 缩放） |
 
 ---
 

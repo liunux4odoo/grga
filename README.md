@@ -1,170 +1,114 @@
 # grga
 
-> **一款向文档学习、却不依赖文档的检索器。** — 索引期从你的语料中学到词与词的关系，查询期直接靠预建的图和统计出结果，不必再回头扫全文。
+> **一款向文档学习、却不依赖文档的检索器。** — 从你的语料中预学习关键词关系，不依赖 Embedding 和 LLM，学习到的知识可直接用于同领域其它文档的检索。
 
-`grga` 是一个基于 `ripgrep-all` 的全文搜索工具，提供命令行入口和 Tkinter 图形界面。它封装 `rga`、`rg` 等底层工具，支持在普通文本、Markdown、PDF、Office 文档等文件中搜索内容，也支持只按文件路径搜索。
+`grga` 是一个基于 `ripgrep-all` 的 Agent 友好全文搜索工具，提供命令行入口和 Tkinter 图形界面。它封装 `rga`、`rg` 等底层工具，支持在普通文本、Markdown、PDF、Office 文档等文件中搜索内容，也支持只按文件路径搜索。
 
-项目目标是把常用搜索能力、工具链检查和内置工具管理集成到一个 Python 包中，尽量减少用户手动配置系统命令的成本。
+项目目标是把常用搜索能力、工具链检查和内置工具管理集成到一个 Python 包中，并支持打包成 standalone 可执行文件，尽量减少用户手动配置系统命令的成本。
 
-> **外部工具运行时下载**：自 0.2.0 起，wheel 不再内嵌 `rg` / `rga` / `pandoc` / `fzf` / `pdftotext` 等二进制文件。首次使用时会按需下载到用户缓存目录（见下文），也可提前运行 `grga tools install`。这样既能把 wheel 体积压到 1 MB 以内，也满足许可证合规：上游 AGPL/GPL 二进制仅在运行时下载，不随包分发。
+### 与普通 grep 有什么不同？
+
+grga 是"grep 家族的最外层封装"：底层复用 `ripgrep` 的速度和 `ripgrep-all`
+的文档适配器，再往上叠**上下文扩展**、**共现关系图**、**LLM 深度搜索**几层能力。下表按"从 grep 一路加码到 grga"的顺序对比各工具的支持程度，并给出
+grga 侧的具体命令与依赖：
+
+| 能力 | grep | `rg` | `rga` | grga 命令 / 用法 | 依赖 / 配置 |
+|---|:---:|:---:|:---:|---|---|
+| 纯文本 / 源码搜索 | ✅ | ✅ | ✅ | `grga search 关键词` | 无 |
+| 大仓库速度（并发 + `.gitignore`） | ❌ 单线程 | ✅ 多线程 | ✅ 继承 rg | 同上，自动透传 `rg` | `rg`（首次 `grga tools install` 自动下载） |
+| PDF / Office / EPUB / 归档 / sqlite | ❌ | ❌ | ✅ 内建适配器 | 同上，自动透传 `rga` | `rga` + `rga-preproc` + `pandoc` + `pdftotext`（自动下载） |
+| 查询表达式（短语 / 正则 / glob / `\|\|` / `&&` / 括号） | ⚠️ 仅正则 | ⚠️ 仅正则 | ⚠️ 仅正则 | 默认多词 **AND**，`--implicit-or` 恢复 v1 OR 语义 | 无 |
+| 路径搜索（只匹配文件名，不读内容） | ⚠️ 需配合 `find` | ⚠️ 需 `--files \| rg` | ⚠️ 同 rg | `grga search --path-only` | 无 |
+| 命令预览与试探（先看规模再决定读不读） | ❌ | ❌ | ❌ | `grga preview` / `grga probe` | 无 |
+| Markdown / PDF 的段落 / 章节上下文扩展 | ❌ | ❌ | ❌ | `grga expand`（按行 / 段落 / 章节逐级） |  |
+| 关键词共现关系图（离线索引 + 亚毫秒查询） | ❌ | ❌ | ❌ | `grga index build` → `grga related` / `grga graph inspect` | |
+| LLM 深度搜索、查询改写、结果重排 | ❌ | ❌ | ❌ | `grga deep-search` / `grga suggest` | OpenAI 兼容 API；至少 `GRGA_OPENAI_API_KEY` + `GRGA_OPENAI_MODEL`（详见 [docs/env-vars.md](docs/env-vars.md)） |
+| Tk 图形界面 | ❌ | ❌ | ❌ | `grga gui` 或 `grga-gui` | 系统自带 Tk |
+| Agent 友好（`--json` + 稳定退出码契约） | ❌ | ⚠️ 部分 | ⚠️ 部分 | `grga skill install` 分发内置 agent 技能包 | 错误契约见 [docs/exit-codes.md](docs/exit-codes.md) |
+
+所有环境变量都可以写进 `$XDG_CONFIG_HOME/grga/.env`（首次运行会自动生成
+一份注释模板），完整清单见 [docs/env-vars.md](docs/env-vars.md)。更多 CLI
+参数细节见 [docs/CLI.md](docs/CLI.md)。
+
+> **外部工具运行时下载**：自 0.2.0 起，wheel 不再内嵌 `rg` / `rga` / `pandoc` / `fzf` / `pdftotext` 等二进制文件。首次使用时会按需下载到用户缓存目录（见下文），也可提前运行 `grga tools install`。
 >
 > **许可证**：`grga` 本身以 **MIT** 许可证发布（见 [LICENSE](LICENSE)）。它调用的外部工具各自遵循其上游许可证（`rg`：MIT/Unlicense；`rga`：AGPL；`pandoc`：GPL；`fzf`：MIT），请分别遵守。
 
-## 主要功能
-
-**日常搜索**
-
-- **全文搜索**：`grga search 关键词` —— 在文本、Markdown、PDF、Office、电子书里找内容
-- **图形界面**：`grga gui` 或 `grga-gui`
-- **查询表达式**：支持短语、正则、glob、逻辑或 `||`、逻辑与 `&&` 和括号分组；空格分隔的多个词默认按 **AND** 合成（v2 起，与 v1 的 OR 语义不同），用 `--implicit-or` 可恢复旧行为
-- **搜索范围**：目录、路径 glob、大小写、每文件命中上限（`-n`）、全局命中上限（`-N`，默认 1000）、上下文行数
-- **路径搜索**：`--path-only` 只匹配文件路径，不读取内容
-- **命令预览**：`grga preview` 查看将要执行的底层命令
-- **搜索前试探**：`grga probe` 只统计命中规模，不读取内容
-
-**上下文扩展**
-
-- **`grga expand`** —— 把搜索命中扩展成更大范围的上下文块（按行 / 段落 / 章节逐级）
-
-**知识发现（可选，需先建立索引）**
-
-- **`grga index build`** —— 为目录建立**关键词共现关系图**索引（首次跑全量、之后增量）
-- **`grga related`** —— 查找与关键词相关的文档（基于上面的共现图）
-- **`grga graph inspect`** —— 查看某个关键词在各目录下的分布
-
-**AI 辅助（可选，需 LLM 配置）**
-
-- **`grga deep-search`** —— 让大模型在多轮里帮你扩展 / 收窄搜索关键词
-- **`grga suggest`** —— 让大模型建议相关关键词、重排结果或改写查询
-
-**运维**
-
-- **`grga check`** —— 检查搜索依赖是否可用
-- **`grga tools install/update/check`** —— 管理随包工具（`rg` / `rga` / `pandoc` / `fzf` ...）
-- **`grga skill install`** —— 安装内置的 agent 技能包（可选）
-
-更多 CLI 用法见 [docs/CLI.md](docs/CLI.md)。
-
-## 快速开始
+## 快速上手
 
 ```bash
-# 1. 安装 grga（详细见下方"安装方式"）
-python -m pip install -e .
+# 安装 grga
+pip install grga
+```
 
-# 2. 首次使用先装外部工具
+安装后即可**直接搜索纯文本类文件**（`.txt` / `.md` / 源码 / 日志 / JSON / CSV
+等），无需额外配置：
+
+```bash
+cd /path/to/your/documents
+grga search "面壁计划"              # 全文搜索
+grga search "面壁计划" --path-only  # 只按文件名搜
+grga gui                            # 图形界面（或 grga-gui）
+grga --help                        # 查看命令帮助
+```
+
+**给你的 AI Agent 装 skill**（可选，一行搞定，让 Kilo / Claude Code / QwenPaw 等直接学会用 grga）：
+
+```bash
+grga skill install --to ~/.kilocode/skills   # 换成你的 agent skill 目录即可
+
+# 预学习（可选，视语料规模需要花费一定时间，但可以提供图扩展能力）
+cd /path/to/your/documents
+grga index build
+```
+
+
+### 按场景选用
+
+**搜索 PDF / Office / 电子书** —— 首次需装一次工具链（`rga` / `pandoc` /
+`pdftotext` 等，之后自动复用）：
+
+```bash
 grga tools install
-
-# 3. 基础全文搜索
-grga search "面壁计划"
-
-# 4. 图形界面
-grga gui
-
-# 5. 想用共现关系图？先建立索引（增量，首次跑全量，之后只处理变化的文件）
-grga index build --scope ./my-notes
-grga related 面壁计划 --directory ./my-notes
+grga search "面壁计划" -g "*.pdf"
 ```
 
-## 安装方式
-
-### 从源码安装
+**上下文扩展** —— 把命中扩展成段落 / 章节：
 
 ```bash
-python -m pip install -e .
+grga expand ...   # 按行 / 段落 / 章节逐级扩展
 ```
 
-安装完成后即可**直接搜索纯文本类文件**（`.txt` / `.md` / 源码 / 日志 / JSON / CSV 等），无需额外配置。若需要搜索 **PDF / Office / 电子书**（`.pdf` / `.docx` / `.xlsx` / `.pptx` / `.epub` / `.odt` …），再运行一次 `grga tools install` 安装 `rga` / `pandoc` / `pdftotext` 等工具链即可。
-
-可选依赖：
-
-- `.[standalone]`：构建独立可执行文件所需
-- `.[perf]`：加速 `grga related --mode graph` 在大图上的 PPR 计算（numpy CSR + `np.bincount`），缺失时自动退回纯 Python
+**关键词共现关系图**（不依赖 LLM，先建索引再查）：
 
 ```bash
-python -m pip install -e '.[standalone]'
-python -m pip install -e '.[perf]'
+cd /path/to/your/documents
+grga index build
+grga related 面壁计划
+grga graph inspect 面壁计划
 ```
 
-安装后提供两个入口：`grga` 与 `grga-gui`；也可用 `python -m grga.cli` 在源码目录中运行。
-
-### 工具的下载与解析
-
-`grga` 运行时的工具解析顺序为：**托管缓存 → 旧 site-packages 缓存 → 系统 `PATH`**（详见 [docs/tool-resolution.md](docs/tool-resolution.md)）。托管缓存目录优先级：
-
-- `$GRGA_TOOLS_DIR`
-- `$XDG_DATA_HOME/grga/tools/<platform>`
-- Linux/macOS：`~/.local/share/grga/tools/<platform>`；Windows：`%LOCALAPPDATA%\grga\tools\<platform>`
-
-按需安装（缺失时首次运行也会交互提示）：
+**LLM 深度搜索**（需配置 OpenAI 兼容凭据，见 [docs/env-vars.md](docs/env-vars.md)）：
 
 ```bash
-grga tools install            # 安装当前平台支持的全部工具
-grga tools install rg rga     # 只装指定工具
-grga tools update             # 更新
-grga tools check              # 查看状态
-grga tools migrate            # 从旧 site-packages 缓存迁移到新目录
+export GRGA_OPENAI_API_KEY=sk-...
+export GRGA_OPENAI_MODEL=gpt-4o-mini
+# or write them to $HOME/.config/grga/.env
+
+grga deep-search "面壁计划"
 ```
 
-离线 / air-gapped 安装（从本地镜像目录安装）：
+**打包成可执行文件 / 离线部署 / 作为 agent 原语接入** —— 见
+[docs/install-and-usage.md](docs/install-and-usage.md)：
 
 ```bash
-grga tools install --from ./mirror rg
+python -m build                       # 构建 wheel
+python scripts/build-onefile.py --clean   # 构建单文件可执行程序
 ```
 
-首次运行行为与退出码契约见 [docs/exit-codes.md](docs/exit-codes.md)。Agent 场景建议加 `--json` 获取结构化错误，或 `--offline` 让缺工具时立即失败。
-
-### 从源码构建工具镜像（开发者）
-
-```bash
-python scripts/download-tools.py --platform all --out ./mirror --write-hashes --yes
-```
-
-该脚本仅供开发者/发布使用，不参与 `python -m build`。详见 [docs/dev-release.md](docs/dev-release.md)。
-
-### 打包
-
-#### 构建 wheel
-
-```bash
-python -m pip install build
-python -m build
-```
-
-打包产物位于 `dist/`。wheel 为 `py3-none-any`，不内嵌任何平台二进制（工具在运行时下载）。
-
-#### 构建单文件可执行程序
-
-构建 CLI 单文件程序：
-
-```bash
-python scripts/build-onefile.py --clean
-```
-
-构建 GUI 单文件程序：
-
-```bash
-python scripts/build-onefile.py --gui --name grga-gui --clean
-```
-
-输出文件位于 `dist/`。外部工具（rg / rga / pandoc / fzf）**不再打入** onefile 可执行程序，由 `grga.toolchain` 在运行时按需从 `$PATH` 或 XDG 缓存加载，必要时首次运行会提示下载。
-
-## 面向 AI Agent（进阶）
-
-grga 的另一条设计线是把自己做成 **agent 友好的检索原语**——所有命令都支持 `--json`、返回结构化字段与稳定契约。
-
-**面向 caller 的两句话：**
-
-> **grga 返回与你的 seed 共现的词/实体，每项携带 df、共现次数、结果分布形态等原始统计。**
->
-> **它不做相关性判断、不 rerank、不预筛"重要"结果 —— 这是 caller 的活。**
-
-分层原语：
-
-- **L1**（就近上下文）：物理邻近扩展（前后行 / 段落 / 章节），对应 `grga expand`
-- **L2**（共现关系图）：离线预建的关键词共现图，查询快，对应 `grga index` / `grga related` / `grga graph`
-- **L3**（LLM 语义扩展）：只在 L1/L2 无功时召唤，贵，对应 `grga suggest` / `grga deep-search`
-
-**详细设计规范** → 见 [`docs/`](docs/) 下的设计文档。
+> 完整安装、工具下载、镜像/打包构建、面向 AI Agent 的进阶说明都在
+> **[docs/install-and-usage.md](docs/install-and-usage.md)**；环境变量清单见
+> [docs/env-vars.md](docs/env-vars.md)，CLI 参数见 [docs/CLI.md](docs/CLI.md)。
 
 ## 致谢
 
