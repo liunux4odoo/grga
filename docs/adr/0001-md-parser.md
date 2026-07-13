@@ -66,8 +66,10 @@ golden 与解析结果逐字段对拍（level / text / line），任一不一致
 - Phase 2.2 `structure/md.py` 的 `parse_markdown` 以 `markdown-it-py` 为主实现，
   解析器抽象在 `parse_markdown(path) -> StructureDoc` 一层接口后，实现可替换
   （对应 plan 风险 4 的防护）。
-- 新增运行期依赖 `markdown-it-py`；先放入 `pyproject.toml` 的
-  `[project.optional-dependencies].v2` 分组，避免污染 v1 打包（plan 风险 7）。
+- 新增运行期依赖 `markdown-it-py`；起初以 `[project.optional-dependencies].v2`
+  分组避免污染 v1 打包（plan 风险 7），后于 2026-07-13 随 PPR/numpy 相关
+  `perf` extra 一并整理时提升到核心 `dependencies`（v2 已经是既定路径，
+  分组抽象不再有意义）。
 - 退化路径：解析异常时 `structure/md.py` 返回空 chapters，expand 退化到段落/行。
 
 ## 复现

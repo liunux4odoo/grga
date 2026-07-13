@@ -50,12 +50,9 @@ CSV 等），无需额外配置。若需要搜索 **PDF / Office / 电子书**�
 可选依赖：
 
 - `.[standalone]`：构建独立可执行文件所需
-- `.[perf]`：加速 `grga related --mode graph` 在大图上的 PPR 计算（numpy CSR +
-  `np.bincount`），缺失时自动退回纯 Python
 
 ```bash
 python -m pip install -e '.[standalone]'
-python -m pip install -e '.[perf]'
 ```
 
 安装后提供两个入口：`grga` 与 `grga-gui`；也可用 `python -m grga.cli` 在源码

@@ -4,6 +4,25 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
+### 依赖清理 · 删除已死的 `perf` extra + `markdown-it-py` 提升为核心依赖
+
+- **删除** `pyproject.toml` 的 `[project.optional-dependencies].perf =
+  ["numpy>=1.20"]`。这个 extra 是 v8 时代给 PPR 幂迭代的 numpy CSR +
+  bincount SpMV 后端准备的（详见 `docs/design/plan-2026-07-12-related-perf.md`
+  §2.3 / §P3）。v9 keyword-primary 已整体移除 PPR（`graph/ppr.py` /
+  `graph/adjacency_cache.py` 都删了，`related_keywords` 走 index-only 早
+  停查 `keyword_pairs`，无矩阵运算）。运行时代码里没有任何 `import numpy`，
+  `perf` extra 装了也没有加速目标。用户端 `pip install grga[perf]` 现在
+  会安装失败 —— 一次性砍掉，避免 pyproject 里保留死符号误导。
+- **合并** `[project.optional-dependencies].v2 = ["markdown-it-py>=3.0"]`
+  → 核心 `dependencies`。`markdown-it-py` 是 `structure/md.py` 的主
+  Markdown 解析器（ADR-0001），`expand --level chapter` 与 `heading_path`
+  元数据必需。v2 分组当初是为了"v1 打包不污染"而设的临时缓冲，v2 早已
+  是默认路径，分组抽象无实际意义。核心 install 直接带上，避免 caller
+  忘记 `pip install grga[v2]` 后 heading 静默降级为空。
+- **不变**：`scripts/build-onefile.py` 的 `EXCLUDED_MODULES` 里仍列了
+  `numpy`（防御性排除，避免任何传递依赖把 numpy 拖进单文件），无需改动。
+
 ### build 期写入门槛自适应 · Gate 1 独立性 + Gate 2 阶梯（docs/design/decisions.md §2026-07-13）
 
 `min_pair_count` 固定为 5 对小语料过严：一本中篇（几百 chunk）的真实

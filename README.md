@@ -69,7 +69,7 @@ grga skill install --to ~/.kilocode/skills   # 换成你的 agent skill 目录�
 cd /path/to/your/documents
 grga index build
 ```
-[搜索演示](docs/search-demo)下提供了“纯LLM回答”、“简单文本检索回答”、“图扩展回答”三种搜索结果，可以看到明显的差别。
+`docs/search-demo`下提供了“纯LLM回答”、“简单文本检索回答”、“图扩展回答”三种搜索结果，可以看到明显的差别。
 
 ### 按场景选用
 
