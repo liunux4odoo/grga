@@ -1690,6 +1690,7 @@ def graph_inspect_command(
     keyword: str = typer.Argument(..., help="Keyword to inspect."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     limit: int = typer.Option(20, "--limit", "-n", help="Cap top_cooccurring_keywords returned."),
+    similar_limit: int = typer.Option(10, "--similar-limit", help="Cap similar_keywords in the not-indexed branch (vocab substring/superstring probe)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """Inspect a keyword's distribution across scopes and polysemy signals."""
@@ -1699,6 +1700,7 @@ def graph_inspect_command(
         keyword,
         db_path=str(db_path) if db_path else None,
         limit=limit,
+        similar_limit=similar_limit,
     )
     if json_output:
         typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
@@ -1720,6 +1722,14 @@ def graph_inspect_command(
     # branch-agnostic and never KeyErrors on the missing polysemy fields.
     if report.get("index_hint"):
         typer.echo(f"index_hint: {report['index_hint']}", err=True)
+        similar = report.get("similar_keywords") or []
+        if similar:
+            typer.echo("similar_keywords:", err=True)
+            for entry in similar:
+                typer.echo(
+                    f"  {entry['chunk_df']:>6}  {entry['kw']}  [{entry['kind']}]",
+                    err=True,
+                )
     if report.get("suspected_polysemy"):
         typer.echo(f"suspected_polysemy: {report['polysemy_hint']}", err=True)
 

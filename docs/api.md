@@ -333,15 +333,19 @@ pattern).
 
 **Not-indexed branch**: when the keyword never entered `keyword_docs`
 (``total_docs == 0``) the response replaces the polysemy fields with a
-dedicated ``index_hint``:
+dedicated ``index_hint`` and a ``similar_keywords`` vocabulary probe:
 
 ```jsonc
 {
-  "keyword": "unseen-token",
+  "keyword": "苍坤",
   "total_docs": 0,
   "docs_by_scope": {},
   "top_cooccurring_keywords": [],
-  "index_hint": "'unseen-token' is not indexed in the graph. It may still appear in the corpus text — try `grga search \"unseen-token\"` for full-text hits, or `grga index build` to (re)index a scope."
+  "index_hint": "'苍坤' is not indexed in the graph. It may still appear in the corpus text — try `grga search \"苍坤\"` for full-text hits, or `grga index build` to (re)index a scope.",
+  "similar_keywords": [
+    {"kw": "苍坤上人", "kind": "superstring", "chunk_df": 87},
+    {"kw": "苍坤真人", "kind": "superstring", "chunk_df": 12}
+  ]
 }
 ```
 
@@ -351,6 +355,17 @@ polysemous). Callers key on field *presence* to distinguish the two
 branches; the naming rule ``event → factual name`` (design §1.5.1) is
 why the indexing-layer message no longer lives under a ``polysemy_*``
 field.
+
+``similar_keywords`` reports objective vocabulary facts, not judgment.
+Each entry's ``kind`` is either ``"superstring"`` (the indexed keyword
+*contains* the folded seed, e.g. seed ``苍坤`` → ``苍坤上人``) or
+``"substring"`` (the indexed keyword is *contained in* the folded seed,
+e.g. seed ``韩立道友`` → ``韩立``). Sorted by ``(-chunk_df, kw)``. The
+list is empty when the seed is shorter than 2 chars (would over-match
+the vocab) or when nothing in the ``keywords`` table matches. Cap the
+result with ``--similar-limit`` (default 10). The intended use is the
+reflection chain ``related <seed>`` empty → ``inspect <seed>`` sees
+``similar_keywords`` → retry ``related`` with a corrected seed.
 
 ---
 

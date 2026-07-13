@@ -54,8 +54,10 @@ empty — treat as "no signal" and proceed with the other evidence.
   reports `docs_by_scope`（该 keyword 在各 scope 的 doc 分布）、
   `top_cooccurring_keywords`（top 共现邻居）、`suspected_polysemy`
   启发（不同 scope 邻居列 Jaccard < 0.2 时为 true）。当 keyword 从未
-  进入索引（`total_docs == 0`）时输出 `index_hint`，`suspected_polysemy`
-  / `polysemy_hint` 字段不出现（key on 字段 presence 区分两支）。
+  进入索引（`total_docs == 0`）时输出 `index_hint` + `similar_keywords`
+  vocab 探针（含子串/超串匹配，`kind ∈ {substring, superstring}`），
+  `suspected_polysemy` / `polysemy_hint` 字段不出现（key on 字段
+  presence 区分两支）。
 - 用它做**种子质量判断**（hub? 稀有?）、**跨 scope 分布**审计。它不
   替代 `related`——见 `references/reflection-loop.md` §"T2 是 related，
   不是 graph inspect"。

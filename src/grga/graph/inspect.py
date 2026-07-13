@@ -28,6 +28,11 @@ from grga.graph.schema import connect, ensure_schema
 
 DEFAULT_LIMIT = 20
 DEFAULT_COOCCUR_LIMIT = 10
+DEFAULT_SIMILAR_LIMIT = 10
+# Below this length a substring match becomes noise (e.g. seed "a" would
+# match anything containing "a"). The not-indexed vocab probe silently
+# skips shorter seeds instead of returning a firehose.
+SIMILAR_MIN_SEED_LEN = 2
 POLYSEMY_JACCARD_THRESHOLD = 0.2
 
 
@@ -50,6 +55,7 @@ def inspect_keyword(
     db_path: Union[str, Path, None] = None,
     limit: int = DEFAULT_LIMIT,
     cooccur_limit: int = DEFAULT_COOCCUR_LIMIT,
+    similar_limit: int = DEFAULT_SIMILAR_LIMIT,
 ) -> dict:
     """Return a scope-distribution + polysemy report for ``keyword``.
 
@@ -60,6 +66,8 @@ def inspect_keyword(
         cooccur_limit: how many top neighbours to consider *per scope* when
             estimating polysemy (keeps the Jaccard comparison focused on the
             characteristic head of each scope).
+        similar_limit: cap on ``similar_keywords`` in the not-indexed branch
+            (see below). Ignored on the indexed branch.
 
     Returns a dict::
 
@@ -83,6 +91,15 @@ def inspect_keyword(
     independent fields — ``polysemy_hint`` describes a cross-scope meaning
     collision, ``index_hint`` describes an indexing gap — so a caller keys
     off field *presence* to tell the two situations apart.
+
+    The not-indexed branch additionally includes ``similar_keywords``: a
+    list of vocabulary entries whose text contains the folded seed
+    (``kind = "superstring"``) or is contained in it (``kind =
+    "substring"``). This surfaces the objective fact "the graph knows
+    a related spelling" so the caller can retry with a corrected seed
+    (e.g. ``related 苍坤`` empty → ``similar_keywords: [{kw: 苍坤上人,
+    kind: superstring}]`` → retry). Empty list when the seed is too short
+    (< 2 chars) or nothing matches.
     """
     folded = _fold(keyword)
     from grga.deep_search import DEFAULT_DB_PATH
@@ -91,7 +108,7 @@ def inspect_keyword(
     conn = connect(target_db)
     try:
         ensure_schema(conn)
-        return _inspect(conn, keyword, folded, limit, cooccur_limit)
+        return _inspect(conn, keyword, folded, limit, cooccur_limit, similar_limit)
     finally:
         conn.close()
 
@@ -102,6 +119,7 @@ def _inspect(
     folded: str,
     limit: int,
     cooccur_limit: int,
+    similar_limit: int,
 ) -> dict:
     # Not-indexed branch: return a dedicated ``index_hint`` and omit the
     # polysemy fields entirely (a term that never entered the graph is
@@ -123,11 +141,13 @@ def _inspect(
         ),
     }
     if not folded:
+        empty["similar_keywords"] = []
         return empty
 
     # Documents (per scope) that contain the keyword.
     docs_by_scope, _seed_docs_ignored = _seed_docs(conn, folded)
     if not docs_by_scope:
+        empty["similar_keywords"] = _similar_keywords(conn, folded, similar_limit)
         return empty
     total_docs = sum(docs_by_scope.values())
 
@@ -309,6 +329,88 @@ def _absorb_cooccur_row(row, id_to_folded, out) -> None:
     cooccur_scopes.setdefault(kw, set()).add(directory)
     scope_map = per_scope_cooccur.setdefault(directory, {})
     scope_map[kw] = scope_map.get(kw, 0.0) + weight
+
+
+def _similar_keywords(
+    conn: sqlite3.Connection,
+    folded: str,
+    limit: int,
+) -> List[dict]:
+    """Vocabulary-level fallback for the not-indexed branch.
+
+    Returns keywords whose text either contains the folded seed
+    (``superstring``, e.g. seed ``苍坤`` → ``苍坤上人``) or is contained
+    in the folded seed (``substring``, e.g. seed ``韩立道友`` → ``韩立``).
+    Restricted to keywords that actually have at least one indexed doc
+    (JOIN on ``keyword_docs``) — a pure ``keywords`` row without stats
+    would be misleading as a "the graph knows this" signal.
+
+    Cost model: ``keywords.kw`` is the only intern column so a substring
+    LIKE against it is O(vocab). At typical corpus sizes (10K–100K
+    tokens) this is a few ms; even at 1M tokens under 100 ms. The path
+    is only reached when the seed did not resolve to any doc, so it
+    never touches hot ``related`` / ``search`` code paths.
+
+    Args:
+        conn: open SQLite connection at v9 schema.
+        folded: case-folded seed (empty string is the caller's problem).
+        limit: max rows returned. ``<= 0`` disables the probe.
+
+    Returns:
+        List of ``{"kw": str, "kind": "superstring"|"substring",
+        "chunk_df": int}``, sorted by ``(-chunk_df, kw)``. Empty when the
+        seed is shorter than :data:`SIMILAR_MIN_SEED_LEN` (would fire on
+        too much of the vocab), the disable flag is set, or nothing
+        matches.
+    """
+    if limit <= 0:
+        return []
+    if len(folded) < SIMILAR_MIN_SEED_LEN:
+        return []
+    # Escape LIKE metacharacters so underscore/percent-bearing seeds
+    # (common in code identifiers, e.g. ``max_file_kb``) match literally
+    # rather than as SQL wildcards. Without this, ``LIMIT`` is applied in
+    # SQL *before* the Python literal-substring re-filter below, so over-
+    # matched rows could crowd out real matches and shrink the result.
+    # We use ``\`` as ESCAPE and mirror the escape on both sides of the
+    # OR (a-side pattern is user-controlled, b-side is stored ``k.kw``).
+    esc = (
+        folded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    like_pattern = f"%{esc}%"
+    rows = conn.execute(
+        r"""
+        SELECT k.kw AS kw, COALESCE(SUM(kd.chunk_count), 0) AS chunk_df
+        FROM keywords k
+        JOIN keyword_docs kd ON kd.kw_id = k.id
+        WHERE k.kw != ?
+          AND (
+            k.kw LIKE ? ESCAPE '\'
+            OR ? LIKE '%' || REPLACE(REPLACE(REPLACE(k.kw, '\', '\\'),
+                                             '%', '\%'),
+                                     '_', '\_') || '%' ESCAPE '\'
+          )
+        GROUP BY k.id
+        ORDER BY chunk_df DESC, kw ASC
+        LIMIT ?
+        """,
+        (folded, like_pattern, folded, int(limit)),
+    ).fetchall()
+    out: List[dict] = []
+    for row in rows:
+        kw = str(row["kw"])
+        if folded in kw:
+            kind = "superstring"
+        elif kw and kw in folded:
+            kind = "substring"
+        else:
+            continue
+        out.append({
+            "kw": kw,
+            "kind": kind,
+            "chunk_df": int(row["chunk_df"] or 0),
+        })
+    return out
 
 
 def _seed_docs(

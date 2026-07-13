@@ -99,6 +99,89 @@ def test_unknown_keyword_returns_empty_report(polysemy_db):
     # field *absence*, not from a ``False`` sentinel.
     assert "suspected_polysemy" not in report
     assert "polysemy_hint" not in report
+    # ``similar_keywords`` is always present on the not-indexed branch —
+    # empty list when no vocab entry matches (this is the case here: the
+    # unknown token shares no substring with any indexed keyword).
+    assert report["similar_keywords"] == []
+
+
+def test_similar_keywords_surfaces_superstring_vocab(polysemy_db):
+    """Missing seed contained in an indexed keyword must be surfaced.
+
+    Analogue of the ``苍坤`` → ``苍坤上人`` case: the graph does not know
+    ``transform`` but it knows ``transformer``. The vocab-similarity probe
+    must return the superstring so the caller can retry with a corrected
+    seed.
+    """
+    report = inspect_keyword("transform", db_path=polysemy_db["db"])
+    assert report["total_docs"] == 0
+    kws = {entry["kw"]: entry for entry in report["similar_keywords"]}
+    assert "transformer" in kws
+    assert kws["transformer"]["kind"] == "superstring"
+    assert kws["transformer"]["chunk_df"] >= 1
+
+
+def test_similar_keywords_surfaces_substring_vocab(polysemy_db):
+    """Missing seed containing an indexed keyword must be surfaced too.
+
+    The graph knows ``attention``; a caller asking for the longer
+    ``attention-mechanism`` gets the shorter indexed vocab back with
+    ``kind='substring'``.
+    """
+    report = inspect_keyword("attention-mechanism", db_path=polysemy_db["db"])
+    assert report["total_docs"] == 0
+    kws = {entry["kw"]: entry for entry in report["similar_keywords"]}
+    assert "attention" in kws
+    assert kws["attention"]["kind"] == "substring"
+
+
+def test_similar_keywords_skips_short_seeds(polysemy_db):
+    """Single-char seeds must not fire a vocab firehose."""
+    report = inspect_keyword("a", db_path=polysemy_db["db"])
+    assert report["total_docs"] == 0
+    assert report["similar_keywords"] == []
+
+
+def test_similar_keywords_absent_on_indexed_branch(polysemy_db):
+    """Indexed keywords use ``top_cooccurring_keywords``, not similarity."""
+    report = inspect_keyword("transformer", db_path=polysemy_db["db"])
+    assert report["total_docs"] >= 1
+    # similar_keywords is a not-indexed-branch construct; the indexed
+    # branch has real neighbours to show and does not emit the vocab probe.
+    assert "similar_keywords" not in report
+
+
+def test_similar_keywords_escapes_like_wildcards(tmp_path, monkeypatch):
+    """Underscore/percent in the seed must not over-match via LIKE wildcards.
+
+    SQL LIKE treats ``_`` as "any single char" and ``%`` as "any run of
+    chars". A seed like ``a_b`` must match ``a_b_extra`` (literal
+    substring) but must **not** falsely match ``axb_extra``. Regression
+    test for the escape logic in ``_similar_keywords``.
+    """
+    monkeypatch.setenv("GRGA_SIDECAR_ROOT", str(tmp_path / "sidecars"))
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    (scope / "notes.md").write_text(
+        "# Underscore corpus\n\n"
+        "a_b_extra a_b_more.\n"
+        "axb_extra axb_more.\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "esc.db"
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+
+    # Seed ``a_b`` is not itself an indexed keyword. Only literal
+    # substrings/superstrings of ``a_b`` may appear; ``axb_*`` must not.
+    report = inspect_keyword("a_b", db_path=db)
+    assert report["total_docs"] == 0
+    matched = {entry["kw"] for entry in report["similar_keywords"]}
+    for kw in matched:
+        assert ("a_b" in kw) or (kw in "a_b"), (
+            f"unexpected LIKE-wildcard match: {kw!r} contains no literal 'a_b'"
+        )
+    # None of the ``axb_*`` tokens should slip in.
+    assert not any(kw.startswith("axb") for kw in matched)
 
 
 def test_inspect_missing_keyword_gives_hint(polysemy_db):

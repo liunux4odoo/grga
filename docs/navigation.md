@@ -82,7 +82,7 @@ refine），不再有 chunk 级 doc 映射；graph 查询走亚毫秒的 index-o
 | `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk（RAM only，不落表），通过 `IdInterner` 累加进 `keyword_pairs`（`chunk_cooccur`，UPSERT 增量）+ `keyword_stats`（chunk_df/doc_df/occurrences）+ `keyword_docs`（doc 级倒排）+ `scope_stats`（n_chunks/n_docs/vocab_size）。写入期门槛 `BUILD_MIN_PAIR_COUNT`（默认 5）+ `BUILD_MIN_NPMI`（默认 0.2）固化资产下界 |
 | `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图（反污染门）；通过 `IdInterner` 写 id，`get_votes` JOIN 回文本 |
 | `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`（`source='llm_promoted'`，`npmi` NULL）；`promoted_at` 列 |
-| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_stats` + `keyword_pairs` 回文本 |
+| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_stats` + `keyword_pairs` 回文本；not-indexed 分支额外附 `similar_keywords`（vocab 子串/超串探针，seed 未入图时给 caller 换词线索）|
 
 **反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 →
 进入 `keyword_pairs`(`source='llm_promoted'`) → `related --mode graph` 免费拿到。

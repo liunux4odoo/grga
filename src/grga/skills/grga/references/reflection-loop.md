@@ -158,7 +158,7 @@ chunk_df, source}`）。种子自身的 `chunk_df` 需要用 `grga graph inspect
 
 | Signal | Reading | Action |
 |---|---|---|
-| `graph inspect <seed>` → `total_docs == 0` | Seed 不是索引里的关键字 | 用 T1 `search` 确认原文有此词；若有，则 tokenizer 跳过——挑一个共现的 indexed 词做代理 |
+| `graph inspect <seed>` → `total_docs == 0` | Seed 不是索引里的关键字 | 先看 `similar_keywords`：若列出了 substring/superstring（例 seed `苍坤` → `苍坤上人`），换成那个词重试 `related`；空则用 T1 `search` 确认原文，若有则 tokenizer 跳过——挑一个共现的 indexed 词做代理 |
 | `graph inspect <seed>` → `total_docs` 1-few | Rare seed；通常信号强 | Proceed；检查 `results[].npmi` > 0.5 的候选 |
 | `graph inspect <seed>` → `total_docs` 十至低百 | **大语料上的甜蜜点** | Proceed；expect a tight neighbourhood |
 | `graph inspect <seed>` → `total_docs` 千+ / 邻居列被 stopword 主导 | Hub word — co-occurs with everything | Swap seed；pick a low-DF specific surrogate |
@@ -176,7 +176,8 @@ the task topic first and harvest low-DF nouns from `matches[i].text`.
 
 **Self-diagnosis loop when T2 returns nothing useful**:
 
-1. `graph inspect <seed>` → `total_docs == 0` → seed 未索引 → 换 seed
+1. `graph inspect <seed>` → `total_docs == 0` → seed 未索引 → 先看
+   `similar_keywords`（vocab 子串/超串探针），有则换那个词；没有再换 seed
 2. `total_docs` 高、`top_cooccurring_keywords` 全是 stopword → hub →
    换 low-DF specific noun
 3. `total_docs` 合理但 `{"results": []}` → 孤立 seed → multi-seed 或
