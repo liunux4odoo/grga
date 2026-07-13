@@ -4,6 +4,77 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-13 · v9.1 pair 聚合回归 SQL self-join（TEMP TABLE 路线）
+
+**Plan step**：修复 v9 keyword-primary（`plan-2026-07-12-keyword-primary.md`
+Phase 3b-3）落地后，`index build` 在大语料上的性能崩溃 / OOM。完整
+经验沉淀见 `docs/design/db-memory-optimization-lessons.md`。
+
+**Decision**：Pass 2 不再在 Python 里枚举 pair、不再维护 `pair_delta`
+Counter + `touched_pair_keys` set；改为把 `(doc_id, chunk_id, kw_id)`
+三元组批量 INSERT 进 build-local `TEMP TABLE _build_chunk_kws`，Pass 3
+用 pre-v9 形状的 SQL self-join 直接 UPSERT-add 进 `keyword_pairs`。
+
+**核心 SQL**（`_finalize_pairs_from_temp`）：
+
+```sql
+INSERT INTO keyword_pairs (dir_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
+SELECT ?, a.kw_id, b.kw_id, 'chunk_cooccur', COUNT(*), NULL, ?
+FROM _build_chunk_kws a
+JOIN _build_chunk_kws b
+  ON a.doc_id = b.doc_id AND a.chunk_id = b.chunk_id AND a.kw_id < b.kw_id
+GROUP BY a.kw_id, b.kw_id
+HAVING COUNT(*) >= ?
+ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+    cooccur_count = cooccur_count + excluded.cooccur_count, ...
+```
+
+**Rationale**：
+
+- **v9 遗留的两个回归**（都源于删掉 `keyword_chunks` 表却没恢复 SQL
+  self-join）：
+  - `touched_pair_keys` 累积整个 scope 的所有 distinct pair，从不清理 →
+    22 MB 中文小说上撑到 2–3 GB Python set，`_finalize_pair_npmi` 直接
+    OOM。
+  - 所有 pair（含 count=1）都先 UPSERT 进 `keyword_pairs`（WITHOUT
+    ROWID + 2 secondary indexes），最后再 DELETE 掉低于 `min_pair_count`
+    的 → 多 GB 磁盘 churn，且 index 维护成本 O(N²)。
+- **F3-corrected 加速了崩溃**：把 flush 从"每 doc 一次"改成"每 100k
+  pair 一次"，让每次 flush 都对一个逐渐变大的 index 化 WITHOUT ROWID
+  表做 UPSERT，写 chunks 阶段直接从秒级涨到 11 分钟。
+- **TEMP TABLE 恢复 pre-v9 数学结构、不动 v9 schema**：`_build_chunk_kws`
+  只是构建期状态，不进 `sqlite_master` 的持久表，不影响读侧（`related`
+  仍然只读 `keyword_pairs` / `keyword_docs`）。
+- **HAVING 早于 disk**：SQLite hash-aggregate 在 C 层完成聚合并按 HAVING
+  过滤，低于阈值的 pair 从不落盘。Pre-v9 就是这个不变量，v9 丢了，
+  v9.1 找回来。
+- **grow-only 语义保留**：`ON CONFLICT DO UPDATE SET cooccur_count =
+  cooccur_count + excluded.cooccur_count` + 尾部 `DELETE WHERE
+  cooccur_count < min_pair_count` 两步共同覆盖 rebuild / build 两条路径
+  （design D6）。
+
+**实测（157120 chunks / 2 doc / 29246 短语）**：
+
+| 阶段              | v9 (regressed)     | v9.1 (fixed)     |
+|-------------------|---------------------|------------------|
+| n-gram 分词       | ~40s                | ~40s             |
+| 写入 chunks       | **11 分钟**         | **10s**          |
+| 生成共现对        | **OOM (SIGKILL)**   | **81s / 166815 对** |
+| 总耗时            | 未完成              | **182s**         |
+| DB 大小 (最终)    | 1.9 GB (未提交)     | ≈ 数百 MB        |
+| 峰值 RAM          | > 系统上限          | SQLite 自管       |
+
+**Impact**：
+
+- 删除：`_upsert_pair_delta` / `_finalize_pair_npmi` / `_flush_pair_delta`
+  / `PAIR_DELTA_FLUSH_THRESHOLD` 常量 / `pair_delta` Counter /
+  `touched_pair_keys` set。
+- 新增：`_finalize_pairs_from_temp`（`src/grga/graph/build.py`）+
+  `_build_chunk_kws` TEMP TABLE + `CHUNK_KW_TEMP_FLUSH=200_000` 常量。
+- `tests/test_incremental_build.py`：monkeypatch 目标从 `_upsert_pair_delta`
+  / `_finalize_pair_npmi` 迁移到 `_finalize_pairs_from_temp`。
+- schema / `--json` 契约 / 读侧代码路径**零变化**。
+
 ## 2026-07-13 · related 信号契约 v3（随 v9 keyword-primary 落地）
 
 **Plan step**：`related --json` 契约随 v9 keyword-primary（Phase 3b-2/3）

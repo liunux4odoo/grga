@@ -415,12 +415,11 @@ def test_forget_phrase_case_insensitive_matches_stored_dict(tmp_path, sidecar_en
 def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monkeypatch):
     """A build with zero doc changes must not rebuild derived tables.
 
-    v9 keyword-primary: pair derivation is inline (no more ``recompute_pairs``
+    v9.1 keyword-primary: pair derivation is inline (no more ``recompute_pairs``
     function to patch). The no-op invariant is now expressed as "the
     ``index_layer_changed`` branch does not run" — verified by patching
-    both :func:`_upsert_pair_delta` and :func:`_finalize_pair_npmi` (the
-    pass-3 pair maintenance helpers) and asserting neither fires during
-    a no-change build.
+    :func:`_finalize_pairs_from_temp` (the pass-3 pair maintenance helper)
+    and asserting it never fires during a no-change build.
     """
     scope = tmp_path / "scope"
     _write_corpus(scope)
@@ -431,19 +430,13 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
 
     from grga.graph import build as build_mod
     call_count = {"n": 0}
-    real_upsert = build_mod._upsert_pair_delta
-    real_finalize = build_mod._finalize_pair_npmi
-
-    def _counting_upsert(*args, **kwargs):
-        call_count["n"] += 1
-        return real_upsert(*args, **kwargs)
+    real_finalize = build_mod._finalize_pairs_from_temp
 
     def _counting_finalize(*args, **kwargs):
         call_count["n"] += 1
         return real_finalize(*args, **kwargs)
 
-    monkeypatch.setattr(build_mod, "_upsert_pair_delta", _counting_upsert)
-    monkeypatch.setattr(build_mod, "_finalize_pair_npmi", _counting_finalize)
+    monkeypatch.setattr(build_mod, "_finalize_pairs_from_temp", _counting_finalize)
 
     s = build_graph_index(scope, db_path=db, mode="build",
                           refresh_ngram="append")
@@ -452,7 +445,7 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
     assert s.docs_added == 0
     assert s.docs_removed == 0
     assert call_count["n"] == 0, (
-        "_upsert_pair_delta / _finalize_pair_npmi should not run on a no-change incremental build"
+        "_finalize_pairs_from_temp should not run on a no-change incremental build"
     )
     # pairs_written must still be populated (read back from DB), not 0.
     conn = connect(db)
@@ -518,13 +511,14 @@ def test_forget_requires_exactly_one_mode(tmp_path):
 def test_rebuild_is_idempotent(tmp_path, sidecar_env):
     """Running ``rebuild`` twice on the same corpus produces identical pairs.
 
-    v9 keyword-primary: ``recompute_pairs`` no longer exists as a separate
-    entry point — pair derivation now lives inline in :func:`build_graph_index`
-    (pass 2 accumulates a RAM ``pair_delta``; pass 3 flushes via
-    :func:`_flush_pair_delta`). The idempotence invariant is the same:
-    a second rebuild on the same corpus must produce byte-identical pair
-    rows (cooccur_count + npmi) because a rebuild wipes the scope's pair
-    rows first.
+    v9.1 keyword-primary: ``recompute_pairs`` no longer exists as a
+    separate entry point — pair derivation now lives inline in
+    :func:`build_graph_index` (pass 2 stages chunk-kw triples into a
+    TEMP TABLE; pass 3 self-joins into keyword_pairs via
+    :func:`_finalize_pairs_from_temp`). The idempotence invariant is the
+    same: a second rebuild on the same corpus must produce byte-identical
+    pair rows (cooccur_count + npmi) because a rebuild wipes the scope's
+    pair rows first.
     """
     scope = tmp_path / "scope"
     _write_corpus(scope)

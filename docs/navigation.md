@@ -175,6 +175,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/v2-plan.md` | v2 落地阶段拆分 |
 | `docs/design/decisions.md` | 关键决策留痕 |
 | `docs/design/plan-2026-07-12-keyword-primary.md` | **v9 架构**：pair 字典化 + 删 keyword_chunks（schema v8 落地文档） |
+| `docs/design/db-memory-optimization-lessons.md` | **DB/内存优化方法学**：TEMP TABLE + SQL self-join 替代 Python 大 Counter；改任何"Python 聚合→落 SQLite"模块前必读 |
 | `docs/design/related-signals-v3.md` | `related --json` 当前契约（graph 返候选关键字） |
 | `docs/design/deprecated/related-signals-v2.md` | **已归档** · v2 契约（PPR + expansion + keyword_contributions） |
 | `docs/design/deprecated/trace-signals.md` | **已废弃** · 旧 graph_actions 契约（2026-07-12 撤除） |
@@ -194,6 +195,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | 加一个 CLI 参数 | `cli.py` 找对应 `@app.command`，然后到该动词的核心模块 |
 | 改搜索行为 | `search.py::search_directory`；GUI 需同步（见 AGENTS.md） |
 | 改图扩展算法 | `graph/build.py`（写入期共现资产）+ `related.py::related_keywords`（读侧查询）；bench 里跑对比 |
+| 改 build 期 pair / 聚合逻辑 | `graph/build.py::_finalize_pairs_from_temp`（TEMP TABLE + SQL self-join，方法学见 `docs/design/db-memory-optimization-lessons.md`） |
 | 改 related 性能 / 候选查询 | `related.py::related_keywords`（index-only 早停查 `keyword_pairs`）；写入期见 `graph/build.py`；设计见 `docs/design/plan-2026-07-12-keyword-primary.md`，历史 perf 实验 `experiments/related_perf_2026_07_12/` |
 | 加一种 LLM intent | `suggest.py` + 新增 `prompts/suggest_<intent>.txt` |
 | 加新 Markdown 结构信号 | `structure/md.py`（解析）+ `structure/sidecar.py`（缓存） |

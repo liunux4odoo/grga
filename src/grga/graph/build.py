@@ -157,15 +157,14 @@ STOPWORD_DF_THRESHOLD = 0.15
 # pass through unfiltered, which is the safe behaviour for sparse data.
 STOPWORD_MIN_CHUNKS = 20
 
-# Bounded-RAM pair accumulation (F3 fix). The build's in-RAM ``pair_delta``
-# Counter accumulates chunk co-occurrence increments; without periodic
-# flushing it grows with the *distinct-pair* count of the whole scope
-# (super-linear in vocabulary; multi-GB peak on real corpora). When the
-# Counter reaches this many entries we UPSERT-add it to keyword_pairs and
-# clear the RAM copy. 100_000 pairs ≈ 8 MB Counter memory in CPython —
-# large enough to amortise the UPSERT overhead across many docs, small
-# enough to bound peak RAM. Tuned empirically; not a stable API.
-PAIR_DELTA_FLUSH_THRESHOLD = 100_000
+# Pair-staging TEMP TABLE batching (v9.1). Pass 2 stages one
+# (doc_id, chunk_id, kw_id) row per post-3b-filter kw per chunk into
+# ``_build_chunk_kws``. Rows accumulate in a Python list and get bulk
+# INSERTed every ``CHUNK_KW_TEMP_FLUSH`` rows so peak RAM stays bounded.
+# 200k rows × (~30 B per Python tuple) ≈ 6 MB list peak — small enough to
+# be dwarfed by SQLite's own page cache, large enough to amortise the
+# executemany overhead across many chunks. Referenced inline in
+# :func:`build_graph_index`; not a stable API.
 
 
 @dataclass
@@ -1436,31 +1435,64 @@ def build_graph_index(
         )
 
         # ------------------------------------------------------------------
-        # Pass 2 (v9 keyword-primary): tokenise chunks in RAM and derive the
-        # doc-level inverted index (``keyword_docs``), the pair delta, and
-        # per-doc ``n_chunks_with_kw`` directly from ``chunk_tokens``. The
-        # deprecated ``chunks`` / ``keyword_chunks`` tables no longer exist
-        # (dropped by v8→v9 migration); their signal is replaced by
+        # Pass 2 (v9.1 keyword-primary): tokenise chunks in RAM and derive
+        # the doc-level inverted index (``keyword_docs``) + per-doc
+        # ``n_chunks_with_kw`` directly from ``chunk_tokens``, while staging
+        # (doc_id, chunk_id, kw_id) triples into the ``_build_chunk_kws``
+        # TEMP TABLE for pass 3's self-join. The deprecated ``chunks`` /
+        # ``keyword_chunks`` permanent tables no longer exist (dropped by
+        # v8→v9 migration); their signal is replaced by
         # ``keyword_docs.chunk_count`` + ``docs.n_chunks_with_kw``.
         #
-        # ``pair_delta`` accumulates chunk-level co-occurrence increments
-        # for this build. Applied to ``keyword_pairs`` as UPSERT-add after
-        # all docs are processed (accumulating knowledge-asset semantics,
-        # design D6). ``touched_pair_keys`` records which pair rows need
-        # npmi recompute at the tail so we skip untouched pairs (matching
-        # decision Q2 §7.2: "only refresh touched pairs' npmi").
+        # Pairs are NOT enumerated in Python here (that was the v9 approach
+        # whose ``pair_delta`` Counter / ``touched_pair_keys`` set ballooned
+        # to GB-scale RAM on large corpora). Instead the raw chunk-kw
+        # membership goes to the TEMP TABLE and SQLite's hash-aggregate does
+        # the pair counting + min_pair_count filter in one pass (design D6
+        # accumulate semantics preserved via UPSERT-add). See
+        # :func:`_finalize_pairs_from_temp`.
         # ------------------------------------------------------------------
         if mode == "build" and docs:
             _delete_doc_index_rows_keep_docs(
                 conn, [entry[0] for entry in docs]
             )
 
-        _emit("materialise_start", total_docs=len(docs))
+        _emit(
+            "materialise_start",
+            total_docs=len(docs),
+            total_chunks=total_scanned_chunks,
+        )
         # Deferred UPSERTs collected across pass 2; flushed after the loop.
         kw_docs_rows: List[Tuple[int, int, int, int, int]] = []
-        pair_delta: Counter = Counter()
-        touched_pair_keys: set = set()
+        # v9.1 (2026-07-13): pair aggregation returns to SQL self-join over
+        # a build-local TEMP TABLE. Pre-v9 used a persistent ``keyword_chunks``
+        # table; v9 dropped it and moved pair aggregation into a Python
+        # ``pair_delta`` Counter + ``touched_pair_keys`` set. That caused two
+        # regressions on large corpora (see ``_finalize_pairs_from_temp``):
+        #   * ``touched_pair_keys`` grew unbounded (2-3 GB on a 22 MB novel).
+        #   * every pair (incl. count=1) got UPSERTed into keyword_pairs
+        #     BEFORE the min_pair_count filter — GB-scale disk churn.
+        # The TEMP TABLE keeps the v9 read-path shape (no permanent
+        # ``keyword_chunks`` asset) while restoring SQLite's hash-aggregate
+        # to compute + filter pair counts in one pass. Dropped at end.
+        conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _build_chunk_kws ("
+            "  doc_id INTEGER NOT NULL, "
+            "  chunk_id INTEGER NOT NULL, "
+            "  kw_id INTEGER NOT NULL"
+            ")"
+        )
+        conn.execute("DELETE FROM _build_chunk_kws")  # in case of prior aborted run
+        chunk_kw_temp_batch: List[Tuple[int, int, int]] = []
+        CHUNK_KW_TEMP_FLUSH = 200_000  # rows per batch INSERT
         touched_kw_ids: set = set()
+        # Chunk-level progress throttling: emit at most ~500 updates across
+        # the whole materialise phase, so a corpus with millions of chunks
+        # does not drown the CLI progress bar in redraw work. Falls back to
+        # "every chunk" for tiny corpora so short builds still animate.
+        chunks_done_total = 0
+        chunk_progress_step = max(1, total_scanned_chunks // 500) if total_scanned_chunks else 1
+        next_progress_emit = chunk_progress_step
         for doc_index, entry in enumerate(docs, start=1):
             doc_id, rel_path, path, is_md, chunks = entry[:5]
             _, st_size, st_mtime, new_hash = entry[5:]
@@ -1480,35 +1512,55 @@ def build_graph_index(
             )
 
             # Aggregate to (kw_id, doc_id) → (occurrence_count, chunk_count)
-            # and enumerate chunk-level pairs.
+            # and stage (doc_id, chunk_id, kw_id) rows into the TEMP TABLE.
             per_doc_kw_agg: Dict[int, Tuple[int, int]] = {}
             n_chunks_with_kw_for_doc = 0
             file_had_keywords = False
             for _chunk_id, kw_counts in per_chunk_kw:
-                if not kw_counts:
-                    continue
-                file_had_keywords = True
-                n_chunks_with_kw_for_doc += 1
-                # Per-doc aggregation (raw kw_counts — keyword_stats is
-                # never gated by the 3a/3b filter, only pair enumeration is).
-                chunk_kw_ids: List[int] = []
-                for kw, occ in kw_counts.items():
-                    kid = kw_id_map[kw]
-                    chunk_kw_ids.append(kid)
-                    prev_occ, prev_chunks = per_doc_kw_agg.get(kid, (0, 0))
-                    per_doc_kw_agg[kid] = (prev_occ + int(occ), prev_chunks + 1)
-                # Pair enumeration: apply the 3b containment filter over the
-                # chunk's kw *strings* first, then map to ids. A candidate
-                # stopword drops out only when this chunk contains a longer
-                # kw that has it as substring (e.g. 者 next to 面壁者).
-                pair_kws = _filter_chunk_kws_for_pairs(
-                    list(kw_counts.keys()),
-                    stopword_candidates=scope_stopword_candidates,
-                )
-                distinct_ids = sorted({kw_id_map[k] for k in pair_kws})
-                for i, ka in enumerate(distinct_ids):
-                    for kb in distinct_ids[i + 1:]:
-                        pair_delta[(ka, kb)] += 1
+                chunks_done_total += 1
+                if kw_counts:
+                    file_had_keywords = True
+                    n_chunks_with_kw_for_doc += 1
+                    # Per-doc aggregation (raw kw_counts — keyword_stats is
+                    # never gated by the 3a/3b filter, only pair enumeration is).
+                    for kw, occ in kw_counts.items():
+                        kid = kw_id_map[kw]
+                        prev_occ, prev_chunks = per_doc_kw_agg.get(kid, (0, 0))
+                        per_doc_kw_agg[kid] = (prev_occ + int(occ), prev_chunks + 1)
+                    # 3b containment filter over kw *strings*, then map to
+                    # ids and stage into the TEMP TABLE for the pass-3
+                    # self-join. Substring-contained candidates like 者 vs
+                    # 面壁者 are dropped from *pair* eligibility only.
+                    pair_kws = _filter_chunk_kws_for_pairs(
+                        list(kw_counts.keys()),
+                        stopword_candidates=scope_stopword_candidates,
+                    )
+                    if pair_kws:
+                        distinct_ids = {kw_id_map[k] for k in pair_kws}
+                        for kid in distinct_ids:
+                            chunk_kw_temp_batch.append((doc_id, _chunk_id, kid))
+                        if len(chunk_kw_temp_batch) >= CHUNK_KW_TEMP_FLUSH:
+                            conn.executemany(
+                                "INSERT INTO _build_chunk_kws "
+                                "(doc_id, chunk_id, kw_id) VALUES (?, ?, ?)",
+                                chunk_kw_temp_batch,
+                            )
+                            chunk_kw_temp_batch.clear()
+
+                # Chunk-level progress: throttle emits. Counter increments
+                # for *every* chunk (including empty / no-keyword ones) so
+                # the completion guard reaches total_scanned_chunks — the
+                # doc-side denominator counts split_chunks output uniformly.
+                if chunks_done_total >= next_progress_emit or chunks_done_total == total_scanned_chunks:
+                    _emit(
+                        "materialise_advance",
+                        current=doc_index,
+                        total=len(docs),
+                        chunks_done=chunks_done_total,
+                        total_chunks=total_scanned_chunks,
+                        path=str(path),
+                    )
+                    next_progress_emit = chunks_done_total + chunk_progress_step
 
             for kid, (occ_sum, chunk_cnt) in per_doc_kw_agg.items():
                 kw_docs_rows.append(
@@ -1559,25 +1611,6 @@ def build_graph_index(
             # next incremental build's Level 1 check can skip this file.
             _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
 
-            # F3 (review): bound the in-RAM ``pair_delta`` footprint on large
-            # rebuilds. Without periodic flushing the Counter accumulates one
-            # entry per distinct co-occurring pair across the *whole* scope
-            # (super-linear in vocabulary; GB-scale peak on real corpora),
-            # coexisting with chunk_tokens + kw_docs_rows. Flush every
-            # ``PAIR_DELTA_FLUSH_EVERY`` docs so on-disk cooccur_count
-            # accumulates and the Counter stays bounded. touched_pair_keys
-            # keeps growing (needed for the final npmi pass) but it is a set
-            # of int tuples, ~3× smaller than the Counter's dict entries.
-            if len(pair_delta) >= PAIR_DELTA_FLUSH_THRESHOLD:
-                _upsert_pair_delta(
-                    conn,
-                    scope_dir_id=scope_dir_id,
-                    pair_delta=pair_delta,
-                    touched_pair_keys=touched_pair_keys,
-                    now=now,
-                )
-                pair_delta.clear()
-
             if progress is not None and stats.files_indexed % 25 == 0 and stats.files_indexed:
                 progress(
                     f"materialised {stats.files_indexed} files "
@@ -1587,6 +1620,8 @@ def build_graph_index(
                 "materialise_advance",
                 current=doc_index,
                 total=len(docs),
+                chunks_done=chunks_done_total,
+                total_chunks=total_scanned_chunks,
                 path=str(path),
             )
 
@@ -1607,6 +1642,14 @@ def build_graph_index(
                 """,
                 kw_docs_rows,
             )
+        # Flush the remaining TEMP TABLE batch (the tail below CHUNK_KW_TEMP_FLUSH).
+        if chunk_kw_temp_batch:
+            conn.executemany(
+                "INSERT INTO _build_chunk_kws (doc_id, chunk_id, kw_id) "
+                "VALUES (?, ?, ?)",
+                chunk_kw_temp_batch,
+            )
+            chunk_kw_temp_batch.clear()
         # ``stats.keyword_chunks_written`` is kept as a deprecated field
         # for JSON output back-compat and reports the doc-level row count
         # (30× smaller than the pre-v9 chunk-level count).
@@ -1621,12 +1664,13 @@ def build_graph_index(
             _delete_doc_index_rows(conn, removed_doc_ids)
 
         # ------------------------------------------------------------------
-        # Pass 3 (v9): flush pair delta, recompute derived stats.
-        # ``pair_delta`` holds the per-pair chunk co-occurrence increments
-        # from this build. Apply as UPSERT-add: existing pairs get their
-        # ``cooccur_count`` bumped, new pairs (below min_pair_count) will be
-        # filtered out post-flush. npmi is recomputed for touched pairs
-        # using the fresh ``keyword_stats`` + ``scope_stats.n_chunks``.
+        # Pass 3 (v9.1): derive pairs from the TEMP TABLE self-join.
+        # The pass-2 loop staged (doc_id, chunk_id, kw_id) rows into
+        # ``_build_chunk_kws``. Here we self-join them on the same chunk to
+        # count co-occurrences, apply ``min_pair_count`` in a single
+        # HAVING (SQLite hash-aggregate, bounded RAM), UPSERT-add into
+        # ``keyword_pairs``, then recompute npmi. See
+        # :func:`_finalize_pairs_from_temp`.
         # ------------------------------------------------------------------
         index_layer_changed = bool(docs) or bool(removed_doc_ids) or mode == "rebuild"
         if index_layer_changed:
@@ -1684,36 +1728,19 @@ def build_graph_index(
                 (scope_dir_id, n_chunks, n_docs, vocab_size, now),
             )
 
-            # 4. Apply pair delta. In ``rebuild`` mode the scope's pair
-            #    rows were wiped upstream (``_delete_scope_index_rows``
-            #    doesn't touch pairs, but ``rebuild`` also runs
-            #    ``DELETE FROM keyword_pairs WHERE dir_id=? AND source=?``
-            #    — see the mode dispatch above). In ``build`` mode we
-            #    accumulate (design D6: pairs grow-only across
-            #    add/update).
-            _emit(
-                "pairs_start",
-                candidate_pairs=len(pair_delta),
-                surviving_pairs=0,
-            )
-            # Flush any residual delta from pass 2 (the periodic flushes
-            # left ``pair_delta`` holding only the tail below the
-            # threshold), then finalize npmi over all touched pairs.
-            _upsert_pair_delta(
+            # 4. Derive pairs from the TEMP TABLE self-join. In ``rebuild``
+            #    mode the scope's chunk_cooccur rows were wiped upstream
+            #    (see the mode dispatch above), so the UPSERT lands on empty
+            #    rows. In ``build`` mode existing pairs accumulate (design
+            #    D6: pairs grow-only across add/update).
+            _emit("pairs_start", candidate_pairs=0, surviving_pairs=0)
+            surviving = _finalize_pairs_from_temp(
                 conn,
                 scope_dir_id=scope_dir_id,
-                pair_delta=pair_delta,
-                touched_pair_keys=touched_pair_keys,
-                now=now,
-            )
-            pair_delta.clear()
-            surviving = _finalize_pair_npmi(
-                conn,
-                scope_dir_id=scope_dir_id,
-                touched_pair_keys=touched_pair_keys,
                 min_pair_count=int(min_pair_count),
                 min_npmi=float(min_npmi),
                 n_chunks=n_chunks,
+                now=now,
                 on_event=on_event,
             )
             stats.pairs_written = surviving
@@ -1729,6 +1756,11 @@ def build_graph_index(
                 "SELECT COUNT(*) FROM keyword_stats WHERE dir_id = ?",
                 (scope_dir_id,),
             ).fetchone()[0])
+
+        # Drop the build-local TEMP TABLE regardless of the branch taken so
+        # a long-lived connection (tests reuse one) does not carry stale
+        # rows into the next build.
+        conn.execute("DROP TABLE IF EXISTS _build_chunk_kws")
 
         # ------------------------------------------------------------------
         # Toolchain fingerprint: emit a warning if it changed vs. the
@@ -1757,92 +1789,56 @@ def build_graph_index(
 
 
 # ---------------------------------------------------------------------------
-# _flush_pair_delta — v9 keyword-primary pair-table maintenance
+# _finalize_pairs_from_temp — v9.1 TEMP-TABLE-based pair aggregation.
 #
-# Applies the in-RAM pair co-occurrence delta from pass 2 to the on-disk
-# ``keyword_pairs(chunk_cooccur)`` table. Two-part flush:
+# Pass 2 stages (doc_id, chunk_id, kw_id) triples into a build-local TEMP
+# TABLE ``_build_chunk_kws`` (post-3b-filter kw ids only). This function
+# runs the pre-v9-shaped self-join against that table to derive
+# ``keyword_pairs``:
 #
-# 1. UPSERT-add every (kw_a, kw_b) in ``pair_delta`` into keyword_pairs.
-#    Existing rows accumulate (``cooccur_count = cooccur_count + delta``),
-#    matching design D6 (pairs are grow-only knowledge assets across
-#    add/update). New rows below ``min_pair_count`` are filtered by a
-#    DELETE right after the UPSERT so the write-time floor holds.
-# 2. Recompute npmi for touched pairs from fresh ``keyword_stats`` +
-#    ``scope_stats.n_chunks``, drop rows whose npmi falls below the
-#    write-time floor, then return the surviving row count.
+#   SELECT a.kw_id, b.kw_id, COUNT(*)
+#   FROM _build_chunk_kws a
+#   JOIN _build_chunk_kws b
+#     ON a.doc_id = b.doc_id AND a.chunk_id = b.chunk_id
+#    AND a.kw_id < b.kw_id
+#   GROUP BY a.kw_id, b.kw_id
+#   HAVING COUNT(*) >= min_pair_count
 #
-# ``touched_pair_keys`` is the set of (kw_a, kw_b) pair identities that
-# were touched by this build — used to bound the npmi recompute to just
-# those rows (matches decision Q2 §7.2, "only refresh touched pairs' npmi").
-# On a rebuild the caller already wiped every pair row for the scope, so
-# every surviving pair after flush is touched anyway.
+# Bounds vs. the deprecated Python ``pair_delta`` Counter path:
+#
+# * RAM: SQLite hash-aggregate is a C-level hash table (~30% of Python's
+#   size per entry); HAVING filters below-threshold pairs before they
+#   ever get materialised as rows.
+# * Disk: only surviving (count >= min_pair_count) rows enter
+#   ``keyword_pairs``. Pre-v9 kept this invariant via the same SQL;
+#   v9's Python enumeration lost it and let count=1 pairs bloat the
+#   table by 10-100× before a post-hoc DELETE.
+#
+# In ``rebuild`` mode the caller wiped the scope's chunk_cooccur rows
+# upstream, so the UPSERT lands on empty rows. In ``build`` mode existing
+# pairs accumulate via ``cooccur_count = cooccur_count + excluded.cooccur_count``
+# (design D6 — pairs grow-only across add/update). After the accumulate,
+# a scope-wide ``DELETE ... WHERE cooccur_count < min_pair_count`` re-applies
+# the write-time floor to any legacy rows that dropped below threshold.
 # ---------------------------------------------------------------------------
 
 
-def _upsert_pair_delta(
+def _finalize_pairs_from_temp(
     conn,
     *,
     scope_dir_id: int,
-    pair_delta: Counter,
-    touched_pair_keys: set,
-    now: str,
-) -> None:
-    """UPSERT-add a batch of pair increments into ``keyword_pairs``.
-
-    Idempotent partial flush: safe to call multiple times during pass 2 to
-    bound the RAM footprint of ``pair_delta`` (which otherwise grows with
-    the distinct-pair count of the whole scope). The caller is expected to
-    ``pair_delta.clear()`` after this returns.
-
-    ``touched_pair_keys`` is updated in place with every normalised (a<b)
-    pair so :func:`_finalize_pair_npmi` can recompute npmi only for the
-    pairs this build actually touched (matches decision Q2 §7.2:
-    "touched-only npmi refresh").
-    """
-    if not pair_delta:
-        return
-    normalised: List[Tuple[int, int, int, str, float, str]] = []
-    for (ka, kb), inc in pair_delta.items():
-        if ka == kb:
-            continue
-        a, b = (ka, kb) if ka < kb else (kb, ka)
-        touched_pair_keys.add((a, b))
-        normalised.append(
-            (scope_dir_id, a, b, CHUNK_COOCCUR_SOURCE, float(inc), now)
-        )
-    if normalised:
-        conn.executemany(
-            """
-            INSERT INTO keyword_pairs
-                (dir_id, kw_a_id, kw_b_id, source, cooccur_count, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
-                cooccur_count = cooccur_count + excluded.cooccur_count,
-                updated_at = excluded.updated_at
-            """,
-            normalised,
-        )
-
-
-def _finalize_pair_npmi(
-    conn,
-    *,
-    scope_dir_id: int,
-    touched_pair_keys: set,
     min_pair_count: int,
     min_npmi: float,
     n_chunks: int,
+    now: str,
     on_event: Optional[Callable[[dict], None]] = None,
 ) -> int:
-    """Recompute npmi for every touched pair, drop those failing gates.
+    """Aggregate ``_build_chunk_kws`` into ``keyword_pairs`` and refresh npmi.
 
-    Runs once at the end of pass 3 after all ``_upsert_pair_delta`` calls
-    have accumulated per-pair ``cooccur_count`` on disk. Returns the
-    surviving pair-row count in the scope.
-
-    Batched loads (F2 fix) — a single ``kw_id IN (...)`` SELECT collects
-    every touched pair's current ``cooccur_count``, avoiding the pre-fix
-    per-row round-trip (N+1) that made rebuilds slow on real corpora.
+    Returns the surviving pair-row count in the scope after the min_npmi
+    filter runs. ``_build_chunk_kws`` is expected to hold this build's
+    contribution only — the caller is responsible for creating and
+    populating it (see pass 2).
     """
     def _emit(phase: str, **fields) -> None:
         if on_event is None:
@@ -1854,78 +1850,81 @@ def _finalize_pair_npmi(
         except Exception:
             pass
 
-    if not touched_pair_keys:
-        return int(conn.execute(
-            "SELECT COUNT(*) FROM keyword_pairs "
-            "WHERE dir_id = ? AND source = ?",
-            (scope_dir_id, CHUNK_COOCCUR_SOURCE),
-        ).fetchone()[0])
-
-    # 1. Load per-kw chunk_df for every touched pair endpoint.
-    endpoint_ids = {ka for (ka, _kb) in touched_pair_keys} | {
-        kb for (_ka, kb) in touched_pair_keys
-    }
-    chunk_df: Dict[int, int] = {}
-    eid_list = list(endpoint_ids)
-    for i in range(0, len(eid_list), 900):
-        piece = eid_list[i:i + 900]
-        ph = ",".join("?" for _ in piece)
-        for r in conn.execute(
-            f"SELECT kw_id, chunk_df FROM keyword_stats "
-            f"WHERE dir_id = ? AND kw_id IN ({ph})",
-            (scope_dir_id, *piece),
-        ):
-            chunk_df[int(r[0])] = int(r[1])
-
-    # 2. Batched load of current ``cooccur_count`` for every touched pair
-    #    (F2 fix: was per-row SELECT). Chunk-partition on kw_a_id since the
-    #    PK ordering is ``(dir_id, kw_a_id, kw_b_id, source)`` — filter by
-    #    the a-side in the IN clause and post-filter on the b-side in
-    #    Python. Alternative was a materialised temp table; kept simple.
-    touched_by_a: Dict[int, set] = {}
-    for (a, b) in touched_pair_keys:
-        touched_by_a.setdefault(a, set()).add(b)
-    cooccur_of: Dict[Tuple[int, int], int] = {}
-    a_list = list(touched_by_a)
-    for i in range(0, len(a_list), 900):
-        piece = a_list[i:i + 900]
-        ph = ",".join("?" for _ in piece)
-        rows = conn.execute(
-            f"SELECT kw_a_id, kw_b_id, cooccur_count FROM keyword_pairs "
-            f"WHERE dir_id = ? AND source = ? "
-            f"AND kw_a_id IN ({ph})",
-            (scope_dir_id, CHUNK_COOCCUR_SOURCE, *piece),
-        ).fetchall()
-        for r in rows:
-            a_id, b_id, co = int(r[0]), int(r[1]), int(r[2])
-            if b_id in touched_by_a.get(a_id, ()):
-                cooccur_of[(a_id, b_id)] = co
-
-    # 3. Recompute npmi + build the two batched write-sets.
+    # 1. Index for the self-join. Composite index on (doc_id, chunk_id)
+    #    is the join key. Created after all rows are inserted so we do
+    #    not pay per-INSERT maintenance during pass 2.
     _emit("pairs_scan_start")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS _idx_bcki_chunk "
+        "ON _build_chunk_kws (doc_id, chunk_id)"
+    )
+
+    # 2. Self-join + GROUP BY + HAVING + UPSERT-add in one statement.
+    #    SQLite hash-aggregates the join output; HAVING drops below-floor
+    #    pairs BEFORE they cross into ``keyword_pairs``. ``ON CONFLICT``
+    #    handles the incremental (mode='build') case where a pair already
+    #    exists from an earlier build; rebuild starts from empty.
+    conn.execute(
+        """
+        INSERT INTO keyword_pairs
+            (dir_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
+        SELECT ?, a.kw_id, b.kw_id, ?, COUNT(*), NULL, ?
+        FROM _build_chunk_kws a
+        JOIN _build_chunk_kws b
+          ON a.doc_id = b.doc_id
+         AND a.chunk_id = b.chunk_id
+         AND a.kw_id < b.kw_id
+        GROUP BY a.kw_id, b.kw_id
+        HAVING COUNT(*) >= ?
+        ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+            cooccur_count = cooccur_count + excluded.cooccur_count,
+            npmi = NULL,
+            updated_at = excluded.updated_at
+        """,
+        (scope_dir_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
+    )
+
+    # 3. Re-apply the write-time floor to legacy rows. In incremental mode
+    #    a previously-present pair might now sit below ``min_pair_count``
+    #    (e.g. min_pair_count raised between builds); the invariant is
+    #    "every row in keyword_pairs has cooccur_count >= min_pair_count".
+    conn.execute(
+        "DELETE FROM keyword_pairs "
+        "WHERE dir_id = ? AND source = ? AND cooccur_count < ?",
+        (scope_dir_id, CHUNK_COOCCUR_SOURCE, int(min_pair_count)),
+    )
+
+    # 4. Recompute npmi for all surviving pairs in this scope. Bounded by
+    #    the post-HAVING row count (much smaller than pre-v9's raw pair
+    #    space). Load fresh chunk_df from the freshly-populated
+    #    keyword_stats table.
+    chunk_df: Dict[int, int] = {
+        int(r[0]): int(r[1]) for r in conn.execute(
+            "SELECT kw_id, chunk_df FROM keyword_stats WHERE dir_id = ?",
+            (scope_dir_id,),
+        )
+    }
+
+    pair_rows = conn.execute(
+        "SELECT kw_a_id, kw_b_id, cooccur_count FROM keyword_pairs "
+        "WHERE dir_id = ? AND source = ?",
+        (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+    ).fetchall()
+
     updates: List[Tuple[float, int, int, int]] = []
     drops: List[Tuple[int, int, int]] = []
-    total = len(touched_pair_keys)
+    total = len(pair_rows)
     step = max(1, total // 200) if total else 1
-    for idx, (a, b) in enumerate(touched_pair_keys, start=1):
-        co = cooccur_of.get((a, b))
-        if co is None:
-            # Pair was upserted but subsequently pruned (or race) — skip.
-            continue
-        if co < min_pair_count:
-            drops.append((scope_dir_id, a, b))
-            continue
+    for idx, row in enumerate(pair_rows, start=1):
+        a, b, co = int(row[0]), int(row[1]), int(row[2])
         npmi = _npmi(co, chunk_df.get(a, 0), chunk_df.get(b, 0), n_chunks)
         # v8 invariant: chunk_cooccur.npmi is de-facto NOT NULL; drop
         # degenerate rows regardless of the floor. Below-floor rows also
         # drop when caller set a positive min_npmi.
-        if npmi is None:
+        if npmi is None or (min_npmi > 0.0 and npmi < min_npmi):
             drops.append((scope_dir_id, a, b))
-            continue
-        if min_npmi > 0.0 and npmi < min_npmi:
-            drops.append((scope_dir_id, a, b))
-            continue
-        updates.append((float(npmi), scope_dir_id, a, b))
+        else:
+            updates.append((float(npmi), scope_dir_id, a, b))
         if idx == total or idx % step == 0:
             _emit("pairs_advance", current=idx, total=total)
     _emit("pairs_scan_end", surviving=len(updates))
@@ -1952,48 +1951,6 @@ def _finalize_pair_npmi(
     ).fetchone()[0])
 
 
-def _flush_pair_delta(
-    conn,
-    *,
-    scope_dir_id: int,
-    pair_delta: Counter,
-    touched_pair_keys: set,
-    min_pair_count: int,
-    min_npmi: float,
-    n_chunks: int,
-    now: str,
-    on_event: Optional[Callable[[dict], None]] = None,
-) -> int:
-    """Convenience wrapper: UPSERT the delta then finalize npmi + prune.
-
-    Kept as the single entry point for callers that don't need periodic
-    intermediate flushes. Internal build pass 3 uses
-    :func:`_upsert_pair_delta` + :func:`_finalize_pair_npmi` directly so
-    the RAM-bounding periodic flushes fit naturally into pass 2.
-    """
-    if not pair_delta and not touched_pair_keys:
-        return int(conn.execute(
-            "SELECT COUNT(*) FROM keyword_pairs "
-            "WHERE dir_id = ? AND source = ?",
-            (scope_dir_id, CHUNK_COOCCUR_SOURCE),
-        ).fetchone()[0])
-    _upsert_pair_delta(
-        conn,
-        scope_dir_id=scope_dir_id,
-        pair_delta=pair_delta,
-        touched_pair_keys=touched_pair_keys,
-        now=now,
-    )
-    pair_delta.clear()
-    return _finalize_pair_npmi(
-        conn,
-        scope_dir_id=scope_dir_id,
-        touched_pair_keys=touched_pair_keys,
-        min_pair_count=min_pair_count,
-        min_npmi=min_npmi,
-        n_chunks=n_chunks,
-        on_event=on_event,
-    )
 
 
 # ---------------------------------------------------------------------------

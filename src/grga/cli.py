@@ -952,15 +952,33 @@ def _make_index_build_progress():
                     note=f"第 {event['iter']}/{event['iters']} 轮 · {event['phrases']} 短语",
                 )
         elif phase == "materialise_start":
+            total_chunks = event.get("total_chunks") or None
             state["mat"] = progress.add_task(
-                "[green]写入 chunks / 关键词", total=event["total_docs"], note=""
+                "[green]写入 chunks / 关键词",
+                total=total_chunks if total_chunks else event["total_docs"],
+                note="",
             )
         elif phase == "materialise_advance":
-            progress.update(
-                state.get("mat"),
-                completed=event["current"],
-                note=_short(event.get("path", "")),
-            )
+            total_chunks = event.get("total_chunks")
+            chunks_done = event.get("chunks_done")
+            if total_chunks and chunks_done is not None:
+                # Chunk-level granularity: fill by chunk count, annotate
+                # with the doc position + current file.
+                progress.update(
+                    state.get("mat"),
+                    total=total_chunks,
+                    completed=chunks_done,
+                    note=f"文档 {event['current']}/{event['total']} · "
+                         f"{chunks_done}/{total_chunks} chunks · "
+                         f"{_short(event.get('path', ''))}",
+                )
+            else:
+                # Back-compat: doc-level only (older event shape).
+                progress.update(
+                    state.get("mat"),
+                    completed=event["current"],
+                    note=_short(event.get("path", "")),
+                )
         elif phase == "pairs_start":
             state["pairs"] = progress.add_task(
                 "[yellow]生成共现对",
