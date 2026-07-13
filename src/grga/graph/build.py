@@ -118,6 +118,12 @@ _STOPWORDS = frozenset(
 # corpus prior (HC2), just a widened subscription. Detection still owns
 # ``_CORE_STOP_BOUNDARIES`` unchanged (it must not swallow 面壁**者** or
 # 破壁**人**), so the two-layer semantic split is preserved.
+#
+# 单字构词后缀（者/性/化/式/...）刻意不加入 _INDEX_STOPWORDS —— 全局静态
+# 表无法区分「特定语料里它就是一个概念」（太极拳教程里的『化』/化工语料
+# 里的『氯』）和「它是 tokenisation artefact」两种情况。这一层由
+# _derive_scope_stopword_candidates + _filter_chunk_kws_for_pairs 在
+# build 期语料自适应地决定，见 Pass 1.5 / Pass 3。
 _INDEX_STOPWORDS = _STOPWORDS | _CORE_STOP_BOUNDARIES
 
 _MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
@@ -132,6 +138,24 @@ VALID_CHUNK_MODES = ("line", "chars")
 DEFAULT_CHUNK_MAX_CHARS = 600
 DEFAULT_CHUNK_MIN_CHARS = 300
 DEFAULT_MIN_PAIR_COUNT = 3
+
+# 3a threshold (2026-07-13): single-CJK-char tokens whose chunk-df ratio
+# exceeds this become *candidates* for the pair-time containment filter
+# (:func:`_filter_chunk_kws_for_pairs`). Not a global stopword table —
+# every candidate still needs per-chunk structural evidence to be dropped.
+# 0.15 is a conservative starting point (a truly functional morpheme like
+# 者/性 in natural Chinese easily appears in ≫15% of chunks; a domain
+# concept like 氯 in a chemistry corpus typically does not). Expose as a
+# CLI flag only when real corpora show the constant needs tuning.
+STOPWORD_DF_THRESHOLD = 0.15
+
+# Below this many chunks the chunk-df ratio is statistically meaningless:
+# with e.g. n_chunks=6 the ``df_threshold * n_chunks`` limit drops below 1,
+# so *every* single CJK char that appears once would be flagged. A tiny
+# scope has no basis for corpus-adaptive inference, so we skip 3a entirely
+# (returning an empty candidate set). 3b then has nothing to gate — pairs
+# pass through unfiltered, which is the safe behaviour for sparse data.
+STOPWORD_MIN_CHUNKS = 20
 
 # Bounded-RAM pair accumulation (F3 fix). The build's in-RAM ``pair_delta``
 # Counter accumulates chunk co-occurrence increments; without periodic
@@ -551,6 +575,88 @@ def _keywords_from_tokens(tokens: Iterable[str]) -> Counter:
             continue
         counts[key] += 1
     return counts
+
+
+# ---------------------------------------------------------------------------
+# Scope-local stopword handling (2026-07-13). A single CJK character like
+# 者/性/化 cannot go in the global _INDEX_STOPWORDS: whether it is a bare
+# function morpheme or a genuine domain concept depends entirely on the
+# corpus (『化』 is a stopword in generic docs but a core term in a 太极拳
+# tutorial; 『氯』 is meaningful in a chemistry corpus). So we derive a
+# per-scope *candidate* set from chunk-df statistics (3a) and only drop a
+# candidate from pair enumeration when *this chunk* also contains a longer
+# keyword that has the candidate as a substring (3b) — i.e. structural
+# evidence that the standalone char is a tokenisation artefact. keyword_stats
+# keeps the raw counts untouched; only keyword_pairs is gated.
+# ---------------------------------------------------------------------------
+
+
+def _is_single_cjk(tok: str) -> bool:
+    """True when ``tok`` is exactly one CJK Unified Ideograph."""
+    return len(tok) == 1 and "\u4e00" <= tok <= "\u9fff"
+
+
+def _derive_scope_stopword_candidates(
+    chunk_tokens: Dict[tuple, List[str]],
+    *,
+    df_threshold: float = STOPWORD_DF_THRESHOLD,
+    min_chunks: int = STOPWORD_MIN_CHUNKS,
+) -> frozenset:
+    """Return single-CJK-char tokens whose chunk-df ratio exceeds threshold.
+
+    "chunk-df" counts the number of chunks that contain the token at least
+    once; the ratio is ``df / n_chunks``. Only single CJK characters are
+    considered — multi-char tokens are trusted, ASCII tokens are handled by
+    the static stopword list. The returned set is a *candidate* set for the
+    3b containment filter (see :func:`_filter_chunk_kws_for_pairs`); it does
+    not filter ``keyword_stats``.
+
+    Small scopes (``n_chunks < min_chunks``) short-circuit to an empty set:
+    the chunk-df ratio has no statistical power at that size, and 3b's
+    substring evidence is a weaker safety net when the candidate set is
+    saturated. Skipping 3a entirely is the safe behaviour for sparse data.
+    """
+    n_chunks = len(chunk_tokens)
+    if n_chunks < min_chunks:
+        return frozenset()
+    df: Counter = Counter()
+    for toks in chunk_tokens.values():
+        seen = {t.casefold() for t in toks if _is_single_cjk(t)}
+        for t in seen:
+            df[t] += 1
+    limit = df_threshold * n_chunks
+    return frozenset(t for t, c in df.items() if c > limit)
+
+
+def _filter_chunk_kws_for_pairs(
+    chunk_kws: Sequence[str],
+    *,
+    stopword_candidates: frozenset,
+) -> List[str]:
+    """Drop stopword candidates that are substrings of other kws in the chunk.
+
+    Implements 3b: a scope-local stopword candidate is only treated as a
+    tokenisation artefact when *this specific chunk* also holds a longer
+    keyword that contains it (e.g. 面壁者 present ⇒ standalone 者 dropped).
+    A candidate with no containing sibling in this chunk is kept — it may be
+    a domain concept in isolation (e.g. 氯 alongside 钠 but no 氯化钠 here).
+    Non-candidate keywords are always kept.
+    """
+    if not stopword_candidates:
+        return list(chunk_kws)
+    # Candidates from :func:`_derive_scope_stopword_candidates` are always
+    # single CJK chars — a single char can only be contained by a strictly
+    # longer kw. Pre-filter the substring pool to skip len==1 kws; this
+    # both trims scan cost and lets us drop the ``kw != other`` guard.
+    containing_pool = [k for k in chunk_kws if len(k) > 1]
+    survivors: List[str] = []
+    for kw in chunk_kws:
+        if kw not in stopword_candidates:
+            survivors.append(kw)
+            continue
+        if not any(kw in other for other in containing_pool):
+            survivors.append(kw)
+    return survivors
 
 
 # ---------------------------------------------------------------------------
@@ -1313,6 +1419,23 @@ def build_graph_index(
         stats.ngram_dict_added = max(0, len(auto_dict) - prior_dict_size)
 
         # ------------------------------------------------------------------
+        # Pass 1.5 (2026-07-13): derive scope-local stopword candidates from
+        # the tokenised corpus (3a). Single CJK chars with a high chunk-df
+        # ratio are candidates for the pair-time containment filter (3b);
+        # this set never touches keyword_stats. See :func:
+        # `_derive_scope_stopword_candidates`.
+        # ------------------------------------------------------------------
+        scope_stopword_candidates = _derive_scope_stopword_candidates(
+            chunk_tokens
+        )
+        _emit(
+            "stopword_derived",
+            count=len(scope_stopword_candidates),
+            chars=sorted(scope_stopword_candidates),
+            threshold=STOPWORD_DF_THRESHOLD,
+        )
+
+        # ------------------------------------------------------------------
         # Pass 2 (v9 keyword-primary): tokenise chunks in RAM and derive the
         # doc-level inverted index (``keyword_docs``), the pair delta, and
         # per-doc ``n_chunks_with_kw`` directly from ``chunk_tokens``. The
@@ -1366,15 +1489,23 @@ def build_graph_index(
                     continue
                 file_had_keywords = True
                 n_chunks_with_kw_for_doc += 1
-                # Per-doc aggregation.
+                # Per-doc aggregation (raw kw_counts — keyword_stats is
+                # never gated by the 3a/3b filter, only pair enumeration is).
                 chunk_kw_ids: List[int] = []
                 for kw, occ in kw_counts.items():
                     kid = kw_id_map[kw]
                     chunk_kw_ids.append(kid)
                     prev_occ, prev_chunks = per_doc_kw_agg.get(kid, (0, 0))
                     per_doc_kw_agg[kid] = (prev_occ + int(occ), prev_chunks + 1)
-                # Pair enumeration on the chunk's distinct kw_id set.
-                distinct_ids = sorted(set(chunk_kw_ids))
+                # Pair enumeration: apply the 3b containment filter over the
+                # chunk's kw *strings* first, then map to ids. A candidate
+                # stopword drops out only when this chunk contains a longer
+                # kw that has it as substring (e.g. 者 next to 面壁者).
+                pair_kws = _filter_chunk_kws_for_pairs(
+                    list(kw_counts.keys()),
+                    stopword_candidates=scope_stopword_candidates,
+                )
+                distinct_ids = sorted({kw_id_map[k] for k in pair_kws})
                 for i, ka in enumerate(distinct_ids):
                     for kb in distinct_ids[i + 1:]:
                         pair_delta[(ka, kb)] += 1
