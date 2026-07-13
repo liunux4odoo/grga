@@ -4,7 +4,34 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
-### related 信号契约 v3.1 · `resolved_seeds` 多 seed 探针（docs/design/related-signals-v3.md）
+### build 期写入门槛自适应 · Gate 1 独立性 + Gate 2 阶梯（docs/design/decisions.md §2026-07-13）
+
+`min_pair_count` 固定为 5 对小语料过严：一本中篇（几百 chunk）的真实
+概念对常只共现 2-3 次，全被砍空，`related --mode graph` 频繁空结果。
+但直接降门槛会放进 npmi 虚高的噪声（两个词各出现 1 次恰好同现 → npmi
+满分 1.0）。改为两条正交门槛：
+
+- **新增**：写入期 **Gate 1 · 独立性判据**（无参、恒开、严格三元相等）——
+  `chunk_df_a == chunk_df_b == cooccur_count`。挡掉"两个词完全绑定"
+  （npmi=1.0 artefact）；保留"单向依附"（rare 词只跟 common 词同现）
+  的真信号。用严格三元相等（不用 `co >= max`）是因为 `mode='build'`
+  下 `cooccur_count` 是 grow-only（D6），可以出现 `co > min(df_a, df_b)`
+  的合法单向依附——`co >= max` 会误杀，三元相等不会。
+  `_finalize_pairs_from_temp` 与 `_prune_low_score_pairs` 同步实现。
+- **变更**：`min_pair_count` 默认从固定 `5` 改为 **scope 自适应阶梯**
+  `resolve_min_pair_count(n_chunks)`：`≤200→2` / `≤2000→3` / `≤20000→4`
+  / `>20000→5`。`grga index build/rebuild --min-pair-count` 默认值
+  `5` → 未设置（哨兵 `None` = 自适应）；显式传 int 覆盖阶梯。
+- **变更**：`grga.graph.build.build_graph_index` 的 `min_pair_count`
+  形参类型 `int` → `Optional[int]`（`None` = 自适应）。
+- **变更**：`_prune_low_score_pairs`（v7→v8 迁移的存储契约执行者）改为
+  per-scope 查 `scope_stats.n_chunks` 求 floor + Gate 1；无 scope_stats
+  时回退固定 5。
+- **不变**：Gate 3（`min_npmi=0.2`）、大语料（>20000 chunks）行为、
+  `related --json` 契约、BuildStats / CLI JSON 形状。
+- 小语料 `related` 覆盖率显著提升；大语料零回归。
+
+## [Unreleased] · related 信号契约 v3.1 · `resolved_seeds` 多 seed 探针（docs/design/related-signals-v3.md）
 
 多 seed `related --mode graph` 的空结果原本二义——分不清"seed 未索引"
 和"seed 已索引但孤立（边被写入期/读侧 npmi 门槛滤空）"。这两种情况

@@ -440,11 +440,17 @@ Writes to the v9 keyword-primary tables: `keyword_pairs`（累积知识资产，
 
 CLI flag：
 
-- `--min-pair-count INT`（默认 `5`）— 单 scope 内 `cooccur_count < N`
-  的 pair 不记入 `keyword_pairs`。
+- `--min-pair-count INT`（默认未设置 = **scope 自适应阶梯**：`≤200 chunks→2`
+  / `≤2000→3` / `≤20000→4` / `>20000→5`）— 单 scope 内 `cooccur_count < N`
+  的 pair 不记入 `keyword_pairs`。显式传 int 覆盖阶梯（如 `--min-pair-count 5`
+  强制回到 pre-v3.2 固定下界）。
+- **独立性判据**（无参、恒开、不受 `--min-pair-count` 影响）— 两个词
+  完全绑定（`chunk_df_a == chunk_df_b == cooccur_count`，npmi 蜕化为
+  1.0 artefact）的 pair 一律不记入。稀有词单向依附（只跟某常见词同现，
+  但该常见词有独立出现）是真信号，保留。
 - `--min-npmi-build FLOAT`（默认 `0.2`）— `npmi < X` 的 pair 不记入
   `keyword_pairs`。`llm_promoted` 边不受此限。
-- 上述两个门槛固化资产**下界**；读侧 `related --mode graph --min-npmi`
+- 上述门槛固化资产**下界**；读侧 `related --mode graph --min-npmi`
   只能收紧到 ≥ 写入期门槛，不能放松。想让更多噪声边参与召回，需重建
   时用更低值（代价：写入期资产膨胀）。
 - `--chunk-mode line`（默认，1 line = 1 chunk）或

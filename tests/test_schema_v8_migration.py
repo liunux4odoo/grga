@@ -131,18 +131,29 @@ def _populate_v7_fixture(conn: sqlite3.Connection) -> dict:
             "occurrence_count) VALUES (?, ?, ?, ?)",
             (kw_id, doc_id, chunk_id, occ),
         )
-    # keyword_pairs (mix of pass / prune / llm_promoted)
+    # keyword_pairs — data-consistent with the keyword_chunks above so the
+    # v3.2 independence gate (df_a == df_b == co, strict three-way equality)
+    # is exercised against realistic values (co can never exceed
+    # min(df_a, df_b) in a real corpus). scope A chunk_df: alpha=3, beta=2,
+    # gamma=1; scope B: alpha=1, delta=1. scope A n_chunks(with-kw)=3 →
+    # adaptive floor=2; scope B=2 → floor=2.
+    #
+    #   (1,1,2) alpha-beta co=2: df=(3,2,co=2) → not 3-way equal → indep✓;
+    #           co=2≥floor2 ✓; npmi≥0.2 ✓                                  → SURVIVE
+    #   (1,1,3) alpha-gamma co=1: co=1<floor2 → PRUNE (count floor)
+    #   (1,1,3) llm_promoted:    exempt from all gates                     → SURVIVE
+    #   (2,1,4) alpha-delta co=1: df=(1,1,co=1) → glued (3-way equal)      → PRUNE (independence)
     conn.execute(
         "INSERT INTO keyword_pairs(dir_id, kw_a_id, kw_b_id, source, "
-        "cooccur_count, npmi) VALUES (1, 1, 2, ?, 6, 0.35)",
+        "cooccur_count, npmi) VALUES (1, 1, 2, ?, 2, 0.35)",
         (CHUNK_COOCCUR_SOURCE,),
     )
     conn.execute(
         "INSERT INTO keyword_pairs(dir_id, kw_a_id, kw_b_id, source, "
-        "cooccur_count, npmi) VALUES (1, 1, 3, ?, 3, 0.5)",
+        "cooccur_count, npmi) VALUES (1, 1, 3, ?, 1, 0.5)",
         (CHUNK_COOCCUR_SOURCE,),
     )
-    # Reuse (1,2) pair distinguished by source column to test admission gates.
+    # Reuse (1,3) pair distinguished by source column to test admission gates.
     # Actually two chunk_cooccur rows with same key would violate PK; use
     # source='llm_promoted' for the third row instead.
     conn.execute(
@@ -150,15 +161,11 @@ def _populate_v7_fixture(conn: sqlite3.Connection) -> dict:
         "cooccur_count, npmi) VALUES (1, 1, 3, ?, 10, NULL)",
         (LLM_PROMOTED_SOURCE,),
     )
+    # alpha-delta in scope B: df_alpha=1, df_delta=1, co=1 → glued
+    # (df == df == co, three-way equal) → independence prune.
     conn.execute(
         "INSERT INTO keyword_pairs(dir_id, kw_a_id, kw_b_id, source, "
-        "cooccur_count, npmi) VALUES (2, 1, 4, ?, 7, 0.4)",
-        (CHUNK_COOCCUR_SOURCE,),
-    )
-    # A low-npmi row that should be pruned.
-    conn.execute(
-        "INSERT INTO keyword_pairs(dir_id, kw_a_id, kw_b_id, source, "
-        "cooccur_count, npmi) VALUES (1, 2, 3, ?, 8, 0.15)",
+        "cooccur_count, npmi) VALUES (2, 1, 4, ?, 1, 0.9)",
         (CHUNK_COOCCUR_SOURCE,),
     )
     conn.commit()
@@ -182,14 +189,13 @@ def _populate_v7_fixture(conn: sqlite3.Connection) -> dict:
         },
         "expected_surviving_pairs": {
             # (dir_id, kw_a_id, kw_b_id, source): (cooccur, npmi_or_None)
-            (1, 1, 2, CHUNK_COOCCUR_SOURCE): (6.0, 0.35),
+            (1, 1, 2, CHUNK_COOCCUR_SOURCE): (2.0, 0.35),
             (1, 1, 3, LLM_PROMOTED_SOURCE): (10.0, None),
-            (2, 1, 4, CHUNK_COOCCUR_SOURCE): (7.0, 0.4),
         },
         "expected_pruned_pairs": {
             # These must be gone after v8 migration.
-            (1, 1, 3, CHUNK_COOCCUR_SOURCE),  # co<5
-            (1, 2, 3, CHUNK_COOCCUR_SOURCE),  # npmi<0.2
+            (1, 1, 3, CHUNK_COOCCUR_SOURCE),  # co=1 < adaptive floor 2
+            (2, 1, 4, CHUNK_COOCCUR_SOURCE),  # glued: df=df=co=1 (Gate 1)
         },
     }
 

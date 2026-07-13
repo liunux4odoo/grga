@@ -90,6 +90,7 @@ caller 判断"。
 |---|---|---|---|
 | 未知 seed（不在 `keywords` 表） | `{"results": []}` | `false` | 静默返回空；`in_index=false` 提示 caller 换词（`suggest reformulate`）|
 | Hub seed（`chunk_df` 极高，如 `韩立` df=44811） | `{"results": []}` | `true` | 所有 pair 在写入期被 npmi 门槛过滤，符合设计（决策 D3：不替 caller 判断）；`in_index=true` 提示 caller 换更具体的 seed |
+| 稀有 seed（`total_occurrences=1` 或全部与另一词完全绑定） | `{"results": []}` | `true` | 所有 pair 被写入期 **Gate 1 独立性判据** (`df_a == df_b == co`，完全绑定) 视为 npmi=1.0 artefact 过滤；`in_index=true` 提示 caller 稀有词应走 T1 `search`，不适合图扩展。见 `docs/design/decisions.md §2026-07-13 build 期写入门槛自适应` |
 | `min_npmi` 收紧过高 | `{"results": []}` | `true` | 读侧过滤后无候选；提示 caller 松开 `--min-npmi` |
 | 空 scope | `{"results": []}` | `true`/`false`（词表级，与 scope 无关） | scope 未 index，但 seed 是否在全局词表仍如实报告 |
 

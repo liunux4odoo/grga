@@ -4,6 +4,91 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-13 · build 期写入门槛自适应（Gate 1 独立性 + Gate 2 阶梯）
+
+**Plan step**：resolved_seeds 探针发布后从 caller 视角复盘"已知但孤立"的
+高频触发场景（小语料上 `total_occurrences=1` 或 low-count pair 全部被
+`min_pair_count=5` 砍空）。用户反馈两条硬约束：build 时同一目录内文件
+大小分布很宽（单一参数覆盖不了）；caller 已从 build 参数声明中移除
+（只能调检索参数）。
+
+**Decision**：`grga.graph.build._finalize_pairs_from_temp` 与
+`grga.graph.schema._prune_low_score_pairs` 从 v3.2 起改用三门槛结构：
+
+1. **Gate 1 · 独立性（无参、恒开）**：`df_a == df_b == co`（chunk 级三元
+   相等）。两个词若在 chunk 级完全绑定（每次出现都带着对方），其 npmi
+   蜕化为频率无关的 1.0（`p_ab == p_a == p_b`），是纯 artefact。用**严格
+   三元相等**而非 `co >= max(df_a, df_b)`：`mode='build'` 增量构建的
+   `cooccur_count` 是 grow-only（D6），而 `chunk_df` 每次重算，doc 更新
+   后会出现 `co > min(df_a, df_b)` 的**合法单向依附**——`co >= max` 会
+   误杀它，三元相等不会。此判据补住了 pair-count floor 单独无法防的低频
+   npmi 虚高（各 1 次同现 = npmi=1.0 = 满分噪声）。保留"单向依附"
+   （rare 词只跟 common 词同现）——这类是真信号（专有名词的典型行为）。
+2. **Gate 2 · 频次下界（scope 自适应阶梯）**：
+   `resolve_min_pair_count(n_chunks)` 阶梯——
+   `≤ 200 → 2` / `≤ 2000 → 3` / `≤ 20000 → 4` / `> 20000 → 5`。
+   `min_pair_count=None`（新默认哨兵 `ADAPTIVE_MIN_PAIR_COUNT`）触发；
+   显式 int 覆盖阶梯（兼容旧 CLI 用法与测试 fixture）。
+3. **Gate 3 · npmi 下界（不变）**：`BUILD_MIN_NPMI = 0.2`。语义关联门槛
+   与规模无关。
+
+**Rationale**：
+
+- **npmi 门槛在低频区失效**：`(co, fa, fb) = (1,1,1)` npmi = 1.0；
+  `(2,2,2)` npmi = 1.0；`(N,N,N)` 任意 N npmi = 1.0。这些是完全绑定，
+  是 npmi 虚高的**结构性来源**。`min_npmi` 挡不住，pair_count floor 单调
+  提高只能砍掉边界情况，本质问题不解决。Gate 1 直接测量"是否绑定"，
+  规模无关，无参数，正好命中。**严格三元相等 vs `co >= max`**：`mode='build'`
+  下 `cooccur_count` 是 grow-only（D6），可以出现 `co > min(df_a, df_b)`
+  的合法单向依附。`co >= max` 会误判其为 glued 并删除；三元相等只在
+  `df_a == df_b == co`（真绑定）时触发，容忍增量累积 skew。
+- **scope 自适应而非全局**：user 约束 1 明确"同目录里文件大小差异大"，
+  scope 级 `n_chunks` 是最粗但正确的粒度。若真要按文件粒度自适应，
+  scope 的 pair 表是跨文件聚合的、无法拆分。阶梯（而非连续函数）便于
+  log / 排查、10× 边界符合量级习惯。
+- **不引入 `--profile small` 之类的预设开关**：那是"把两条参数捆成一个
+  开关" = 隐藏取舍。阶梯 + 独立性判据都是自动的，caller / 操作员完全
+  不需要知道有多少档。
+- **`_prune_low_score_pairs` 同步升级**：这个函数是 v7→v8 迁移期的
+  "存储契约执行者"，也用在 fresh install 的 no-op 分支。改成 per-scope
+  查 `scope_stats.n_chunks` 求 floor，缺失时（legacy DB 或 phase-1
+  backfill 之前）回退到固定 `BUILD_MIN_PAIR_COUNT = 5`。SQL 里用相关
+  子查询做 Gate 1 三元相等 join（`co == COALESCE(df_a, 0) AND co ==
+  COALESCE(df_b, 0)`），避免 Python 循环。`keyword_stats (dir_id, kw_id)`
+  是 WITHOUT ROWID 主键，索引查找 O(log N)。
+- **v7→v8 迁移警告消息同步更新**（schema.py `_migration_announce`）：
+  枚举三门槛 + 引导用户 `grga index rebuild` 作为唯一恢复路径，避免
+  "静默删除高 npmi glued pair" 让用户困惑。
+
+**Impact**：
+
+- 小语料（≤ 2000 chunks）的 `related --mode graph` 覆盖率显著提升
+  （旧默认 5 → 新 2-3），low-count 真信号不再被一刀切。
+- 大语料（> 20000 chunks）行为**保持不变**：Gate 2 阶梯仍是 5；Gate 1
+  在大规模上极少触发（真信号语料里完全绑定的对天然稀少）。
+- 现有测试有两处 fixture 恰好是"完全绑定 artefact"，被 Gate 1 精准命中：
+  `test_build_min_pair_count_opt_out`（`"alpha beta"` × 2 chunks 无 solo）
+  与 `test_build_keeps_low_df_char_pairs`（`氯` 只在 1 chunk）。修补：
+  加 solo chunk。这些 fixture 之前正是我们要挡的 npmi 满分噪声，Gate 1
+  逼出了它们的语义模糊性。
+- BuildStats / CLI JSON 输出形状零变化。`related --json` 契约无变化。
+- CLI 破坏性：`grga index build --min-pair-count` 默认从 `5` → 未设置
+  （= 自适应）。显式传值仍生效；无脚本依赖旧默认，pre-1.0 直接改。
+
+**Files**：
+- `src/grga/graph/build.py`（`ADAPTIVE_MIN_PAIR_COUNT` /
+  `resolve_min_pair_count` 阶梯 + `build_graph_index` 签名 +
+  `_finalize_pairs_from_temp` Gate 1）
+- `src/grga/graph/schema.py`（`_prune_low_score_pairs` scope-aware
+  + Gate 1 SQL；`_migrate_v7_to_v8_inplace` docstring 更新）
+- `src/grga/cli.py`（`--min-pair-count` build/rebuild 默认 → `None`
+  + help 文案）
+- `tests/test_graph_build.py`（4 个新用例覆盖阶梯边界 / 完全绑定 drop /
+  单向依附 keep / None 哨兵；1 个 fixture 修补）
+- `tests/test_scope_stopwords.py`（1 个 fixture 修补）
+- `tests/graph/test_chunk_migration.py`（2 个新用例：三门槛联动 +
+  scope_stats 缺失回退）
+
 ## 2026-07-13 · related v3.1 · `resolved_seeds` 多 seed 探针
 
 **Plan step**：related-signals v3（`docs/design/related-signals-v3.md`）

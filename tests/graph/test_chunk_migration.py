@@ -157,6 +157,142 @@ def test_llm_promote_flow_marks_source_correctly(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# _prune_low_score_pairs (v3.2 scope-adaptive + independence gate)
+# ---------------------------------------------------------------------------
+
+
+def test_prune_low_score_pairs_scope_adaptive_and_independence(tmp_path):
+    """The storage-contract pruner applies the three write-time gates:
+
+    * Gate 1 (independence): co >= max(chunk_df_a, chunk_df_b) → drop
+    * Gate 2 (scope-adaptive count floor): from scope_stats.n_chunks
+    * Gate 3 (npmi floor): NULL or below BUILD_MIN_NPMI → drop
+
+    Verified via direct SQL setup so we don't have to build a v7-shape
+    fixture. The three gates operate independently — a single-scope table
+    with rows crafted to hit each of them individually and one row that
+    passes all three.
+    """
+    from grga.graph.schema import (
+        CHUNK_COOCCUR_SOURCE, BUILD_MIN_NPMI,
+        _prune_low_score_pairs, connect, ensure_schema,
+    )
+
+    db = tmp_path / "graph.db"
+    conn = connect(db)
+    try:
+        ensure_schema(conn)
+        # Set up one scope with n_chunks=50 → resolve_min_pair_count(50) = 2.
+        conn.execute(
+            "INSERT INTO directories (id, path) VALUES (1, ?)",
+            (str(tmp_path),),
+        )
+        conn.execute(
+            "INSERT INTO scope_stats (dir_id, n_chunks, n_docs, vocab_size, updated_at) "
+            "VALUES (1, 50, 5, 10, '2026-07-13T00:00:00Z')"
+        )
+        # Vocabulary + per-scope stats. Values chosen to exercise each gate:
+        #   kw 1..5 with chunk_df:  10, 10, 10, 10, 10
+        kws = [(i, f"kw{i}") for i in range(1, 6)]
+        conn.executemany(
+            "INSERT INTO keywords (id, kw) VALUES (?, ?)", kws
+        )
+        conn.executemany(
+            "INSERT INTO keyword_stats "
+            "(dir_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+            "VALUES (1, ?, 10, 5, 20, '2026-07-13T00:00:00Z')",
+            [(i,) for (i, _) in kws],
+        )
+        # Pairs: (kw_a, kw_b, cooccur, npmi) — one per gate + one survivor.
+        # A stored ``kw_a_id < kw_b_id`` invariant is enforced by the schema.
+        conn.executemany(
+            "INSERT INTO keyword_pairs "
+            "(dir_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, '2026-07-13T00:00:00Z')",
+            [
+                # PASS: co=5 < max(10,10), co>=2 floor, npmi>=0.2
+                (1, 2, CHUNK_COOCCUR_SOURCE, 5, 0.55),
+                # DROP Gate 1: co=10 == max(10,10) → glued
+                (1, 3, CHUNK_COOCCUR_SOURCE, 10, 0.99),
+                # DROP Gate 2: co=1 below adaptive floor (2)
+                (1, 4, CHUNK_COOCCUR_SOURCE, 1, 0.80),
+                # DROP Gate 3a: npmi NULL
+                (1, 5, CHUNK_COOCCUR_SOURCE, 5, None),
+                # DROP Gate 3b: npmi below BUILD_MIN_NPMI
+                (2, 3, CHUNK_COOCCUR_SOURCE, 5, 0.05),
+                # SURVIVE (llm_promoted always exempt from all three gates)
+                (2, 4, "llm_promoted", 1, None),
+            ],
+        )
+        conn.commit()
+
+        deleted = _prune_low_score_pairs(conn)
+        conn.commit()
+        assert deleted == 4
+
+        surviving = [
+            (r["kw_a_id"], r["kw_b_id"], r["source"])
+            for r in conn.execute(
+                "SELECT kw_a_id, kw_b_id, source FROM keyword_pairs "
+                "ORDER BY kw_a_id, kw_b_id"
+            )
+        ]
+        assert surviving == [
+            (1, 2, CHUNK_COOCCUR_SOURCE),  # passed all three gates
+            (2, 4, "llm_promoted"),        # llm_promoted exempt
+        ]
+    finally:
+        conn.close()
+
+
+def test_prune_low_score_pairs_missing_scope_stats_falls_back_to_fixed_floor(tmp_path):
+    """Legacy DBs (or fresh installs seeded before scope_stats is populated)
+    with no scope_stats row for a dir_id must fall back to the pre-v3.2
+    fixed floor (BUILD_MIN_PAIR_COUNT=5), still applying Gates 1 and 3."""
+    from grga.graph.schema import (
+        CHUNK_COOCCUR_SOURCE, BUILD_MIN_PAIR_COUNT,
+        _prune_low_score_pairs, connect, ensure_schema,
+    )
+
+    db = tmp_path / "graph.db"
+    conn = connect(db)
+    try:
+        ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO directories (id, path) VALUES (1, ?)",
+            (str(tmp_path),),
+        )
+        # NO scope_stats row → fallback path.
+        kws = [(1, "kw1"), (2, "kw2"), (3, "kw3")]
+        conn.executemany("INSERT INTO keywords (id, kw) VALUES (?, ?)", kws)
+        conn.executemany(
+            "INSERT INTO keyword_stats "
+            "(dir_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+            "VALUES (1, ?, 20, 10, 40, '2026-07-13T00:00:00Z')",
+            [(i,) for (i, _) in kws],
+        )
+        conn.executemany(
+            "INSERT INTO keyword_pairs "
+            "(dir_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, '2026-07-13T00:00:00Z')",
+            [
+                # co=4 < fixed floor 5 → drop
+                (1, 2, CHUNK_COOCCUR_SOURCE, 4, 0.55),
+                # co=5 == floor 5, co < max(20,20), npmi ok → survive
+                (1, 3, CHUNK_COOCCUR_SOURCE, 5, 0.55),
+            ],
+        )
+        conn.commit()
+
+        deleted = _prune_low_score_pairs(conn)
+        conn.commit()
+        assert deleted == 1
+        assert BUILD_MIN_PAIR_COUNT == 5, "test assumes historic default"
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # graph_signals contract
 # ---------------------------------------------------------------------------
 

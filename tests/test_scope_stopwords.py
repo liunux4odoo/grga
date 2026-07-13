@@ -287,16 +287,23 @@ def test_build_filters_high_df_char_when_contained(sidecar_env, tmp_path):
 
 
 def test_build_keeps_low_df_char_pairs(sidecar_env, tmp_path):
-    """氯 is low-df in a small text — 3a shouldn't flag it, pairs stay."""
+    """氯 is low-df in a small text — 3a shouldn't flag it, pairs stay.
+
+    Note: 氯 must appear in at least two chunks (one alongside partners,
+    one solo) so the independence gate (co < max(df_a, df_b)) does not
+    drop its pairs as artefacts. A single glued co-occurrence would fail
+    that gate regardless of the stopword filter under test.
+    """
     scope = tmp_path / "corpus"
     scope.mkdir()
-    # 氯 appears standalone once, alongside 氯化钠 and other chemistry
-    # terms. Filler chunks push its chunk-df ratio below threshold.
+    # 氯 appears standalone plus alongside 氯化钠 / atomic-number context.
+    # Filler chunks push its chunk-df ratio below the 3a stopword threshold.
     filler = "\n".join(f"填充内容{i} 段落信息" for i in range(20))
     body = (
         f"{filler}\n"
         "氯化钠是一种常见盐类化合物\n"
         "氯的原子序数是十七号元素\n"
+        "氯 独立段落 提供独立性证据\n"
     )
     (scope / "chem.txt").write_text(body, encoding="utf-8")
 

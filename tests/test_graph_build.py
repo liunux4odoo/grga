@@ -706,15 +706,250 @@ def test_build_min_npmi_opt_out(sidecar_env, tmp_path):
 
 
 def test_build_min_pair_count_opt_out(sidecar_env, tmp_path):
-    """min_pair_count=1 admits pairs from tiny corpora (test-mode use)."""
+    """min_pair_count=1 admits pairs from tiny corpora (test-mode use).
+
+    Fixtures add a solo chunk per word so the pairs are *independent*
+    (co < max(df_a, df_b)) rather than glued — glued pairs (co == df_a ==
+    df_b) are dropped by the parameter-free independence gate regardless
+    of min_pair_count. See resolve_min_pair_count / _finalize_pairs_from_temp.
+    """
     scope = tmp_path / "corpus"
     scope.mkdir()
     (scope / "doc.txt").write_text(
-        "alpha beta\ngamma delta\n", encoding="utf-8",
+        "alpha beta\nalpha solo\ngamma delta\ngamma solo\n", encoding="utf-8",
     )
     db = tmp_path / "graph.db"
     stats = build_graph_index(
         scope, db_path=db, min_pair_count=1, min_npmi=0.0,
     )
-    # 2 chunks × 2 keywords each = 2 pairs (alpha,beta) and (gamma,delta).
-    assert stats.pairs_written == 2
+    # (alpha,beta) co=1 df_a=2 df_b=1 → independent; (gamma,delta) likewise.
+    # (alpha,solo)/(gamma,solo) also independent. Assert the two concept
+    # pairs survived without over-constraining incidental solo pairs.
+    conn = connect(db)
+    try:
+        surviving = {
+            (row[0], row[1])
+            for row in conn.execute(
+                "SELECT ka.kw, kb.kw FROM keyword_pairs p "
+                "JOIN keywords ka ON ka.id = p.kw_a_id "
+                "JOIN keywords kb ON kb.id = p.kw_b_id "
+                "WHERE p.source='chunk_cooccur'"
+            )
+        }
+    finally:
+        conn.close()
+    flat = {frozenset(pair) for pair in surviving}
+    assert frozenset({"alpha", "beta"}) in flat
+    assert frozenset({"gamma", "delta"}) in flat
+
+
+# --------------------------------------------------------------------------- #
+# v3.2 adaptive write-time gates (independence + scope-adaptive floor).       #
+# See docs/design/plan-2026-07-13-adaptive-build-gates.md (design)            #
+# + src/grga/graph/build.py::resolve_min_pair_count.                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_min_pair_count_ladder_boundaries():
+    """The step ladder is defined at explicit chunk-count boundaries."""
+    from grga.graph.build import resolve_min_pair_count
+
+    assert resolve_min_pair_count(0) == 2       # empty/degenerate
+    assert resolve_min_pair_count(1) == 2
+    assert resolve_min_pair_count(200) == 2     # inclusive upper bound
+    assert resolve_min_pair_count(201) == 3     # step
+    assert resolve_min_pair_count(2000) == 3
+    assert resolve_min_pair_count(2001) == 4    # step
+    assert resolve_min_pair_count(20000) == 4
+    assert resolve_min_pair_count(20001) == 5   # step (pre-v3.2 fixed)
+    assert resolve_min_pair_count(10**7) == 5
+
+
+def test_independence_gate_drops_fully_glued_pairs(sidecar_env, tmp_path):
+    """Two words that always co-occur (co == df_a == df_b) score npmi=1.0
+    as an artefact, not signal. The parameter-free independence gate must
+    drop them regardless of min_pair_count."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    # 5 chunks, each containing exactly "alpha beta". No solo chunk for
+    # either — they are fully glued (df_alpha = df_beta = co = 5).
+    (scope / "doc.txt").write_text(
+        "\n".join(["alpha beta"] * 5), encoding="utf-8",
+    )
+    db = tmp_path / "graph.db"
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+
+    conn = connect(db)
+    try:
+        pairs = list(conn.execute(
+            "SELECT ka.kw, kb.kw FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id "
+            "WHERE p.source='chunk_cooccur'"
+        ))
+    finally:
+        conn.close()
+    assert pairs == [], (
+        f"fully-glued (alpha,beta) must be dropped by independence gate; "
+        f"got {pairs}"
+    )
+
+
+def test_independence_gate_keeps_one_way_attachment(sidecar_env, tmp_path):
+    """A rare word that always appears alongside a common one — as long as
+    the common one has any independent chunk — is a *real* strong link and
+    must survive. Gate 1 uses max(df_a, df_b), not min, precisely to keep
+    this case."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    # beta only appears alongside alpha (df_beta = 3, co = 3), but alpha
+    # also appears in a solo chunk (df_alpha = 4). max(df_a, df_b) = 4 > co=3
+    # → not glued → survives.
+    (scope / "doc.txt").write_text(
+        "\n".join(["alpha beta"] * 3 + ["alpha solo"]),
+        encoding="utf-8",
+    )
+    db = tmp_path / "graph.db"
+    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+
+    conn = connect(db)
+    try:
+        pairs = {
+            frozenset({row[0], row[1]})
+            for row in conn.execute(
+                "SELECT ka.kw, kb.kw FROM keyword_pairs p "
+                "JOIN keywords ka ON ka.id = p.kw_a_id "
+                "JOIN keywords kb ON kb.id = p.kw_b_id "
+                "WHERE p.source='chunk_cooccur'"
+            )
+        }
+    finally:
+        conn.close()
+    assert frozenset({"alpha", "beta"}) in pairs, (
+        f"one-way attachment (beta only with alpha, alpha has solo) is "
+        f"genuine signal and must survive independence gate; got {pairs}"
+    )
+
+
+def test_adaptive_min_pair_count_none_resolves_from_n_chunks(sidecar_env, tmp_path):
+    """Passing ``min_pair_count=None`` (or omitting it) triggers the
+    scope-adaptive ladder — small scopes get a lower floor than fixed 5.
+
+    A ~10-chunk corpus resolves to floor=2 via
+    :func:`resolve_min_pair_count`; a pair with co=2 must survive the
+    adaptive default even though the pre-v3.2 fixed floor (5) would drop it.
+    """
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    # Two "alpha beta" chunks + solo chunks for independence + filler so
+    # the scope stays small (<=200 chunks → floor=2).
+    lines = ["alpha beta", "alpha beta", "alpha solo", "beta solo"]
+    lines += [f"filler word {i}" for i in range(4)]
+    (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
+    db = tmp_path / "graph.db"
+    # Explicit None to exercise the sentinel path.
+    build_graph_index(scope, db_path=db, min_pair_count=None, min_npmi=0.0)
+
+    conn = connect(db)
+    try:
+        pairs = list(conn.execute(
+            "SELECT ka.kw, kb.kw, p.cooccur_count "
+            "FROM keyword_pairs p "
+            "JOIN keywords ka ON ka.id = p.kw_a_id "
+            "JOIN keywords kb ON kb.id = p.kw_b_id "
+            "WHERE p.source='chunk_cooccur'"
+        ))
+    finally:
+        conn.close()
+    ab = [(a, b, co) for (a, b, co) in pairs if {a, b} == {"alpha", "beta"}]
+    assert ab, (
+        f"adaptive floor (n_chunks<=200 → floor=2) must admit co=2 pair; "
+        f"got {pairs}"
+    )
+    assert ab[0][2] == 2
+
+
+def test_independence_gate_survives_incremental_grow_only_accumulation(
+    sidecar_env, tmp_path
+):
+    """Strict three-way-equality Gate 1 tolerates incremental grow-only skew.
+
+    In ``mode=build`` the ``cooccur_count`` is grow-only (design D6, upsert
+    with ``+= excluded.cooccur_count``) while ``chunk_df`` is recomputed
+    fresh every build. After a doc update this can produce
+    ``co > min(df_a, df_b)`` for a *legitimate* one-way attachment pair.
+    A ``co >= max(df_a, df_b)`` Gate 1 would misfire and delete such a
+    pair; strict ``df_a == df_b == co`` does not.
+
+    Fixture designed so that after the incremental rebuild:
+
+    * ``co`` accumulates to a value equal to ``max(df_a, df_b)`` — the
+      exact bug trigger for a ``co >= max`` Gate 1 (which would drop).
+    * ``co`` still stays below ``n_chunks`` so ``_npmi`` remains defined
+      (does not hit ``p_ab >= 1.0`` degenerate).
+    * The three-way equality condition (``df_a == df_b == co``) is *not*
+      met, so strict Gate 1 keeps the pair.
+
+    Numbers: doc a has 4 "alpha beta" + 1 "alpha only" chunks. Doc b has
+    3 "alpha only" + 3 "gamma delta" filler. Total n_chunks=11. Build 1:
+    co(alpha,beta)=4, df_alpha=8, df_beta=4. Build 2 rewrites a with same
+    shape, co accumulates to 4+4=8. df_alpha=8, df_beta=4, n_chunks=11.
+    Old ``co >= max``: 8 >= 8 → dropped (bug). Strict ``df_a == df_b ==
+    co``: 8 == 4? no → survives.
+    """
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    (scope / "a.md").write_text(
+        "\n".join(["alpha beta"] * 4 + ["alpha only"] * 1),
+        encoding="utf-8",
+    )
+    (scope / "b.md").write_text(
+        "\n".join(["alpha only"] * 3 + ["gamma delta"] * 3),
+        encoding="utf-8",
+    )
+    db = tmp_path / "graph.db"
+    build_graph_index(scope, db_path=db, mode="rebuild")
+
+    # Sanity: build 1 admits the pair.
+    def _pair_row():
+        c = connect(db)
+        try:
+            row = c.execute(
+                "SELECT p.cooccur_count "
+                "FROM keyword_pairs p "
+                "JOIN keywords ka ON ka.id = p.kw_a_id "
+                "JOIN keywords kb ON kb.id = p.kw_b_id "
+                "WHERE p.source='chunk_cooccur' "
+                "AND ((ka.kw='alpha' AND kb.kw='beta') "
+                "  OR (ka.kw='beta' AND kb.kw='alpha'))"
+            ).fetchone()
+            return row["cooccur_count"] if row else None
+        finally:
+            c.close()
+
+    co_after_build1 = _pair_row()
+    assert co_after_build1 == 4, f"build 1 co: {co_after_build1}"
+
+    # Rewrite doc a with different content (new hash → re-indexed) but
+    # same chunk shape. Sleep to make sure mtime differs.
+    import time
+    time.sleep(0.05)
+    (scope / "a.md").write_text(
+        "\n".join(["alpha beta v2"] * 4 + ["alpha only v2"] * 1),
+        encoding="utf-8",
+    )
+    build_graph_index(scope, db_path=db, mode="build", refresh_ngram="never")
+
+    co_after_build2 = _pair_row()
+    # Under strict Gate 1 the pair survives despite the grow-only skew
+    # (co=8 == max(df)=8 but df_a != df_b, so not 3-way equal → not glued).
+    # Under the pre-fix ``co >= max`` rule the pair would have been dropped.
+    assert co_after_build2 is not None, (
+        "Gate 1 must not misfire on one-way attachment after incremental "
+        "accumulation; the (alpha,beta) pair should survive."
+    )
+    # Sanity: cooccur grew (grow-only invariant).
+    assert co_after_build2 > co_after_build1, (
+        f"co should grow across incremental builds; "
+        f"build1={co_after_build1} build2={co_after_build2}"
+    )

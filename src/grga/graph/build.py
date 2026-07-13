@@ -141,7 +141,53 @@ _TEXT_SUFFIXES = TEXT_SUFFIXES
 VALID_CHUNK_MODES = ("line", "chars")
 DEFAULT_CHUNK_MAX_CHARS = 600
 DEFAULT_CHUNK_MIN_CHARS = 300
-DEFAULT_MIN_PAIR_COUNT = 3
+
+# Sentinel that requests scope-adaptive resolution of ``min_pair_count`` —
+# see :func:`resolve_min_pair_count`. Kept as a public constant so tests
+# and diagnostic tools can spell the intent explicitly.
+ADAPTIVE_MIN_PAIR_COUNT = None
+
+
+def resolve_min_pair_count(n_chunks: int) -> int:
+    """Stepwise adaptive floor for ``min_pair_count`` given scope size.
+
+    A fixed ``min_pair_count=5`` starves small corpora (a novella of ~200
+    chunks has few pairs clearing 5) while adding no value on the large
+    end (real strong pairs there co-occur hundreds of times). Since v3.2
+    the write-time floor scales with ``scope_stats.n_chunks``:
+
+    ======  ==========
+    chunks  min_pair_count
+    ======  ==========
+    ≤ 200   2
+    ≤ 2000  3
+    ≤ 20000 4
+    > 20000 5
+    ======  ==========
+
+    The step function (not a smooth curve) is deliberate: it is easy to
+    reason about, easy to grep in logs, and makes the migration diff from
+    the pre-v3.2 fixed floor obvious. Corpus size boundaries at 10× are
+    chosen for the same reason.
+
+    NPMI floor stays scope-independent (see :data:`BUILD_MIN_NPMI`): npmi
+    is already a probabilistic normalization; scaling its threshold with
+    corpus size would double-count the size dependence.
+
+    The chunk-level independence gate (``df_a == df_b == co``, i.e. the two
+    words are perfectly glued) applied in
+    :func:`_finalize_pairs_from_temp` is orthogonal to this and always on —
+    it targets the npmi=1.0 degenerate case caused by "two words that
+    always co-occur", which is a *frequency-independent* noise source and
+    cannot be defended against by a pair-count floor alone.
+    """
+    if n_chunks <= 200:
+        return 2
+    if n_chunks <= 2000:
+        return 3
+    if n_chunks <= 20000:
+        return 4
+    return 5
 
 # 3a threshold (2026-07-13): single-CJK-char tokens whose chunk-df ratio
 # exceeds this become *candidates* for the pair-time containment filter
@@ -1235,7 +1281,7 @@ def build_graph_index(
     chunk_mode: str = "line",
     chunk_max_chars: int = DEFAULT_CHUNK_MAX_CHARS,
     chunk_min_chars: int = DEFAULT_CHUNK_MIN_CHARS,
-    min_pair_count: int = DEFAULT_MIN_PAIR_COUNT,
+    min_pair_count: Optional[int] = ADAPTIVE_MIN_PAIR_COUNT,
     min_npmi: float = BUILD_MIN_NPMI,
     max_file_bytes: int = 0,
     ignore_dirs: Iterable[str] = (".git", ".grga", ".venv", "node_modules",
@@ -2018,11 +2064,19 @@ def build_graph_index(
             #    (see the mode dispatch above), so the UPSERT lands on empty
             #    rows. In ``build`` mode existing pairs accumulate (design
             #    D6: pairs grow-only across add/update).
+            #    ``min_pair_count=None`` (the default) resolves the write
+            #    floor from this scope's n_chunks (:func:`resolve_min_pair_count`);
+            #    an explicit value overrides the adaptive ladder.
+            effective_min_pair_count = (
+                resolve_min_pair_count(n_chunks)
+                if min_pair_count is None
+                else int(min_pair_count)
+            )
             _emit("pairs_start", candidate_pairs=0, surviving_pairs=0)
             surviving = _finalize_pairs_from_temp(
                 conn,
                 scope_dir_id=scope_dir_id,
-                min_pair_count=int(min_pair_count),
+                min_pair_count=effective_min_pair_count,
                 min_npmi=float(min_npmi),
                 n_chunks=n_chunks,
                 now=now,
@@ -2202,11 +2256,25 @@ def _finalize_pairs_from_temp(
     step = max(1, total // 200) if total else 1
     for idx, row in enumerate(pair_rows, start=1):
         a, b, co = int(row[0]), int(row[1]), int(row[2])
-        npmi = _npmi(co, chunk_df.get(a, 0), chunk_df.get(b, 0), n_chunks)
+        df_a = chunk_df.get(a, 0)
+        df_b = chunk_df.get(b, 0)
+        npmi = _npmi(co, df_a, df_b, n_chunks)
+        # Gate 1 (independence, parameter-free): drop pairs where the two
+        # words are perfectly "glued" — every occurrence of either word is
+        # accompanied by the other. The exact npmi=1.0 degenerate case is
+        # ``p_ab == p_a == p_b`` ⟺ ``df_a == df_b == co`` (three-way
+        # equality), independent of the corpus size. Use strict equality
+        # rather than ``co >= max(df_a, df_b)`` so incremental builds
+        # (mode='build') don't misfire: their ``cooccur_count`` is grow-only
+        # by design (D6), while ``chunk_df`` is recomputed fresh, so
+        # ``co > min(df_a, df_b)`` can arise on legitimate one-way
+        # attachments after a doc update / removal — those must not be
+        # confused with the true glued artefact.
+        glued = df_a > 0 and df_b > 0 and df_a == df_b == co
         # v8 invariant: chunk_cooccur.npmi is de-facto NOT NULL; drop
         # degenerate rows regardless of the floor. Below-floor rows also
         # drop when caller set a positive min_npmi.
-        if npmi is None or (min_npmi > 0.0 and npmi < min_npmi):
+        if npmi is None or glued or (min_npmi > 0.0 and npmi < min_npmi):
             drops.append((scope_dir_id, a, b))
         else:
             updates.append((float(npmi), scope_dir_id, a, b))

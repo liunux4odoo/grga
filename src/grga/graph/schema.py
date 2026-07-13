@@ -589,10 +589,14 @@ def _migrate_forward(conn: sqlite3.Connection) -> None:
         _migration_announce(
             db_path_str,
             f"WARNING: v{pre_version}→v8 upgrade will permanently delete "
-            "``keyword_pairs`` rows below "
-            f"cooccur>={int(BUILD_MIN_PAIR_COUNT)} / "
-            f"npmi>={BUILD_MIN_NPMI:.2f}. This is NOT reversible; "
-            "downgrading to older grga cannot recover the pruned data. "
+            "``keyword_pairs`` chunk_cooccur rows failing any of: "
+            "(1) independence — df_a == df_b == cooccur_count (glued, "
+            "npmi≈1.0 artefact); "
+            "(2) scope-adaptive count floor — min 2, up to "
+            f"{int(BUILD_MIN_PAIR_COUNT)} on >20000-chunk scopes; "
+            f"(3) npmi < {BUILD_MIN_NPMI:.2f}. "
+            "``llm_promoted`` rows are unaffected. This is NOT reversible; "
+            "only ``grga index rebuild`` can recompute the pruned data. "
             "Back up the DB now if you may need to roll back.",
         )
     # v8 → v9 (Phase 3b-3) is the second lossy hop — it DROPs the entire
@@ -1183,11 +1187,14 @@ def _migrate_v7_to_v8_inplace(conn: sqlite3.Connection) -> None:
         - ``n_docs``   = COUNT of ``docs`` rows in scope
         - ``vocab_size`` = DISTINCT kw_id count in this scope's keyword_stats
 
-    Prune semantics: rows with ``source='chunk_cooccur'`` where
-    ``cooccur_count < BUILD_MIN_PAIR_COUNT`` OR ``npmi IS NULL`` OR
-    ``npmi < BUILD_MIN_NPMI`` are removed. This is the "storage contract"
-    — the resulting pair table represents "knowledge that cleared the v8
-    admission threshold at migration time".
+    Prune semantics: rows with ``source='chunk_cooccur'`` are removed when
+    they fail any of the three write-time gates — independence
+    (``cooccur_count >= MAX(chunk_df_a, chunk_df_b)``), the scope-adaptive
+    count floor (from ``scope_stats.n_chunks``), or the npmi floor
+    (``npmi IS NULL`` / ``< BUILD_MIN_NPMI``). See
+    :func:`_prune_low_score_pairs`. This is the "storage contract" — the
+    resulting pair table represents "knowledge that cleared the write-time
+    admission gates at migration time".
 
     Index-build ordering: the two new ``(dir_id, kw_a_id/kw_b_id, npmi DESC)``
     indexes are DROPPED before the prune DELETE and re-CREATED afterwards.
@@ -1294,19 +1301,93 @@ def _ensure_npmi_indexes(conn: sqlite3.Connection) -> None:
 
 
 def _prune_low_score_pairs(conn: sqlite3.Connection) -> int:
-    """Delete ``chunk_cooccur`` pairs failing the v8 admission threshold.
+    """Delete ``chunk_cooccur`` pairs failing the v8+ admission gates.
 
     Returns the number of rows deleted (for logging / tests). Safe to call
     on an empty pair table (returns 0). ``llm_promoted`` rows are never
     touched — their npmi is NULL by design.
+
+    Three gates match the build-time ones in
+    :func:`grga.graph.build._finalize_pairs_from_temp`:
+
+    * **Gate 1 · independence (parameter-free)**: drop pairs where the two
+      words are perfectly glued at chunk level —
+      ``chunk_df_a == chunk_df_b == cooccur_count`` (three-way equality).
+      This is the exact npmi=1.0 degenerate condition
+      (``p_ab == p_a == p_b``) and is scope- / size-independent. Strict
+      equality rather than ``co >= max(df_a, df_b)`` so incremental builds
+      whose ``cooccur_count`` is grow-only against a freshly-recomputed
+      ``chunk_df`` are not misclassified. Added in v3.2.
+
+    * **Gate 2 · scope-adaptive count floor**: since v3.2 the write floor
+      scales with ``scope_stats.n_chunks`` via
+      :func:`grga.graph.build.resolve_min_pair_count`. On pre-v3.2 DBs
+      where scope_stats is absent or shows n_chunks=0, we fall back to the
+      historical fixed floor (:data:`BUILD_MIN_PAIR_COUNT` = 5).
+
+    * **Gate 3 · npmi floor**: ``npmi IS NULL`` OR
+      ``npmi < BUILD_MIN_NPMI``. Unchanged.
+
+    Runs one DELETE per scope (bounded by ``directories`` cardinality —
+    typically 1-10) so the per-scope adaptive floor can be applied cleanly.
+    ``keyword_stats`` lookups use its ``(dir_id, kw_id)`` PRIMARY KEY
+    (WITHOUT ROWID) so Gate 1 is a bounded log-time probe per row.
     """
-    cur = conn.execute(
-        "DELETE FROM keyword_pairs "
-        "WHERE source = ? "
-        "AND (cooccur_count < ? OR npmi IS NULL OR npmi < ?)",
-        (CHUNK_COOCCUR_SOURCE, float(BUILD_MIN_PAIR_COUNT), float(BUILD_MIN_NPMI)),
-    )
-    return cur.rowcount or 0
+    from grga.graph.build import resolve_min_pair_count  # avoid cycle at import
+
+    total_deleted = 0
+
+    # Enumerate scopes that have any chunk_cooccur pairs. Adaptive floor
+    # comes from scope_stats; missing rows fall back to the fixed floor.
+    scope_rows = list(conn.execute(
+        "SELECT DISTINCT dir_id FROM keyword_pairs WHERE source = ?",
+        (CHUNK_COOCCUR_SOURCE,),
+    ))
+    for (dir_id,) in scope_rows:
+        row = conn.execute(
+            "SELECT n_chunks FROM scope_stats WHERE dir_id = ?",
+            (int(dir_id),),
+        ).fetchone()
+        if row is None or not row[0]:
+            # No scope_stats yet — use pre-v3.2 fixed floor. Gate 1 still
+            # applies (parameter-free).
+            floor = int(BUILD_MIN_PAIR_COUNT)
+        else:
+            floor = resolve_min_pair_count(int(row[0]))
+
+        # Gate 1 (strict): three-way equality co == df_a == df_b. If either
+        # keyword_stats row is missing, its chunk_df is treated as 0; the
+        # equality then requires co == 0, which pairs never satisfy
+        # (cooccur_count is always >= 1) — so a missing endpoint no longer
+        # forces a defensive drop (fixes the pre-v3.2 asymmetry with the
+        # build path).
+        cur = conn.execute(
+            """
+            DELETE FROM keyword_pairs
+            WHERE dir_id = ?
+              AND source = ?
+              AND (
+                cooccur_count < ?
+                OR npmi IS NULL
+                OR npmi < ?
+                OR (
+                    cooccur_count = COALESCE(
+                        (SELECT chunk_df FROM keyword_stats
+                          WHERE dir_id = keyword_pairs.dir_id
+                            AND kw_id = keyword_pairs.kw_a_id), 0)
+                    AND
+                    cooccur_count = COALESCE(
+                        (SELECT chunk_df FROM keyword_stats
+                          WHERE dir_id = keyword_pairs.dir_id
+                            AND kw_id = keyword_pairs.kw_b_id), 0)
+                )
+              )
+            """,
+            (int(dir_id), CHUNK_COOCCUR_SOURCE, floor, float(BUILD_MIN_NPMI)),
+        )
+        total_deleted += cur.rowcount or 0
+
+    return total_deleted
 
 
 def _utc_now_iso() -> str:
