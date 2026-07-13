@@ -1,6 +1,6 @@
 # grga
 
-> **一款向文档学习、却不依赖文档的检索器。** — 从你的语料中预学习关键词关系，不依赖 Embedding 和 LLM，学习到的知识可直接用于同领域其它文档的检索。
+> **一款向文档学习、却不依赖文档，可迁移的0成本检索器。** — 从你的文档中自动发现概念连接，学习到的知识可直接用于同领域文档的检索。完全本地运行，不依赖 Embedding 和 LLM。
 
 `grga` 是一个基于 `ripgrep-all` 的 Agent 友好全文搜索工具，提供命令行入口和 Tkinter 图形界面。它封装 `rga`、`rg` 等底层工具，支持在普通文本、Markdown、PDF、Office 文档等文件中搜索内容，也支持只按文件路径搜索。
 
@@ -34,6 +34,14 @@ grga 侧的具体命令与依赖：
 >
 > **许可证**：`grga` 本身以 **MIT** 许可证发布（见 [LICENSE](LICENSE)）。它调用的外部工具各自遵循其上游许可证（`rg`：MIT/Unlicense；`rga`：AGPL；`pandoc`：GPL；`fzf`：MIT），请分别遵守。
 
+
+### 与其它 GraphRAG 有什么不同
+- 不依赖 LLM 抽实体
+- 不依赖 Embedding 和向量库
+- 仅依赖统计学从语料中学习短语以及进行短语的自连接，学习到的内容存入 Sqlite，与原始语料库解绑。
+- 一方面可以只选取部分代表性语料进行学习；另一方面可以直接应用于其它同领域文档库。代价是理论上的精度漂移，实践中完全可接受。如果漂移到不可接受，在新语料上再增量学习一遍即可。
+- 不过分追求 Recall 的准确度，提供5类原语动词，依赖 Agent 进行多轮循环检索补齐证据。
+
 ## 快速上手
 
 ```bash
@@ -61,7 +69,7 @@ grga skill install --to ~/.kilocode/skills   # 换成你的 agent skill 目录�
 cd /path/to/your/documents
 grga index build
 ```
-
+[搜索演示](docs/search-demo)下提供了“纯LLM回答”、“简单文本检索回答”、“图扩展回答”三种搜索结果，可以看到明显的差别。
 
 ### 按场景选用
 
@@ -97,6 +105,9 @@ export GRGA_OPENAI_MODEL=gpt-4o-mini
 
 grga deep-search "面壁计划"
 ```
+
+> 注：作者到现在还没用过深度搜索功能，基本靠文本检索+图扩展就解决问题了。
+
 
 **打包成可执行文件 / 离线部署 / 作为 agent 原语接入** —— 见
 [docs/install-and-usage.md](docs/install-and-usage.md)：
