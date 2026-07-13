@@ -85,6 +85,10 @@ DEFAULT_MAX_NGRAM_N = 4
 _NGRAM_MIN_COUNT = 3
 _NGRAM_NPMI_THRESHOLD = 0.3
 _NGRAM_ENT_THRESHOLD = 1.0
+# Progress tick granularity for detect_ngram_phrases. 2048 keeps callback
+# overhead <1% on 1M-line corpora while still updating every ~50-200 ms
+# for a spinner.
+_PROGRESS_TICK = 2048
 
 # Markdown ATX heading, e.g. ``## Title``.
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
@@ -670,6 +674,7 @@ def detect_ngram_phrases(
     npmi_threshold: float = _NGRAM_NPMI_THRESHOLD,
     ent_threshold: float = _NGRAM_ENT_THRESHOLD,
     stop_boundaries: frozenset = _CORE_STOP_BOUNDARIES,
+    on_progress: Optional[Callable[[str, dict], None]] = None,
 ) -> List[dict]:
     """Detect CJK compound phrases from tokenised lines.
 
@@ -687,12 +692,28 @@ def detect_ngram_phrases(
     space). Callers that use these phrases in a jieba user_dict only benefit
     from CJK-only ones (jieba sees only CJK runs), so mixed phrases exist
     for the post-tokenisation merge step (see :func:`merge_auto_phrases`).
+
+    ``on_progress`` is an optional callback invoked with ``(phase, info)``
+    at the boundaries of the four internal stages: ``unigram``, ``window``,
+    ``filter``, ``sort``. The ``window`` and ``filter`` stages also send
+    per-tick updates every :data:`_PROGRESS_TICK` items so the caller can
+    drive a spinner / progress bar. Passing ``None`` is a no-op.
     """
+    def _tick(phase: str, **info) -> None:
+        if on_progress is not None:
+            on_progress(phase, info)
+
+    n_lines = len(line_tokens)
+    _tick("unigram_start", lines=n_lines)
     uni: Counter = Counter()
-    for toks in line_tokens:
+    for idx, toks in enumerate(line_tokens):
         uni.update(toks)
+        if idx % _PROGRESS_TICK == 0:
+            _tick("unigram_advance", current=idx, total=n_lines)
+    _tick("unigram_end", lines=n_lines, vocab=len(uni))
     total = sum(uni.values())
     if total == 0:
+        _tick("empty", lines=n_lines)
         return []
     log_total = math.log(total)
 
@@ -709,7 +730,8 @@ def detect_ngram_phrases(
     left_ctx: "defaultdict[tuple, Counter]" = defaultdict(Counter)
     right_ctx: "defaultdict[tuple, Counter]" = defaultdict(Counter)
 
-    for toks in line_tokens:
+    _tick("window_start", lines=n_lines, max_n=max_n)
+    for idx, toks in enumerate(line_tokens):
         L = len(toks)
         for i in range(L):
             for n in range(2, max_n + 1):
@@ -725,6 +747,13 @@ def detect_ngram_phrases(
                     left_ctx[win][toks[i - 1]] += 1
                 if i + n < L and toks[i + n] not in stop_boundaries:
                     right_ctx[win][toks[i + n]] += 1
+        if idx % _PROGRESS_TICK == 0:
+            _tick(
+                "window_advance",
+                current=idx, total=n_lines,
+                windows=len(ngram_count),
+            )
+    _tick("window_end", windows=len(ngram_count))
 
     def _entropy(counter: Counter) -> float:
         tot = sum(counter.values())
@@ -767,8 +796,16 @@ def detect_ngram_phrases(
             vals.append(_npmi_pair(left, right, joint_c))
         return min(vals)
 
+    total_windows = len(ngram_count)
+    _tick("filter_start", windows=total_windows)
     results: List[dict] = []
-    for win, c in ngram_count.items():
+    for idx, (win, c) in enumerate(ngram_count.items()):
+        if idx % _PROGRESS_TICK == 0:
+            _tick(
+                "filter_advance",
+                current=idx, total=total_windows,
+                kept=len(results),
+            )
         if c < min_count:
             continue
         sol = _solidity(win, c)
@@ -784,7 +821,11 @@ def detect_ngram_phrases(
             "npmi": round(sol, 4),
             "branch_ent": round(be, 4),
         })
+    _tick("filter_end", windows=total_windows, kept=len(results))
+
+    _tick("sort_start", phrases=len(results))
     results.sort(key=lambda x: (-x["npmi"], -x["count"]))
+    _tick("sort_end", phrases=len(results))
     return results
 
 
@@ -1333,11 +1374,40 @@ def build_graph_index(
 
         # ------------------------------------------------------------------
         # Pass 1: n-gram dictionary refinement.
-        # rebuild + append/replace: multi-iter as before.
-        # rebuild + never:          skip detection; tokenise once with
-        #                           current dict for Pass 2 consumption.
+        # rebuild + append/replace: multi-iter detection as before.
+        # rebuild + never:          skip detection.
         # build + append:           single detection iter on changed docs.
-        # build + never:            skip detection; tokenise changed docs.
+        # build + never:            skip detection.
+        #
+        # Two-phase design (2026-07-13, fixes "detected phrases invisible
+        # in same-build keyword_stats"):
+        #
+        #   Phase A — detection loop: each iteration tokenises with the
+        #     current ``auto_dict``, feeds ``line_token_lists`` (flat,
+        #     detection-only view) into ``detect_ngram_phrases``, and merges
+        #     the result back into ``auto_dict``. ``chunk_tokens`` is NOT
+        #     materialised here — Pass 2 would use a stale copy anyway once
+        #     the next iteration or the final tokenise runs. Halving peak
+        #     memory: only one token view lives at a time.
+        #
+        #   Phase B — final tokenisation: once ``auto_dict`` is frozen for
+        #     this build, tokenise every chunk exactly once with the
+        #     finalised dict. The resulting ``chunk_tokens`` feeds Pass 1.5
+        #     (scope stopword derivation) and Pass 2 (keyword_docs /
+        #     keyword_pairs). This is what makes "苍坤上人" queryable in
+        #     the same ``build`` that discovered it — previously the
+        #     compound was persisted to ``auto_ngram_dict`` but never
+        #     applied to ``chunk_tokens``, so ``keyword_stats`` only saw
+        #     "苍坤" and ``related 苍坤上人`` returned empty.
+        #
+        # Cost accounting: same total work as before. Phase A does N
+        # tokenisation passes for N detection iters (unchanged). Phase B
+        # adds one tokenisation pass that used to be the last iter's
+        # discarded work. The multi-iter convergence promise (final dict
+        # is fixed-point of "detect from tokens produced by this dict") is
+        # preserved for ``rebuild``: any phrases emergent only after
+        # Phase B's re-tokenisation are picked up on the next build, same
+        # as any pre-existing iter's residual.
         # ------------------------------------------------------------------
         prior_dict_size = int(conn.execute(
             "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ?",
@@ -1348,17 +1418,29 @@ def build_graph_index(
         # already dropped the DB rows above, so this loads empty.
         auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_dir_id)
 
-        chunk_tokens: Dict[tuple, List[str]] = {}
         if mode == "rebuild" and refresh_ngram in ("append", "replace"):
             iters = max(1, int(ngram_iters))
         elif mode == "build" and refresh_ngram == "append":
             iters = 1
         else:
-            # ``refresh_ngram="never"`` for either mode. Still need one
-            # tokenisation pass so Pass 2 has ``chunk_tokens``.
-            iters = 1
+            # ``refresh_ngram="never"``: skip detection loop entirely.
+            iters = 0
 
         run_detection = refresh_ngram in ("append", "replace")
+
+        # Track whether the last Phase A iteration's ``jieba_tok`` /
+        # ``phrase_set`` are still valid for Phase B. They are valid iff
+        # the *last* detection iteration added zero new phrases (or if
+        # detection is off entirely, in which case Phase A never mutated
+        # ``auto_dict``). Saves one ~1 s ``jieba.Tokenizer`` init on
+        # steady-state builds where the dict has converged.
+        phase_a_tok = None  # type: ignore[assignment]
+        phase_a_phrase_set: Optional[set] = None
+        last_iter_added = 0
+
+        # Phase A: detection-only iterations. Each iter tokenises + detects
+        # without keeping the per-chunk view; only the flat token list is
+        # retained for the detector.
         for iteration in range(iters):
             _emit(
                 "ngram_iter_start",
@@ -1369,7 +1451,6 @@ def build_graph_index(
             )
             jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
             phrase_set = set(auto_dict.keys())
-            chunk_tokens = {}
             line_token_lists: List[List[str]] = []
             chunks_done = 0
             for entry in docs:
@@ -1379,36 +1460,131 @@ def build_graph_index(
                     toks = merge_auto_phrases(
                         toks_pos, phrase_set, max_n=max_ngram_n
                     )
-                    chunk_tokens[(doc_id, chunk.chunk_id)] = toks
                     if toks:
                         line_token_lists.append(toks)
                     chunks_done += 1
-                    _emit(
-                        "ngram_iter_advance",
-                        iter=iteration + 1,
-                        iters=iters,
-                        current=chunks_done,
-                        total=total_scanned_chunks,
-                    )
+                    # Throttle: emit every _PROGRESS_TICK chunks + the last
+                    # one. Reduces callback overhead on large scopes (hot
+                    # path on 100k+ chunks) without visibly slowing the
+                    # progress bar (2048 chunks ≈ 50–200 ms tick).
+                    if (
+                        chunks_done % _PROGRESS_TICK == 0
+                        or chunks_done == total_scanned_chunks
+                    ):
+                        _emit(
+                            "ngram_iter_advance",
+                            iter=iteration + 1,
+                            iters=iters,
+                            current=chunks_done,
+                            total=total_scanned_chunks,
+                        )
             if run_detection:
+                # Forward detector internal phases to the caller so long
+                # scopes don't appear frozen between iter_end and the next
+                # iter_start. The detector's own phase name goes into
+                # ``stage`` (not ``phase``) to avoid colliding with the
+                # top-level event ``phase`` slot.
+                def _detect_progress(stage: str, info: dict,
+                                     _it=iteration + 1, _n=iters) -> None:
+                    _emit(
+                        "ngram_detect",
+                        iter=_it,
+                        iters=_n,
+                        stage=stage,
+                        **info,
+                    )
+                    # Plain-text fallback (rich bar off): announce the two
+                    # slow analysis stages so the terminal doesn't look
+                    # frozen after tokenisation finishes.
+                    if progress is not None and stage in (
+                        "window_start", "filter_start"
+                    ):
+                        _lbl = {
+                            "window_start": "枚举 n-gram 窗口",
+                            "filter_start": "过滤候选短语",
+                        }[stage]
+                        progress(f"ngram iter {_it}/{_n}: {_lbl}…")
                 detected = detect_ngram_phrases(
                     line_token_lists, max_n=max_ngram_n,
+                    on_progress=_detect_progress,
                 )
+                last_iter_added = 0
                 for d_entry in detected:
+                    if d_entry["phrase"] not in auto_dict:
+                        last_iter_added += 1
                     auto_dict[d_entry["phrase"]] = d_entry
+            else:
+                last_iter_added = 0
+            # Free the flat view before the next iter / Phase B allocates
+            # the per-chunk map. Detector output is now in ``auto_dict``.
+            del line_token_lists
+            # Remember this iteration's tokeniser state for possible Phase B
+            # reuse (only the final iteration's values survive the loop).
+            phase_a_tok = jieba_tok
+            phase_a_phrase_set = phrase_set
             stats.ngram_iters_run = iteration + 1
             if progress is not None:
                 progress(
                     f"ngram iter {iteration + 1}/{iters}: "
-                    f"{len(auto_dict)} phrases, {len(chunk_tokens)} chunks tokenised"
+                    f"{len(auto_dict)} phrases"
                 )
             _emit(
                 "ngram_iter_end",
                 iter=iteration + 1,
                 iters=iters,
-                chunks=len(chunk_tokens),
+                chunks=chunks_done,
                 phrases=len(auto_dict),
             )
+
+        # Phase B: one final tokenisation with the frozen dict. Produces
+        # ``chunk_tokens`` for Pass 1.5 and Pass 2. Always runs — even the
+        # ``refresh_ngram="never"`` path needs Pass 2's input, and it costs
+        # exactly one tokenisation pass (same as the pre-fix single-iter
+        # loop, so ``never`` sees no regression).
+        _emit(
+            "ngram_finalize_start",
+            phrases=len(auto_dict),
+            chunks=total_scanned_chunks,
+        )
+        # Reuse the last Phase A tokeniser when the dict converged (final
+        # iteration added nothing), else build fresh. ``iters == 0``
+        # (refresh_ngram="never") has no Phase A state, so always fresh.
+        if phase_a_tok is not None and last_iter_added == 0:
+            jieba_tok = phase_a_tok
+            phrase_set = phase_a_phrase_set
+        else:
+            jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
+            phrase_set = set(auto_dict.keys())
+        chunk_tokens: Dict[tuple, List[str]] = {}
+        chunks_done = 0
+        for entry in docs:
+            doc_id, rel_path, path, is_md, chunks = entry[:5]
+            for chunk in chunks:
+                toks_pos = tokenize_hybrid_with_pos(chunk.text, jieba_tok)
+                toks = merge_auto_phrases(
+                    toks_pos, phrase_set, max_n=max_ngram_n
+                )
+                chunk_tokens[(doc_id, chunk.chunk_id)] = toks
+                chunks_done += 1
+                if (
+                    chunks_done % _PROGRESS_TICK == 0
+                    or chunks_done == total_scanned_chunks
+                ):
+                    _emit(
+                        "ngram_finalize_advance",
+                        current=chunks_done,
+                        total=total_scanned_chunks,
+                    )
+        if progress is not None:
+            progress(
+                f"ngram finalize: {len(chunk_tokens)} chunks tokenised "
+                f"with {len(auto_dict)} phrases"
+            )
+        _emit(
+            "ngram_finalize_end",
+            chunks=len(chunk_tokens),
+            phrases=len(auto_dict),
+        )
         # Persist dictionary. In ``refresh_ngram="never"`` we still call
         # this: the dict was loaded from DB unchanged and re-persisting
         # is a no-op (INSERT OR REPLACE on the same rows).

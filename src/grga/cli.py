@@ -951,6 +951,86 @@ def _make_index_build_progress():
                     completed=event["chunks"],
                     note=f"第 {event['iter']}/{event['iters']} 轮 · {event['phrases']} 短语",
                 )
+        elif phase == "ngram_detect":
+            # Detector internal phases: unigram / window / filter / sort.
+            # Reuse the ngram task bar but switch to the sub-phase's own
+            # counter so the user sees movement during the (previously
+            # silent) post-tokenise analysis.
+            task = state.get("ngram")
+            if task is None:
+                pass
+            else:
+                sub = event.get("stage", "")
+                it = event.get("iter", 0)
+                its = event.get("iters", 0)
+                _labels = {
+                    "unigram": "统计词频",
+                    "window": "枚举 n-gram 窗口",
+                    "filter": "过滤候选短语",
+                    "sort": "排序",
+                }
+                base = sub.rsplit("_", 1)[0]
+                label = _labels.get(base, base)
+                if sub.endswith("_start"):
+                    total = (
+                        event.get("lines")
+                        or event.get("windows")
+                        or event.get("phrases")
+                        or None
+                    )
+                    progress.update(
+                        task, total=total, completed=0,
+                        note=f"第 {it}/{its} 轮 · {label}…",
+                    )
+                elif sub.endswith("_advance"):
+                    cur = event.get("current", 0)
+                    tot = event.get("total") or None
+                    extra = ""
+                    if "windows" in event:
+                        extra = f" · {event['windows']} 窗口"
+                    elif "kept" in event:
+                        extra = f" · 已留 {event['kept']}"
+                    progress.update(
+                        task, total=tot, completed=cur,
+                        note=f"第 {it}/{its} 轮 · {label} {cur}/{tot}{extra}"
+                        if tot else f"第 {it}/{its} 轮 · {label}…",
+                    )
+                elif sub.endswith("_end"):
+                    kept = event.get("kept")
+                    tail = f" · 留 {kept} 短语" if kept is not None else ""
+                    progress.update(
+                        task,
+                        note=f"第 {it}/{its} 轮 · {label}完成{tail}",
+                    )
+        elif phase == "ngram_finalize_start":
+            key = "ngram"
+            if key not in state:
+                state[key] = progress.add_task(
+                    "[magenta]n-gram 分词", total=event["chunks"] or None, note=""
+                )
+            progress.update(
+                state[key],
+                total=event["chunks"] or None,
+                completed=0,
+                note=f"最终分词 · {event['phrases']} 短语",
+            )
+        elif phase == "ngram_finalize_advance":
+            task = state.get("ngram")
+            if task is not None:
+                progress.update(
+                    task,
+                    total=event["total"] or None,
+                    completed=event["current"],
+                    note=f"最终分词 · {event['current']}/{event['total']} chunks",
+                )
+        elif phase == "ngram_finalize_end":
+            task = state.get("ngram")
+            if task is not None:
+                progress.update(
+                    task,
+                    completed=event["chunks"],
+                    note=f"最终分词完成 · {event['phrases']} 短语",
+                )
         elif phase == "materialise_start":
             total_chunks = event.get("total_chunks") or None
             state["mat"] = progress.add_task(
