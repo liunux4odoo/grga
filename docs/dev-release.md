@@ -3,6 +3,23 @@
 This project ships a single `py3-none-any` wheel; binaries are pulled at
 first use. The release pipeline therefore looks like:
 
+## One-shot orchestrator
+
+`scripts/release.py` chains every step below and can bump the version
+(`--bump major|minor|patch` or `--set X.Y.Z`), keeping `pyproject.toml`
+and `src/grga/__init__.py` in sync. Defaults are safe (bump + build +
+`twine check`, no upload); uploads and tagging require explicit flags.
+
+```bash
+# preview a patch release without touching anything
+python scripts/release.py --bump patch --dry-run
+
+# full release: minor +1, commit, publish, tag
+python scripts/release.py --bump minor --commit --publish --tag
+```
+
+The manual steps below remain the source of truth for what the script does.
+
 ## 1. Refresh manifest hashes (optional but recommended)
 
 ```bash
