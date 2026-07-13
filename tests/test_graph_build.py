@@ -451,6 +451,82 @@ def test_detect_ngram_phrases_salvages_infix_not_only_edges():
     assert "乙丙" in phrases, f"infix salvage failed: {phrases}"
 
 
+def test_detect_ngram_phrases_drops_zero_margin_boundary_fragments():
+    """Salvage tightened: boundary fragments with margin=0 must be dropped.
+
+    苍坤上 and 坤上人 are 3-gram slices of 苍坤上人 that share its exact
+    count — every occurrence of either fragment is *inside* a 苍坤上人
+    hit, so the independence margin ``count(sub) - max(count(container))``
+    is zero. They carry no independent co-occurrence evidence and only
+    bloat the vocab / pair tables if admitted. The tightened salvage rule
+    must let 苍坤上人 through (all three gates), let 苍坤 through (real
+    standalone occurrence in one line → margin ≥ 1), and reject both
+    boundary fragments.
+    """
+    from grga.graph.build import detect_ngram_phrases
+
+    def line(prefix: str, tail: str) -> list:
+        return list(prefix) + list("苍坤上人") + list(tail)
+
+    lines = [
+        line("师父", "开示"),
+        line("拜访", "讲经"),
+        line("寺中", "闭关"),
+        line("徒弟", "接引"),
+        line("山门", "亲迎"),
+        # One line where 苍坤 stands alone — gives 苍坤 an independent count
+        # of 1. 苍坤上 and 坤上人 never appear without the full 4-gram.
+        list("苍坤") + list("早年游学"),
+    ]
+    out = detect_ngram_phrases(lines, max_n=4, min_count=3)
+    phrases = {e["phrase"] for e in out}
+    assert "苍坤上人" in phrases, phrases
+    assert "苍坤" in phrases, f"legit substring dropped: {phrases}"
+    # These must NOT survive — no independence margin.
+    assert "苍坤上" not in phrases, (
+        f"boundary fragment 苍坤上 salvaged despite margin=0: {phrases}"
+    )
+    assert "坤上人" not in phrases, (
+        f"boundary fragment 坤上人 salvaged despite margin=0: {phrases}"
+    )
+
+
+def test_detect_ngram_phrases_salvages_via_multiple_containers():
+    """Independence via *different* containers must still count.
+
+    A substring reached through two distinct containers (苍坤 in both
+    苍坤上人 and 苍坤真人) clears the margin even with zero fully-standalone
+    hits: combining with several neighbours is itself independence
+    evidence. This distinguishes "hub of a small compound family" from
+    "pure edge fragment glued to exactly one neighbour".
+    """
+    from grga.graph.build import detect_ngram_phrases
+
+    def with_container(prefix: str, tail: str, container: str) -> list:
+        return list(prefix) + list(container) + list(tail)
+
+    lines = [
+        # 3 occurrences of 苍坤上人 with varied L/R context.
+        with_container("师父", "开示", "苍坤上人"),
+        with_container("拜访", "讲经", "苍坤上人"),
+        with_container("寺中", "闭关", "苍坤上人"),
+        # 3 occurrences of 苍坤真人 with varied L/R context.
+        with_container("门徒", "参礼", "苍坤真人"),
+        with_container("客卿", "拜见", "苍坤真人"),
+        with_container("弟子", "叩首", "苍坤真人"),
+    ]
+    out = detect_ngram_phrases(lines, max_n=4, min_count=3)
+    phrases = {e["phrase"] for e in out}
+    # Both long forms should pass all three gates.
+    assert "苍坤上人" in phrases, phrases
+    assert "苍坤真人" in phrases, phrases
+    # 苍坤 appears 6× total, 3× inside each container. Max container
+    # count is 3, so margin = 6 - 3 = 3 ≥ 1 → salvaged.
+    assert "苍坤" in phrases, (
+        f"substring across multiple containers should salvage: {phrases}"
+    )
+
+
 def test_build_populates_auto_ngram_dict(sidecar_env, tmp_path):
     """End-to-end: enough repeated CJK compounds should land in auto_ngram_dict."""
     scope = tmp_path / "corpus"

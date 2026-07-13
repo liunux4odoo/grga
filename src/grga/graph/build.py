@@ -687,15 +687,32 @@ def detect_ngram_phrases(
     * branch entropy: ``min(H_left, H_right) >= ent_threshold`` (nat).
 
     Substring salvage: a window that clears frequency + solidity but fails
-    *only* the branch-entropy gate is kept anyway when its rejoined text is
-    a proper substring — prefix, infix, or suffix — of some phrase that
-    passed all three gates. This recovers standalone referents that are
-    almost always glued to one neighbour (苍坤 followed by 上人 in 80/86
-    hits ⇒ right entropy ≈ 0) without loosening the gate globally. The check
-    is textual only: no semantic prior, no positional constraint. Salvaged
-    entries keep their real (sub-threshold) ``branch_ent``. Frequency and
-    solidity are never bypassed, so boundary-crossing fragments (器学 ⊂
-    机器学习, killed on solidity) never become candidates.
+    *only* the branch-entropy gate is kept anyway when (a) its rejoined text
+    is a proper substring — prefix, infix, or suffix — of some phrase that
+    passed all three gates, **and** (b) it has at least one occurrence its
+    containing survivor(s) cannot explain — an *independence margin*
+    ``count(sub) - max(count(container)) >= 1``. This recovers standalone
+    referents that are almost always glued to one neighbour yet still
+    surface on their own (苍坤 appears 86× but only 80× inside 苍坤上人 ⇒
+    right entropy ≈ 0, margin 6 ≥ 1 ⇒ kept) without loosening the gate
+    globally, while boundary fragments that *only* ever appear inside the
+    container (苍坤上 / 坤上人, margin = 0) stay rejected — they carry no
+    independent co-occurrence evidence, so admitting them just bloats the
+    vocab and pair tables.
+
+    The margin uses ``max`` (not ``sum``) over containers: a smaller window
+    is counted once per position, so its total count is ``>=`` any single
+    container's count but can be ``<`` the sum when containers overlap;
+    subtracting the largest container is the conservative floor that never
+    over-subtracts and therefore never drops a genuinely independent sub. A
+    sub reached through *two* distinct containers (苍坤 in both 苍坤上人 and
+    苍坤真人) naturally clears the margin even with zero fully-standalone
+    hits — combining with several neighbours is itself independence
+    evidence. The check is otherwise textual + counting only: no semantic
+    prior, no positional constraint (AGENTS.md 铁律 2). Salvaged entries
+    keep their real (sub-threshold) ``branch_ent``. Frequency and solidity
+    are never bypassed, so boundary-crossing fragments (器学 ⊂ 机器学习,
+    killed on solidity) never become candidates.
 
     Windows may mix ASCII and CJK tokens (so hybrid entities like 艾AA /
     PDC主席 can be discovered). Detected phrases are rejoined by the
@@ -845,12 +862,19 @@ def detect_ngram_phrases(
         })
     _tick("filter_end", windows=total_windows, kept=len(results))
 
-    # Substring salvage (2026-07-13). Purely textual: a reject is kept iff
-    # its rejoined text is a *proper* substring — anywhere, prefix / infix /
-    # suffix — of some survivor's text. No semantic prior (AGENTS.md 铁律 2):
-    # containment is judged on the already-computed join strings alone. The
-    # salvaged entry carries its real (sub-threshold) branch_ent so downstream
-    # can still tell it apart from a natively-passing phrase.
+    # Substring salvage (2026-07-13, tightened 2026-07-13-r2). Purely
+    # textual + counting: a reject is kept iff (i) its rejoined text is a
+    # *proper* substring — anywhere, prefix / infix / suffix — of some
+    # survivor's text, **and** (ii) the reject has enough independent
+    # occurrences that no single survivor container can account for them:
+    # ``count(sub) - max(count(container)) >= min_count``. This kills the
+    # over-salvage of edge fragments like 苍坤上 / 坤上人 (which only ever
+    # appear inside their container) while still recovering 苍坤 (86 total,
+    # 80 inside 苍坤上人, margin 6 ≥ min_count). No semantic prior — the
+    # margin is a pure counting subtraction (AGENTS.md 铁律 2). Using
+    # ``max`` (not ``sum``) over containers keeps the floor conservative:
+    # overlapping containers never over-subtract, so a genuinely
+    # independent sub is never wrongly dropped.
     _tick("salvage_start", rejects=len(entropy_rejects))
     if entropy_rejects and results:
         # Index each survivor under every distinct character it contains,
@@ -859,12 +883,15 @@ def detect_ngram_phrases(
         # its container. Avoids the naive O(rejects × survivors) scan on
         # large scopes. Bucket contents are still short (single-char keys
         # partition the survivor set) and the ``len(kt) > t_len`` guard
-        # keeps the "proper" (strict) substring semantics.
-        by_first_char: "defaultdict[str, list[str]]" = defaultdict(list)
+        # keeps the "proper" (strict) substring semantics. We also carry
+        # the survivor's ``count`` in the bucket so the independence-margin
+        # test is a single pass over the same candidate list.
+        by_first_char: "defaultdict[str, list[Tuple[str, int]]]" = defaultdict(list)
         for r in results:
             kt = r["phrase"]
+            kc = int(r["count"])
             for ch in set(kt):
-                by_first_char[ch].append(kt)
+                by_first_char[ch].append((kt, kc))
         salvaged = 0
         for idx, (win, c, sol, be) in enumerate(entropy_rejects):
             if idx % _PROGRESS_TICK == 0:
@@ -876,15 +903,31 @@ def detect_ngram_phrases(
             text = _join_by_pair_rule(win)
             t_len = len(text)
             candidates = by_first_char.get(text[0], ()) if text else ()
-            if any(len(kt) > t_len and text in kt for kt in candidates):
-                results.append({
-                    "phrase": text,
-                    "n": len(win),
-                    "count": c,
-                    "npmi": round(sol, 4),
-                    "branch_ent": round(be, 4),
-                })
-                salvaged += 1
+            # Largest container count among strict text-containers of ``text``.
+            # ``max`` (not ``sum``) is the conservative floor — see docstring.
+            max_container_c = 0
+            for kt, kc in candidates:
+                if len(kt) > t_len and text in kt and kc > max_container_c:
+                    max_container_c = kc
+            if max_container_c == 0:
+                # No container matched — nothing to salvage against.
+                continue
+            if c - max_container_c < 1:
+                # All of this sub's occurrences are inside its largest
+                # container (margin == 0). Pure boundary fragment (苍坤上 /
+                # 坤上人 kind); drop. A margin of 1+ is sufficient: it means
+                # the sub is either seen fully standalone at least once, or
+                # nested in a *different* container — either is independence
+                # evidence (frequency has already been enforced upstream).
+                continue
+            results.append({
+                "phrase": text,
+                "n": len(win),
+                "count": c,
+                "npmi": round(sol, 4),
+                "branch_ent": round(be, 4),
+            })
+            salvaged += 1
         _tick("salvage_end", rejects=len(entropy_rejects), salvaged=salvaged)
     else:
         _tick("salvage_end", rejects=len(entropy_rejects), salvaged=0)
