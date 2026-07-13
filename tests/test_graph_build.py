@@ -394,6 +394,63 @@ def test_detect_ngram_phrases_bounded_npmi():
         assert -1.0001 <= entry["npmi"] <= 1.0001, entry
 
 
+def test_detect_ngram_phrases_salvages_substring():
+    """苍坤上人 kept by all three gates; 苍坤 fails right-entropy but is
+    salvaged because it is a substring of 苍坤上人 and has enough count.
+    """
+    from grga.graph.build import detect_ngram_phrases
+    # Char-level tokens (as jieba would emit for unknown compounds). 苍坤
+    # is followed by 上 in every 3-gram occurrence bar one, so its right
+    # entropy is far below 1.0 nat and must be rescued by the substring
+    # salvage, not by the entropy gate. Left contexts around 苍坤上人 are
+    # varied so the 4-gram itself passes branch entropy.
+    def line(prefix: str, tail: str) -> list:
+        return list(prefix) + list("苍坤上人") + list(tail)
+    lines = [
+        line("师父", "开示"),
+        line("拜访", "讲经"),
+        line("寺中", "闭关"),
+        line("徒弟", "接引"),
+        line("山门", "亲迎"),
+        # One line where 苍坤 stands alone (short-form reference) — feeds
+        # 苍坤's independent count without touching 上人.
+        list("苍坤") + list("早年游学"),
+    ]
+    out = detect_ngram_phrases(lines, max_n=4, min_count=3)
+    phrases = {e["phrase"] for e in out}
+    assert "苍坤上人" in phrases, f"long form should pass all gates: {phrases}"
+    assert "苍坤" in phrases, f"substring salvage missed 苍坤: {phrases}"
+    # Salvaged entry keeps its real (sub-threshold) branch_ent so caller
+    # can distinguish it from a natively-passing phrase.
+    salvaged = next(e for e in out if e["phrase"] == "苍坤")
+    assert salvaged["branch_ent"] < 1.0, salvaged
+
+
+def test_detect_ngram_phrases_salvages_infix_not_only_edges():
+    """Salvage rule must accept infix substrings, not just prefix/suffix."""
+    from grga.graph.build import detect_ngram_phrases
+    # Long form 甲乙丙丁 with varied left AND right contexts.
+    lines = [
+        list("张甲乙丙丁一"),
+        list("李甲乙丙丁二"),
+        list("王甲乙丙丁三"),
+        list("赵甲乙丙丁四"),
+        list("钱甲乙丙丁五"),
+        # A few lines that expose 乙丙 without 甲 on the left / 丁 on the
+        # right, so 乙丙 still fails entropy (dominated by the compound
+        # occurrences) but has real standalone count for salvage.
+        list("独乙丙出"),
+        list("孤乙丙立"),
+    ]
+    out = detect_ngram_phrases(
+        lines, max_n=4, min_count=3, ent_threshold=0.5,
+    )
+    phrases = {e["phrase"] for e in out}
+    assert "甲乙丙丁" in phrases, phrases
+    # 乙丙 is an INFIX of 甲乙丙丁 — must be salvaged by substring rule.
+    assert "乙丙" in phrases, f"infix salvage failed: {phrases}"
+
+
 def test_build_populates_auto_ngram_dict(sidecar_env, tmp_path):
     """End-to-end: enough repeated CJK compounds should land in auto_ngram_dict."""
     scope = tmp_path / "corpus"

@@ -967,6 +967,7 @@ def _make_index_build_progress():
                     "unigram": "统计词频",
                     "window": "枚举 n-gram 窗口",
                     "filter": "过滤候选短语",
+                    "salvage": "打捞子串短语",
                     "sort": "排序",
                 }
                 base = sub.rsplit("_", 1)[0]

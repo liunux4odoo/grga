@@ -686,6 +686,17 @@ def detect_ngram_phrases(
       every split, including n>2 min-split.
     * branch entropy: ``min(H_left, H_right) >= ent_threshold`` (nat).
 
+    Substring salvage: a window that clears frequency + solidity but fails
+    *only* the branch-entropy gate is kept anyway when its rejoined text is
+    a proper substring — prefix, infix, or suffix — of some phrase that
+    passed all three gates. This recovers standalone referents that are
+    almost always glued to one neighbour (苍坤 followed by 上人 in 80/86
+    hits ⇒ right entropy ≈ 0) without loosening the gate globally. The check
+    is textual only: no semantic prior, no positional constraint. Salvaged
+    entries keep their real (sub-threshold) ``branch_ent``. Frequency and
+    solidity are never bypassed, so boundary-crossing fragments (器学 ⊂
+    机器学习, killed on solidity) never become candidates.
+
     Windows may mix ASCII and CJK tokens (so hybrid entities like 艾AA /
     PDC主席 can be discovered). Detected phrases are rejoined by the
     adjacent-pair rule (CJK+anything -> no separator; ASCII+ASCII -> single
@@ -694,10 +705,11 @@ def detect_ngram_phrases(
     for the post-tokenisation merge step (see :func:`merge_auto_phrases`).
 
     ``on_progress`` is an optional callback invoked with ``(phase, info)``
-    at the boundaries of the four internal stages: ``unigram``, ``window``,
-    ``filter``, ``sort``. The ``window`` and ``filter`` stages also send
-    per-tick updates every :data:`_PROGRESS_TICK` items so the caller can
-    drive a spinner / progress bar. Passing ``None`` is a no-op.
+    at the boundaries of the internal stages: ``unigram``, ``window``,
+    ``filter``, ``salvage``, ``sort``. The ``window``, ``filter`` and
+    ``salvage`` stages also send per-tick updates every
+    :data:`_PROGRESS_TICK` items so the caller can drive a spinner /
+    progress bar. Passing ``None`` is a no-op.
     """
     def _tick(phase: str, **info) -> None:
         if on_progress is not None:
@@ -799,6 +811,15 @@ def detect_ngram_phrases(
     total_windows = len(ngram_count)
     _tick("filter_start", windows=total_windows)
     results: List[dict] = []
+    # Windows that clear frequency + solidity but fail *only* the branch
+    # entropy gate. A phrase like 苍坤 (followed by 上人 in 80/86 hits) has
+    # near-zero right entropy and dies here — yet it is a genuine standalone
+    # referent, not a tokenisation artefact. We stash such rejects and, once
+    # the survivor set is known, salvage any whose text is a substring of a
+    # kept phrase (see the salvage pass below). Frequency + solidity stay
+    # enforced, so boundary-crossing fragments (器学 ⊂ 机器学习) still die on
+    # solidity and are never candidates.
+    entropy_rejects: List[Tuple[tuple, int, float, float]] = []
     for idx, (win, c) in enumerate(ngram_count.items()):
         if idx % _PROGRESS_TICK == 0:
             _tick(
@@ -813,6 +834,7 @@ def detect_ngram_phrases(
             continue
         be = min(_entropy(left_ctx[win]), _entropy(right_ctx[win]))
         if be < ent_threshold:
+            entropy_rejects.append((win, c, sol, be))
             continue
         results.append({
             "phrase": _join_by_pair_rule(win),
@@ -822,6 +844,50 @@ def detect_ngram_phrases(
             "branch_ent": round(be, 4),
         })
     _tick("filter_end", windows=total_windows, kept=len(results))
+
+    # Substring salvage (2026-07-13). Purely textual: a reject is kept iff
+    # its rejoined text is a *proper* substring — anywhere, prefix / infix /
+    # suffix — of some survivor's text. No semantic prior (AGENTS.md 铁律 2):
+    # containment is judged on the already-computed join strings alone. The
+    # salvaged entry carries its real (sub-threshold) branch_ent so downstream
+    # can still tell it apart from a natively-passing phrase.
+    _tick("salvage_start", rejects=len(entropy_rejects))
+    if entropy_rejects and results:
+        # Index each survivor under every distinct character it contains,
+        # so a candidate only tests the survivors whose text overlaps its
+        # first character — a proper substring must share ``text[0]`` with
+        # its container. Avoids the naive O(rejects × survivors) scan on
+        # large scopes. Bucket contents are still short (single-char keys
+        # partition the survivor set) and the ``len(kt) > t_len`` guard
+        # keeps the "proper" (strict) substring semantics.
+        by_first_char: "defaultdict[str, list[str]]" = defaultdict(list)
+        for r in results:
+            kt = r["phrase"]
+            for ch in set(kt):
+                by_first_char[ch].append(kt)
+        salvaged = 0
+        for idx, (win, c, sol, be) in enumerate(entropy_rejects):
+            if idx % _PROGRESS_TICK == 0:
+                _tick(
+                    "salvage_advance",
+                    current=idx, total=len(entropy_rejects),
+                    salvaged=salvaged,
+                )
+            text = _join_by_pair_rule(win)
+            t_len = len(text)
+            candidates = by_first_char.get(text[0], ()) if text else ()
+            if any(len(kt) > t_len and text in kt for kt in candidates):
+                results.append({
+                    "phrase": text,
+                    "n": len(win),
+                    "count": c,
+                    "npmi": round(sol, 4),
+                    "branch_ent": round(be, 4),
+                })
+                salvaged += 1
+        _tick("salvage_end", rejects=len(entropy_rejects), salvaged=salvaged)
+    else:
+        _tick("salvage_end", rejects=len(entropy_rejects), salvaged=0)
 
     _tick("sort_start", phrases=len(results))
     results.sort(key=lambda x: (-x["npmi"], -x["count"]))
