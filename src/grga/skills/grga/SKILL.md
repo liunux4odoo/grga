@@ -34,7 +34,7 @@ state and without paying LLM cost until absolutely necessary.
 grga probe "your query" --directory ./docs --json                            # 1) cheap size check before a full search
 grga search "your query" --directory ./docs --json                           # 2) baseline hits + metadata
 grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 3) widen one hit into chapter/paragraph/lines
-grga related "keyword" --json  # 4) candidate related keywords via co-occurrence (needs a pre-built offline index); pipe them into rga for passages. Empty result → no signal, move on.
+grga related "keyword" --json  # 4) candidate related keywords via co-occurrence (needs a pre-built offline index); pipe them into rga for passages. Empty result → sweep 2-4 domain-adjacent keywords with T0 `probe` before giving up.
 ```
 
 `suggest` is the LLM fallback and runs only on demand — see
@@ -211,14 +211,19 @@ rationale in `references/reflection-loop.md` § stuck signals.
 
 | Signal | First choice | Rationale |
 |---|---|---|
-| Vocabulary-mismatch | **T2-escalate `related`** (if the offline index has it; empty → move on) | Corpus uses a term not guessed yet; structural neighbours route around wrong vocabulary. |
+| Vocabulary-mismatch | **T2-escalate `related`** (if the offline index has it; empty → sweep neighbours with T0 `probe` before moving on) | Corpus uses a term not guessed yet; structural neighbours route around wrong vocabulary. |
 | Literal-fixation | **T3 `suggest --intent reformulate`** | Stuck in a literal spelling; LLM's job is to break the frame. |
 | Wandering | **T3 `suggest --intent expand`** | Keyword space under-expanded; more probing in-family won't help. |
 | Hit-paradox | **T3 `suggest --intent rerank`** | Hits exist but ordering is wrong. |
 
 Empty `related` from a missing / partial offline index is **not** a
 trigger to build one inside the skill — treat it as "no graph signal
-for this seed" and fall through to T3 or continue with T1 evidence.
+for this seed". Before spending on T3, try one **T0 `probe` sweep** of
+2-4 hand-picked domain-adjacent keywords (synonyms, sibling concepts,
+super/sub-terms): it is the cheapest way to check whether the vocabulary
+gap is one hop away, and non-zero counts feed straight back into T1.
+Only fall through to T3 or to the existing T1 evidence if the probe
+sweep also comes up empty.
 
 ## Caller anti-patterns
 

@@ -270,11 +270,15 @@ expensive tier only if the cheaper one also fails to unblock.
 is absent or does not cover the seed, `related` returns
 `{"results": []}`. This skill is **retrieval-only** — do **not** run
 `grga index build` from inside the loop to fill the gap. Read empty
-`related` as "no graph signal for this seed" and fall through: try a
-different seed, `--mode heading`, T3 `suggest`, or continue on the T1
-evidence already in hand. This applies equally to the T2-bookends — a
-missing index simply means the bookend produced no additional signal,
-not that a build must be triggered.
+`related` as "no graph signal for this seed" and fall through in this
+order: (1) a cheap **T0 `probe` sweep** of 2-4 hand-picked
+domain-adjacent keywords (synonyms, sibling concepts, super/sub-terms) —
+the fastest way to probe around the vocabulary gap without a graph, and
+any non-zero count feeds straight back into T1; (2) a different seed or
+`--mode heading`; (3) T3 `suggest`; or (4) continue on the T1 evidence
+already in hand. This applies equally to the T2-bookends — a missing
+index simply means the bookend produced no additional signal, so run the
+probe sweep and continue, not that a build must be triggered.
 
 ### `suggest` guardrails: production vs. exploration
 
