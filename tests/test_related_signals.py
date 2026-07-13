@@ -90,13 +90,18 @@ def test_related_graph_v3_envelope_shape(graph_scope, schema):
     payload = json.loads(result.output)
     _validate(payload, schema)
 
-    # v3 envelope MUST be exactly {results}. Everything from v2 is gone.
-    assert set(payload.keys()) == {"results"}
+    # v3 graph envelope is exactly {results, resolved_seeds}. Everything
+    # from v2 is gone.
+    assert set(payload.keys()) == {"results", "resolved_seeds"}
     for banned in (
         "expansion", "crossed_scopes_preview", "trace_signals_version",
         "graph_actions",
     ):
         assert banned not in payload, f"v2 field {banned!r} leaked into v3"
+    # resolved_seeds probe: fixture builds "brew" into the vocabulary
+    # deterministically (min_pair_count=1, min_npmi=0.0), so in_index=True
+    # is the only correct outcome for this happy path.
+    assert payload["resolved_seeds"] == [{"seed": "brew", "in_index": True}]
 
 
 def test_related_graph_v3_related_keyword_fields(graph_scope, schema):
@@ -156,7 +161,8 @@ def test_related_graph_v3_multi_seed_no_fusion(graph_scope, schema):
 
 def test_related_graph_v3_unknown_seed_empty(graph_scope, schema):
     """Seed absent from the vocab (hub or misspelled) returns empty results,
-    still under the v3 envelope shape."""
+    still under the v3 envelope shape. ``resolved_seeds`` reports the miss
+    so callers do not need a separate inspect round-trip."""
     result = runner.invoke(
         app,
         ["related", "totally_absent_xyz", "--mode", "graph",
@@ -167,6 +173,31 @@ def test_related_graph_v3_unknown_seed_empty(graph_scope, schema):
     payload = json.loads(result.output)
     _validate(payload, schema)
     assert payload["results"] == []
+    assert payload["resolved_seeds"] == [
+        {"seed": "totally_absent_xyz", "in_index": False}
+    ]
+
+
+def test_related_graph_v3_resolved_seeds_mixed(graph_scope, schema):
+    """Mixed batch: probe reports per-seed vocabulary bit in input order."""
+    result = runner.invoke(
+        app,
+        ["related", "brew", "totally_absent_xyz", "--mode", "graph",
+         "--db", str(graph_scope["db"]),
+         "-d", str(graph_scope["scope"]), "--json",
+         "--min-npmi", "0.0"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    _validate(payload, schema)
+    assert payload["resolved_seeds"] == [
+        {"seed": "brew", "in_index": True},
+        {"seed": "totally_absent_xyz", "in_index": False},
+    ]
+    # Unknown seed never appears as via_seed in results (nothing to expand).
+    assert all(
+        r["via_seed"] != "totally_absent_xyz" for r in payload["results"]
+    )
 
 
 def test_related_dir_mode_removed(graph_scope):

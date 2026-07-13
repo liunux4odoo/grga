@@ -88,7 +88,10 @@ related(keywords: list[str], *, mode="graph"|"heading",
   # graph（v3 起返回候选关键字，不再是文档）：
   {results: [
      {kw, npmi, cooccur_count, via_seed, chunk_df, source}
-  ]}
+   ],
+   resolved_seeds: [          # v3.1 探针：每个去重 seed 一个 bit
+     {seed, in_index}
+   ]}
   # heading（返回文档，与 v2 兼容）：
   {results: [
      {doc_path, score, mode, reason, keywords[], directory, qualified_path}
@@ -115,6 +118,12 @@ Modes:
     `keyword_stats.chunk_df WHERE dir_id=?`，无 `-d` 时跨 scope 求和）。
   - `source`：`chunk_cooccur` | `llm_promoted`。
   排序 `(via_seed, -npmi, kw)`。稳定，同参数字节一致。
+  **`resolved_seeds` 探针**（v3.1）：每个去重后的输入 seed 一条
+  `{seed, in_index}`。`in_index=false` = 词表里没有（拼错 / 未 index）；
+  `in_index=true` 但 seed 不出现在任何 `results[].via_seed` 里 = 已知但
+  孤立（hub / `--min-npmi` 过紧 / scope 未 index）。前者换词 / suggest
+  reformulate，后者换更具体 seed 或松开 `--min-npmi`。**避免 caller 为
+  每个 seed 额外调一次 `grga graph inspect` 探路。**
   完整契约见 `docs/design/related-signals-v3.md` +
   `schemas/related-signals-v3.json`。
 - `heading` — documents that share a full or leaf **Markdown heading path**

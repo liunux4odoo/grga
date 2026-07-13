@@ -108,6 +108,12 @@ def test_related_graph_json_contract(graph_db: Path):
     # docs/design/plan-2026-07-12-keyword-primary.md §4.
     assert isinstance(payload, dict)
     assert isinstance(payload["results"], list)
+    # v3.1: resolved_seeds is a required envelope-level probe (one entry per
+    # queried seed, {seed, in_index}). See docs/design/related-signals-v3.md.
+    assert isinstance(payload["resolved_seeds"], list)
+    for s in payload["resolved_seeds"]:
+        assert set(s.keys()) == {"seed", "in_index"}
+        assert isinstance(s["in_index"], bool)
     assert "crossed_scopes_preview" not in payload
     assert "expansion" not in payload
     assert "trace_signals_version" not in payload

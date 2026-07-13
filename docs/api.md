@@ -187,6 +187,10 @@ v3 起 graph 模式返回**候选关键字**（不是文档）。heading 模式�
       "chunk_df": 153,                // int — 候选词自身的 chunk_df（hub 判别信号）
       "source": "chunk_cooccur"       // string — chunk_cooccur | llm_promoted
     }
+  ],
+  "resolved_seeds": [                 // v3.1 探针：每个去重 seed 一个 bit
+    {"seed": "brew",   "in_index": true},
+    {"seed": "苍坤",   "in_index": false}   // 未知 seed
   ]
 }
 ```
@@ -197,6 +201,21 @@ v3 起 graph 模式返回**候选关键字**（不是文档）。heading 模式�
 `kw` 若被多个 seed 命中会出现多行（每行不同 `via_seed`）。caller 自决聚合
 策略（sum / max / weighted / drop-if-only-one）。
 
+**`resolved_seeds` 探针**（v3.1）：把空 `results` 的两种情形区分开——
+`in_index=false` 是未知词（`suggest reformulate` 或换词）；`in_index=true`
+但 seed 不出现在任何 `results[].via_seed` 里，则是"已知但孤立"（hub /
+过紧的 `--min-npmi` / scope 未 index）。caller 一段 5 行代码即可分派下
+一步动作，不需要额外的 `grga graph inspect` round-trip：
+
+```python
+produced = {r["via_seed"] for r in payload["results"]}
+for s in payload["resolved_seeds"]:
+    if not s["in_index"]:
+        ...  # 未知词
+    elif s["seed"] not in produced:
+        ...  # 已知但孤立
+```
+
 **`source` 语义**：`chunk_cooccur`（build 从 chunk 共现派生，`npmi` 有实值）
 或 `llm_promoted`（`grga index promote` 写入的边，DB 中 `npmi IS NULL`，
 JSON 里规范化为 `0.0`）。
@@ -205,10 +224,6 @@ JSON 里规范化为 `0.0`）。
 - 有 `--directory`：`keyword_stats.chunk_df WHERE dir_id = ?`。
 - 无 `--directory`：`SUM(chunk_df)` 跨所有 scope。
 - caller 用它做 hub 词剪枝：`if r["chunk_df"] > threshold: drop`。
-
-**空 `{"results": []}`**：未知 seed / hub seed（所有 pair 在写入期被 npmi
-门槛过滤）/ `--min-npmi` 过严 / 空 scope。四种情况用 envelope 无法区分，
-caller 用 `grga graph inspect <seed>` 诊断。
 
 **caller 用法**：拿到候选关键字后走 ripgrep 找原文片段。
 

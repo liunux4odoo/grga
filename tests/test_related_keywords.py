@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from grga.graph.build import build_graph_index
-from grga.related import RelatedKeyword, related_keywords
+from grga.related import RelatedKeyword, RelatedKeywordsResult, SeedResolution, related_keywords
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ def test_related_keywords_basic_expansion(sidecar_env, tmp_path):
 
     results = related_keywords(
         ["alpha"], limit_per_seed=10, min_npmi=0.0, db_path=db,
-    )
+    ).results
     assert results, "alpha should expand to at least beta"
     kws = {r.kw for r in results}
     assert "beta" in kws
@@ -69,7 +69,7 @@ def test_related_keywords_returns_relatedkeyword_type(sidecar_env, tmp_path):
     db = tmp_path / "graph.db"
     _build(scope, db)
 
-    results = related_keywords(["alpha"], min_npmi=0.0, db_path=db)
+    results = related_keywords(["alpha"], min_npmi=0.0, db_path=db).results
     assert results
     r = next(x for x in results if x.kw == "beta")
     assert isinstance(r, RelatedKeyword)
@@ -96,7 +96,7 @@ def test_related_keywords_no_fusion_multi_seed(sidecar_env, tmp_path):
 
     results = related_keywords(
         ["alpha", "gamma"], limit_per_seed=10, min_npmi=0.0, db_path=db,
-    )
+    ).results
     via = {}
     for r in results:
         via.setdefault(r.via_seed, set()).add(r.kw)
@@ -108,15 +108,89 @@ def test_related_keywords_no_fusion_multi_seed(sidecar_env, tmp_path):
 
 
 def test_related_keywords_unknown_seed_empty(sidecar_env, tmp_path):
-    """A seed absent from the vocabulary yields no rows (not an error)."""
+    """A seed absent from the vocabulary yields no rows (not an error)
+    but is flagged in ``resolved_seeds`` with ``in_index=False``."""
     scope = tmp_path / "corpus"
     scope.mkdir()
     (scope / "doc.txt").write_text("alpha beta\n", encoding="utf-8")
     db = tmp_path / "graph.db"
     _build(scope, db)
 
-    assert related_keywords(["nonexistent_seed_xyz"], db_path=db) == []
-    assert related_keywords([], db_path=db) == []
+    unknown = related_keywords(["nonexistent_seed_xyz"], db_path=db)
+    assert unknown.results == []
+    assert unknown.resolved_seeds == [
+        SeedResolution(seed="nonexistent_seed_xyz", in_index=False)
+    ]
+    empty = related_keywords([], db_path=db)
+    assert empty.results == []
+    assert empty.resolved_seeds == []
+
+
+def test_related_keywords_resolved_seeds_probe(sidecar_env, tmp_path):
+    """Mixed seed batch: probe reports per-seed vocabulary membership in
+    first-seen input order, independent of scope filtering."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    lines = [f"alpha beta {i}" for i in range(5)] + ["alpha solo"]
+    (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
+    db = tmp_path / "graph.db"
+    _build(scope, db)
+
+    # Duplicates in the input are deduplicated (first-seen order kept),
+    # empty strings dropped, casefolded before lookup.
+    result = related_keywords(
+        ["Alpha", "totally_absent", "alpha", "", "beta"],
+        min_npmi=0.0,
+        db_path=db,
+    )
+    assert result.resolved_seeds == [
+        SeedResolution(seed="alpha", in_index=True),
+        SeedResolution(seed="totally_absent", in_index=False),
+        SeedResolution(seed="beta", in_index=True),
+    ]
+    # Only known seeds show up as via_seed values in results.
+    via = {r.via_seed for r in result.results}
+    assert via <= {"alpha", "beta"}
+    assert "totally_absent" not in via
+
+
+def test_related_keywords_resolved_seeds_unknown_scope(sidecar_env, tmp_path):
+    """Unknown ``directory`` scope: results empty, but the seed-vocabulary
+    probe still fires (it is scope-independent by design)."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    (scope / "doc.txt").write_text("alpha beta\n", encoding="utf-8")
+    db = tmp_path / "graph.db"
+    _build(scope, db)
+
+    result = related_keywords(
+        ["alpha", "totally_absent"],
+        min_npmi=0.0,
+        db_path=db,
+        directory=tmp_path / "never_indexed",
+    )
+    assert result.results == []
+    assert result.resolved_seeds == [
+        SeedResolution(seed="alpha", in_index=True),
+        SeedResolution(seed="totally_absent", in_index=False),
+    ]
+
+
+def test_related_keywords_resolved_seeds_isolated_seed(sidecar_env, tmp_path):
+    """A known seed whose candidates are all filtered by ``min_npmi`` is
+    still ``in_index=True`` (isolated case, not the unknown-seed case).
+    Caller distinguishes: in_index and not in {r.via_seed}."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    lines = [f"alpha beta {i}" for i in range(4)]
+    lines += [f"alpha {i}" for i in range(20)]
+    (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
+    db = tmp_path / "graph.db"
+    _build(scope, db)
+
+    strict = related_keywords(["alpha"], min_npmi=0.99, db_path=db)
+    assert strict.results == []  # over-tight floor drops all candidates
+    assert strict.resolved_seeds == [SeedResolution(seed="alpha", in_index=True)]
 
 
 def test_related_keywords_min_npmi_floor(sidecar_env, tmp_path):
@@ -130,8 +204,8 @@ def test_related_keywords_min_npmi_floor(sidecar_env, tmp_path):
     db = tmp_path / "graph.db"
     _build(scope, db)
 
-    loose = related_keywords(["alpha"], min_npmi=0.0, db_path=db)
-    strict = related_keywords(["alpha"], min_npmi=0.99, db_path=db)
+    loose = related_keywords(["alpha"], min_npmi=0.0, db_path=db).results
+    strict = related_keywords(["alpha"], min_npmi=0.99, db_path=db).results
     assert len(strict) <= len(loose)
 
 
@@ -156,7 +230,7 @@ def test_related_keywords_scope_filter(sidecar_env, tmp_path):
     # Scoped to A: alpha → beta only.
     res_a = related_keywords(
         ["alpha"], min_npmi=0.0, db_path=db, directory=scope_a,
-    )
+    ).results
     kws_a = {r.kw for r in res_a}
     assert "beta" in kws_a
     assert "zeta" not in kws_a
@@ -164,13 +238,13 @@ def test_related_keywords_scope_filter(sidecar_env, tmp_path):
     # Scoped to B: alpha → zeta only.
     res_b = related_keywords(
         ["alpha"], min_npmi=0.0, db_path=db, directory=scope_b,
-    )
+    ).results
     kws_b = {r.kw for r in res_b}
     assert "zeta" in kws_b
     assert "beta" not in kws_b
 
     # Cross-scope (no directory): alpha → both.
-    res_all = related_keywords(["alpha"], min_npmi=0.0, db_path=db)
+    res_all = related_keywords(["alpha"], min_npmi=0.0, db_path=db).results
     kws_all = {r.kw for r in res_all}
     assert {"beta", "zeta"} <= kws_all
 
@@ -187,7 +261,7 @@ def test_related_keywords_limit_per_seed(sidecar_env, tmp_path):
 
     res = related_keywords(
         ["alpha"], limit_per_seed=3, min_npmi=0.0, db_path=db,
-    )
+    ).results
     assert len([r for r in res if r.via_seed == "alpha"]) <= 3
 
 
@@ -201,8 +275,8 @@ def test_related_keywords_sorted_deterministic(sidecar_env, tmp_path):
     db = tmp_path / "graph.db"
     _build(scope, db)
 
-    r1 = related_keywords(["alpha"], min_npmi=0.0, db_path=db)
-    r2 = related_keywords(["alpha"], min_npmi=0.0, db_path=db)
+    r1 = related_keywords(["alpha"], min_npmi=0.0, db_path=db).results
+    r2 = related_keywords(["alpha"], min_npmi=0.0, db_path=db).results
     assert [x.to_dict() for x in r1] == [x.to_dict() for x in r2]
     # Verify sort key: non-increasing npmi within a via_seed group.
     npmis = [r.npmi for r in r1]

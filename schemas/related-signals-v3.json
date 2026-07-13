@@ -2,18 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grga.dev/schemas/related-signals-v3.json",
   "title": "grga related signals v3",
-  "description": "Contract for `grga related --json` under the v9 keyword-primary architecture. See docs/design/related-signals-v3.md. v3.0 (2026-07-13): `--mode graph` now returns candidate *keywords* (RelatedKeyword) instead of documents; the pre-v3 `expansion` block, `crossed_scopes_preview`, `keyword_contributions`, and `graph_signals` are all gone (PPR + doc aggregation removed in Phase 3b-2). `--mode heading` retains the doc-oriented shape minus the removed fields. `--mode dir` is removed entirely (raises at CLI level; use `grga search --json | aggregate` instead). Replaces schemas/related-signals-v2.json.",
+  "description": "Contract for `grga related --json` under the v9 keyword-primary architecture. See docs/design/related-signals-v3.md. v3.0 (2026-07-13): `--mode graph` now returns candidate *keywords* (RelatedKeyword) instead of documents; the pre-v3 `expansion` block, `crossed_scopes_preview`, `keyword_contributions`, and `graph_signals` are all gone (PPR + doc aggregation removed in Phase 3b-2). v3.1 (2026-07-13): graph envelope adds `resolved_seeds` — per-seed vocabulary probe that disambiguates empty results (unknown seed vs. isolated / over-filtered seed). `--mode heading` retains the doc-oriented shape minus the removed fields. `--mode dir` is removed entirely (raises at CLI level; use `grga search --json | aggregate` instead). Replaces schemas/related-signals-v2.json.",
   "anyOf": [
     {
-      "$comment": "graph mode envelope — candidate keywords with association evidence. An empty results array is also valid for either mode.",
+      "$comment": "graph mode envelope — candidate keywords with association evidence + a per-seed vocabulary probe (resolved_seeds). An empty results array is also valid.",
       "type": "object",
-      "required": ["results"],
+      "required": ["results", "resolved_seeds"],
       "additionalProperties": false,
       "properties": {
         "results": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/related_keyword"
+          }
+        },
+        "resolved_seeds": {
+          "description": "Per distinct queried seed (first-seen input order): whether it exists in the vocabulary. Disambiguates an empty results slice — an unknown seed (in_index=false) needs reformulation, while an indexed seed absent from any results[].via_seed is isolated / over-filtered (swap seed or loosen min_npmi). The set of seeds that produced candidates is derivable as {results[].via_seed}; this probe adds only the non-derivable membership bit.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/seed_resolution"
           }
         }
       }
@@ -34,6 +41,23 @@
     }
   ],
   "$defs": {
+    "seed_resolution": {
+      "description": "One queried seed's vocabulary membership probe.",
+      "type": "object",
+      "required": ["seed", "in_index"],
+      "additionalProperties": false,
+      "properties": {
+        "seed": {
+          "description": "Casefolded queried seed (input, deduplicated, first-seen order).",
+          "type": "string",
+          "minLength": 1
+        },
+        "in_index": {
+          "description": "True iff the seed resolves to a row in the keywords vocabulary. Scope-independent: a seed can be in_index=true and still yield no candidates within a --directory scope (isolated / over-filtered case).",
+          "type": "boolean"
+        }
+      }
+    },
     "related_keyword": {
       "description": "One candidate keyword expanded from a seed via chunk_cooccur or llm_promoted evidence in `keyword_pairs`.",
       "type": "object",

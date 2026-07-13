@@ -151,18 +151,21 @@ decides whether to keep the seed or swap.
 
 v3 起 `related --mode graph` 的返回不再有 `expansion` 顶层块——所有
 信号扁平到每条 `results[]` 上（`{kw, npmi, cooccur_count, via_seed,
-chunk_df, source}`）。种子自身的 `chunk_df` 需要用 `grga graph inspect
-<seed>` 单独查（`total_docs` / `docs_by_scope` / `top_cooccurring_keywords`）
-或从 `results[].via_seed`  + `results[].chunk_df` 反推（候选的 df 只反映
-候选词自身，非 seed 自身）。
+chunk_df, source}`），外加 v3.1 的 envelope 级 `resolved_seeds`
+（`[{seed, in_index}]`）。种子自身的 `chunk_df` 需要用 `grga graph
+inspect <seed>` 单独查——但**判断 seed 是死是活先看 `resolved_seeds`**，
+不必每个 seed 都 inspect：`in_index=false` 即未知词，`in_index=true`
+但缺席于 `{results[].via_seed}` 即已知但孤立。
 
 | Signal | Reading | Action |
 |---|---|---|
-| `graph inspect <seed>` → `total_docs == 0` | Seed 不是索引里的关键字 | 先看 `similar_keywords`：若列出了 substring/superstring（例 seed `苍坤` → `苍坤上人`），换成那个词重试 `related`；空则用 T1 `search` 确认原文，若有则 tokenizer 跳过——挑一个共现的 indexed 词做代理 |
+| `resolved_seeds[i].in_index == false` | Seed 不在词表（拼错 / 未 index） | 换词 / `suggest reformulate`；或先用 `graph inspect` 看 `similar_keywords` 找 substring/superstring 变体 |
+| `resolved_seeds[i].in_index == true` 但缺席于 `{results[].via_seed}` | 已知但孤立（边被写入期/读侧 npmi 门槛滤空，或 scope 未 index） | 换更具体 seed；松开 `--min-npmi`；或多 seed / `--mode heading` |
+| `graph inspect <seed>` → `total_docs == 0` | Seed 不是索引里的关键字（等价 `in_index=false`） | 先看 `similar_keywords`：若列出了 substring/superstring（例 seed `苍坤` → `苍坤上人`），换成那个词重试 `related`；空则用 T1 `search` 确认原文，若有则 tokenizer 跳过——挑一个共现的 indexed 词做代理 |
 | `graph inspect <seed>` → `total_docs` 1-few | Rare seed；通常信号强 | Proceed；检查 `results[].npmi` > 0.5 的候选 |
 | `graph inspect <seed>` → `total_docs` 十至低百 | **大语料上的甜蜜点** | Proceed；expect a tight neighbourhood |
 | `graph inspect <seed>` → `total_docs` 千+ / 邻居列被 stopword 主导 | Hub word — co-occurs with everything | Swap seed；pick a low-DF specific surrogate |
-| `{"results": []}` on indexed seed | Seed 已被索引但孤立（所有边被写入期 npmi 门槛过滤） | 换 seed 或用多 seed；改 `--mode heading` 找结构邻居 |
+| `{"results": []}` on indexed seed（`in_index=true`） | Seed 已被索引但孤立（所有边被写入期 npmi 门槛过滤） | 换 seed 或用多 seed；改 `--mode heading` 找结构邻居 |
 | `results[].npmi > 0.5` | Strong semantic link | Trust；考虑把该候选作为下一轮 seed |
 | `results[].npmi` 0.2-0.5 | Weak-to-moderate | Cross-check with T1 `search` before trusting |
 | `results[].npmi < 0.2` | 写入期门槛已过滤——不会出现，除非 build 用了更低的 `--min-npmi-build` | 若真出现视作 noise-adjacent |
@@ -176,12 +179,16 @@ the task topic first and harvest low-DF nouns from `matches[i].text`.
 
 **Self-diagnosis loop when T2 returns nothing useful**:
 
-1. `graph inspect <seed>` → `total_docs == 0` → seed 未索引 → 先看
-   `similar_keywords`（vocab 子串/超串探针），有则换那个词；没有再换 seed
-2. `total_docs` 高、`top_cooccurring_keywords` 全是 stopword → hub →
-   换 low-DF specific noun
-3. `total_docs` 合理但 `{"results": []}` → 孤立 seed → multi-seed 或
-   `--mode heading`
+先看 `resolved_seeds` — 大多数情况下不用再调 `graph inspect`：
+
+1. `resolved_seeds[i].in_index == false` → seed 未索引 → 用 `graph
+   inspect <seed>` 看 `similar_keywords`（vocab 子串/超串探针），有则换
+   那个词；没有再换 seed
+2. `resolved_seeds[i].in_index == true` 但缺席于 `{results[].via_seed}`
+   → 孤立 seed → multi-seed / 松 `--min-npmi` / `--mode heading`
+3. seed 都 `in_index=true` 且都产出候选但结果跑偏 →
+   `graph inspect` 看是否 hub（`total_docs` 高、
+   `top_cooccurring_keywords` 全 stopword）→ 换 low-DF specific noun
 4. 一切看着正常但候选跑偏 → 一发 T3 `suggest --intent expand` 打破
    vocabulary 框架
 

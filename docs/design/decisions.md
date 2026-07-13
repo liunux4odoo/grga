@@ -4,6 +4,50 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-07-13 · related v3.1 · `resolved_seeds` 多 seed 探针
+
+**Plan step**：related-signals v3（`docs/design/related-signals-v3.md`）
+落地后，从 caller 视角审视多 seed related 的空结果二义性。
+
+**Decision**：`related --mode graph` 的 envelope 加**唯一**一个字段
+`resolved_seeds: [{seed, in_index}]`（每个去重 + casefold + 保序的输入
+seed 一条）。`related_keywords()` 返回类型从 `List[RelatedKeyword]` 改为
+`RelatedKeywordsResult{results, resolved_seeds}`。非 JSON 输出把 dead
+seed 以 stderr 两行提示呈现，不动 stdout 候选流。
+
+**Rationale**（AGENTS.md §信号暴露原则逐条过）：
+
+- **信号是 caller 拿不到的内部状态**（第 2 条）：空 `results` 对单个 seed
+  二义——"未知词"vs"已知但孤立（写入期/读侧 npmi 门槛滤空）"。这两种
+  情形下一步动作相反（reformulate vs 换更具体 seed / 松 min_npmi），但
+  caller 从 `results` 派生不出来（信息在结果集里天然重合）。`in_index`
+  正好补这一 bit。
+- **能派生的坚决不加**（第 1 条）：产出过候选的 seed 集 =
+  `{r.via_seed for r in results}`，命中数 = 其长度，都留给 caller 自己
+  求。envelope 只放"这 seed 在不在词表"这一不可派生位。
+- **低频动词优先**（第 3 条）：落在 `related`，热路径 `search`/`probe`/
+  `expand`/`deep-search` 的 `--json` 一字节不动。
+- **不做完备 schema**：拒绝 `per_seed_stats{hit_count, npmi_max, ...}`
+  之类——那是把 caller 能派生的东西塞进共用层的杠杆反向。只加 bit。
+
+**丢弃了什么**：per-seed 的候选计数 / npmi 分布 / "被哪种门槛滤掉"的
+细分（写入期 vs 读侧）。前者可派生；后者需要额外无过滤查询，且 caller
+自己调 `--min-npmi` 复查即可确认，不值当在热查询里多跑一遍。
+
+**契约影响**：v3.0 → v3.1，additive MINOR（graph envelope 加 required
+字段属破坏读旧 schema 的 caller，但 pre-1.0 且 v3 尚未外发，按新增处理）。
+`schemas/related-signals-v3.json` graph 分支加 `resolved_seeds` +
+`seed_resolution` $def；`related-signals-v3.md` 升 v3.1 + §1.4。
+
+**Files**：
+- `src/grga/related.py`（`SeedResolution` / `RelatedKeywordsResult` /
+  `related_keywords` 返回类型 + `_related_keywords_impl` 提前解析 seed）
+- `src/grga/cli.py::related_command`（graph 分支 emit + stderr dead-seed 提示）
+- `schemas/related-signals-v3.json`、`docs/design/related-signals-v3.md`、
+  `docs/api.md`
+- `tests/test_related_keywords.py`、`tests/test_related_signals.py`、
+  `tests/test_cli_json.py`
+
 ## 2026-07-13 · v9.1 pair 聚合回归 SQL self-join（TEMP TABLE 路线）
 
 **Plan step**：修复 v9 keyword-primary（`plan-2026-07-12-keyword-primary.md`

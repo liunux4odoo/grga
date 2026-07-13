@@ -127,8 +127,10 @@ Markdown 章节树 + 磁盘缓存 sidecar。为 `expand --level chapter` 和
   函数 (`emit_error` / `emit_warning`) 也在此。
 - `docs/exit-codes.md`：外部消费者可见的退出码列表。
 - `docs/design/related-signals-v3.md`：`related --json --mode graph` 的**候选
-  关键字**契约（2026-07-13 随 v9 keyword-primary 落地）。graph 模式返回
-  `{"results": [{kw, npmi, cooccur_count, via_seed, chunk_df, source}]}`，
+  关键字**契约（2026-07-13 随 v9 keyword-primary 落地；v3.1 加
+  `resolved_seeds` 探针）。graph 模式返回
+  `{"results": [{kw, npmi, cooccur_count, via_seed, chunk_df, source}],
+  "resolved_seeds": [{seed, in_index}]}`，
   由 `schemas/related-signals-v3.json` 校验；`--mode dir` 已移除，`--mode
   heading` 保留但 `keyword_contributions` 字段已删。热路径动词
   (`search`/`probe`/`expand`/`deep-search`) 不 emit 任何相关字段。

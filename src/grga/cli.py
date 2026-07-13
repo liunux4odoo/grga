@@ -1639,24 +1639,42 @@ def related_command(
     if mode == "graph":
         from grga.related import related_keywords
 
-        kw_results = related_keywords(
+        kw_result = related_keywords(
             seeds,
             limit_per_seed=limit,
             db_path=str(db_path) if db_path else None,
             directory=str(directory) if directory else None,
             min_npmi=min_npmi,
         )
+        kw_results = kw_result.results
         if json_output:
-            out = {"results": [r.to_dict() for r in kw_results]}
-            typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
+            typer.echo(json.dumps(kw_result.to_dict(), ensure_ascii=False, indent=2))
             return
         if not kw_results:
             typer.echo("no related keywords found", err=True)
-            raise typer.Exit(0)
-        for r in kw_results:
+        else:
+            for r in kw_results:
+                typer.echo(
+                    f"{r.npmi:.4f}  {r.kw}"
+                    f"  (via {r.via_seed}, co={int(r.cooccur_count)}, df={r.chunk_df})"
+                )
+        # Surface dead seeds so callers do not need a separate inspect pass:
+        # a seed that is not in_index is unknown; a seed that is in_index but
+        # produced no candidates is isolated / over-filtered.
+        produced = {r.via_seed for r in kw_results}
+        unknown = [s.seed for s in kw_result.resolved_seeds if not s.in_index]
+        isolated = [
+            s.seed
+            for s in kw_result.resolved_seeds
+            if s.in_index and s.seed not in produced
+        ]
+        if unknown:
+            typer.echo(f"unknown seeds (not in index): {', '.join(unknown)}", err=True)
+        if isolated:
             typer.echo(
-                f"{r.npmi:.4f}  {r.kw}"
-                f"  (via {r.via_seed}, co={int(r.cooccur_count)}, df={r.chunk_df})"
+                f"indexed but no candidates (hub / isolated / min-npmi too high): "
+                f"{', '.join(isolated)}",
+                err=True,
             )
         typer.echo(
             f"{len(kw_results)} related keywords ({mode})", err=True

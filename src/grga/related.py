@@ -3,10 +3,13 @@
 Two entry points, both read-only, deterministic, LLM-free:
 
 * :func:`related_keywords` — v8 graph-expansion primitive. Takes seed
-  keywords, returns candidate keywords + npmi/cooccur/chunk_df evidence
-  by hitting ``keyword_pairs`` directly (no PPR, no full-graph load).
-  Multi-seed queries return per-seed rows without fusion. Caller uses
-  the returned keywords with ripgrep to fetch passages.
+  keywords, returns a :class:`RelatedKeywordsResult` bundling the flat
+  candidate stream (``results``: ``kw``/``npmi``/``cooccur``/``chunk_df``/
+  ``via_seed``/``source``) with a per-seed vocabulary probe
+  (``resolved_seeds``: which seeds are known to the index). No PPR, no
+  full-graph load. Multi-seed queries expand each seed independently
+  without fusion (caller decides). The probe disambiguates the "empty
+  results" case: unknown seed vs. isolated seed.
   Design: ``docs/design/plan-2026-07-12-keyword-primary.md`` §4.
 
 * :func:`related` — legacy doc-oriented API, now supports only
@@ -152,6 +155,60 @@ class RelatedKeyword:
         }
 
 
+@dataclass
+class SeedResolution:
+    """Per-seed vocabulary probe (envelope-level, multi-seed related).
+
+    Answers the one question a caller cannot derive from ``results`` alone:
+    *was this seed known to the index at all?* When a seed produces no
+    candidate keywords, the empty ``results`` slice is ambiguous — the seed
+    could be (a) absent from the vocabulary (misspelt / never indexed), or
+    (b) present but isolated (all its pairs fell below the write-time npmi
+    floor, or the read-side ``min_npmi`` filtered them). ``in_index``
+    disambiguates (a) from (b): callers pick the next move (reformulate vs.
+    swap seed vs. loosen ``--min-npmi``) without a per-seed ``inspect``
+    round-trip.
+
+    Deriving the rest is the caller's job (AGENTS.md §信号暴露原则): the set
+    of seeds that *produced* candidates is ``{r.via_seed for r in results}``;
+    a seed that is ``in_index`` but missing from that set is the isolated /
+    over-filtered case (b).
+
+    Fields:
+        seed:     casefold-normalised seed (as queried).
+        in_index: whether the seed resolves to a row in the ``keywords``
+                  vocabulary table. Scope-independent: a seed can be
+                  ``in_index=True`` yet yield no candidates within a
+                  ``--directory`` scope.
+    """
+
+    seed: str
+    in_index: bool
+
+    def to_dict(self) -> dict:
+        return {"seed": self.seed, "in_index": self.in_index}
+
+
+@dataclass
+class RelatedKeywordsResult:
+    """Envelope returned by :func:`related_keywords`.
+
+    Wraps the flat candidate stream (``results``) with a per-seed
+    vocabulary probe (``resolved_seeds``). The probe is the only piece of
+    envelope-level metadata the v3 graph contract exposes — everything else
+    (fusion, dedup, hit counts) stays derivable on the caller side.
+    """
+
+    results: List[RelatedKeyword]
+    resolved_seeds: List[SeedResolution]
+
+    def to_dict(self) -> dict:
+        return {
+            "results": [r.to_dict() for r in self.results],
+            "resolved_seeds": [s.to_dict() for s in self.resolved_seeds],
+        }
+
+
 DEFAULT_LIMIT_PER_SEED = 30
 
 
@@ -162,7 +219,7 @@ def related_keywords(
     min_npmi: Optional[float] = None,
     db_path: Union[str, Path, None] = None,
     directory: Optional[Union[str, Path]] = None,
-) -> List[RelatedKeyword]:
+) -> RelatedKeywordsResult:
     """v8 graph-expansion primitive: seeds → candidate keywords + evidence.
 
     For each seed keyword, load its top ``limit_per_seed`` neighbours from
@@ -184,6 +241,10 @@ def related_keywords(
     * ``directory`` is a per-scope filter: only pairs whose ``dir_id``
       matches the resolved scope are returned. ``None`` = no filter
       (cross-scope search).
+    * ``resolved_seeds`` reports, for each distinct queried seed, whether it
+      exists in the vocabulary (``in_index``). This is the multi-seed probe:
+      it separates an unknown seed from a known-but-isolated one when
+      ``results`` is empty. See :class:`SeedResolution`.
 
     Args:
         seeds:          query seed keywords (casefold-normalised internally).
@@ -195,12 +256,19 @@ def related_keywords(
         directory:      optional scope filter (resolved absolute path).
 
     Returns:
-        Flat list of :class:`RelatedKeyword`, sorted by
-        ``(via_seed, -npmi, kw)``. Empty when no seed resolves.
+        A :class:`RelatedKeywordsResult` whose ``results`` is the flat list
+        of :class:`RelatedKeyword`, sorted by ``(via_seed, -npmi, kw)``, and
+        whose ``resolved_seeds`` reports per-seed vocabulary membership in
+        first-seen input order. ``results`` is empty when no seed resolves.
     """
-    seed_folded = [s for s in (_fold(k) for k in seeds) if s]
+    seed_folded: List[str] = []
+    seen_seeds: set = set()
+    for s in (_fold(k) for k in seeds):
+        if s and s not in seen_seeds:
+            seen_seeds.add(s)
+            seed_folded.append(s)
     if not seed_folded:
-        return []
+        return RelatedKeywordsResult(results=[], resolved_seeds=[])
 
     from grga.deep_search import DEFAULT_DB_PATH
 
@@ -230,23 +298,15 @@ def _related_keywords_impl(
     limit_per_seed: int,
     min_npmi: float,
     scope_key: Optional[str],
-) -> List[RelatedKeyword]:
+) -> RelatedKeywordsResult:
     """Core query path for :func:`related_keywords`.
 
     Split out so tests can hand-inject a connection without going through
-    the DB-path resolver. The DB schema must already be at v8.
+    the DB-path resolver. The DB schema must already be at v8. ``seeds`` is
+    expected casefold-normalised and de-duplicated (order preserved).
     """
-    # Resolve dir_id filter (if any). Unknown scope → zero results.
-    dir_id: Optional[int] = None
-    if scope_key is not None:
-        row = conn.execute(
-            "SELECT id FROM directories WHERE path = ?", (scope_key,)
-        ).fetchone()
-        if row is None:
-            return []
-        dir_id = int(row[0])
-
-    # Resolve seeds → kw_ids in one batched query, preserving input order.
+    # Resolve seeds → kw_ids first (scope-independent) so the per-seed
+    # ``resolved_seeds`` probe is populated even when the scope is unknown.
     placeholders = ",".join("?" for _ in seeds)
     seed_id_rows = list(
         conn.execute(
@@ -255,12 +315,29 @@ def _related_keywords_impl(
         )
     )
     text_to_id: Dict[str, int] = {str(r[1]): int(r[0]) for r in seed_id_rows}
+    resolved_seeds = [
+        SeedResolution(seed=s, in_index=s in text_to_id) for s in seeds
+    ]
+
+    # Resolve dir_id filter (if any). Unknown scope → zero candidates, but
+    # the vocabulary probe above still stands.
+    dir_id: Optional[int] = None
+    if scope_key is not None:
+        row = conn.execute(
+            "SELECT id FROM directories WHERE path = ?", (scope_key,)
+        ).fetchone()
+        if row is None:
+            return RelatedKeywordsResult(
+                results=[], resolved_seeds=resolved_seeds
+            )
+        dir_id = int(row[0])
+
     seed_ids: List[Tuple[int, str]] = []
     for s in seeds:
         if s in text_to_id:
             seed_ids.append((text_to_id[s], s))
     if not seed_ids:
-        return []
+        return RelatedKeywordsResult(results=[], resolved_seeds=resolved_seeds)
 
     dir_filter = ""
     dir_params: List = []
@@ -336,7 +413,7 @@ def _related_keywords_impl(
         per_seed_rows.append((seed_text, ranked))
 
     if not seen_kw_ids:
-        return []
+        return RelatedKeywordsResult(results=[], resolved_seeds=resolved_seeds)
 
     # Batched translate: nbr kw_id → text + chunk_df. Chunk-partitioned to
     # dodge SQLITE_MAX_VARIABLE_NUMBER. ``keyword_stats`` rows are per-scope;
@@ -384,7 +461,9 @@ def _related_keywords_impl(
                 )
             )
     all_results.sort(key=lambda r: (r.via_seed, -r.npmi, r.kw))
-    return all_results
+    return RelatedKeywordsResult(
+        results=all_results, resolved_seeds=resolved_seeds
+    )
 
 
 # ---------------------------------------------------------------------------

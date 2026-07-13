@@ -4,6 +4,32 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
+### related 信号契约 v3.1 · `resolved_seeds` 多 seed 探针（docs/design/related-signals-v3.md）
+
+多 seed `related --mode graph` 的空结果原本二义——分不清"seed 未索引"
+和"seed 已索引但孤立（边被写入期/读侧 npmi 门槛滤空）"。这两种情况
+caller 从 `results` 派生不出来（信息天然重合），下一步动作却相反。新增
+唯一一个 envelope 级探针补这一 bit。
+
+- **新增**：`grga related --json --mode graph` envelope 加
+  `resolved_seeds: [{seed, in_index}]` — 每个去重（casefold + 保序）输入
+  seed 一条，`in_index` 报告是否命中 `keywords` 词表（与 scope 无关）。
+- **变更**：`grga.related.related_keywords()` 返回类型 `List[RelatedKeyword]`
+  → `RelatedKeywordsResult{results, resolved_seeds}`。新增 `SeedResolution`
+  dataclass。
+- **变更**：graph 模式非 JSON 输出把 dead seed 以 stderr 两行提示呈现
+  （`unknown seeds ...` / `indexed but no candidates ...`），不再在空结果时
+  提前 `Exit`；exit code 仍为 0，stdout 候选流不受影响。
+- **不变**：`RelatedKeyword` 六字段、排序 `(via_seed, -npmi, kw)`、多 seed
+  不融合（D4）、heading 模式、热路径动词 `--json`。
+- caller 一段 5 行即可分派：`in_index=false` → 换词 / `suggest reformulate`；
+  `in_index=true` 但缺席于 `{results[].via_seed}` → 换更具体 seed 或松
+  `--min-npmi`。免去逐 seed 的 `grga graph inspect` round-trip。
+- schema：`schemas/related-signals-v3.json` graph 分支加 `resolved_seeds`
+  （required）+ `seed_resolution` $def。
+
+## [Unreleased] · 历史条目
+
 ### BREAKING · related 信号契约 v2 / v2.1 / v2.2（docs/design/related-signals-v2.md）
 
 同日三步落地：v2.0 撤 trace-signals v1（"图游走可视化"），v2.1 把

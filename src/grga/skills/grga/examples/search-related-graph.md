@@ -66,6 +66,9 @@ grga related "macOS" \
      "via_seed": "brew", "chunk_df": 21, "source": "chunk_cooccur"},
     {"kw": "macos", "npmi": 0.58, "cooccur_count": 11.0,
      "via_seed": "brew", "chunk_df": 18, "source": "chunk_cooccur"}
+  ],
+  "resolved_seeds": [
+    {"seed": "brew", "in_index": true}
   ]
 }
 ```
@@ -77,6 +80,10 @@ Interpretation:
   词自身的 chunk 频次，hub 词判别信号）、`source`。
 - 排序为 `(via_seed, -npmi, kw)`。取前几个高 `npmi` 候选拼进 ripgrep。
 - 想剔除 hub 词：过滤掉 `chunk_df` 过高的候选（阈值由 caller 定）。
+- `resolved_seeds[]`（v3.1）：每个去重 seed 一条 `{seed, in_index}`。多
+  seed 时用它区分空结果：`in_index=false` = 未知词（换词）；`in_index=true`
+  但 seed 缺席于 `{results[].via_seed}` = 已知但孤立（换更具体 seed / 松
+  `--min-npmi`）。免去逐 seed 调 `graph inspect`。
 - 空 `{"results": []}` 意味着离线索引未覆盖此 seed（例如 hub seed 的所有
   pair 在写入期被 npmi 门槛过滤）。**在本 skill 内直接跳过**——改用
   `--mode heading`、换一个 low-DF seed，或就用手头的 T1 证据继续。索引
