@@ -87,12 +87,13 @@ looks harmless but has three real costs:
 - **Disk redundancy** — two copies of the same content to maintain.
 - **Silent staleness** — the copy diverges when the original is edited,
   with no warning.
-- **Broken partition keys for the L2 graph.** The `directory` column in
+- **Broken partition keys for the shared graph.** The `directory` column in
   `keyword_pairs` / `keyword_stats` / `heading_docs` is a partition key.
-  Running `grga index build -s /tmp/clean --db ...` binds the index to a
-  path that vanishes on the next `/tmp` sweep — orphan rows unreachable
-  through the original directory. Even if indexing is skipped this
-  session, the copy habit will poison the graph eventually.
+  If the user's offline index was built against the real path, running
+  the skill's read verbs against `/tmp/clean` will simply miss those
+  rows; if the user later re-indexes against a `/tmp` copy the rows
+  bind to a path that vanishes on the next `/tmp` sweep. Either way,
+  the copy habit poisons scope-filtered lookups.
 
 If a directory contains noise that must be excluded, do it at query
 time: `-g '*needle*'` (glob filter passed through to rga), `--type

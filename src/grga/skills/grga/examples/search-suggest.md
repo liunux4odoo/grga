@@ -1,12 +1,13 @@
-# Pattern: search → suggest → promote (cold start / vague query loop)
+# Pattern: search → suggest (cold start / vague query loop)
 
 **When to use.** The user's query is too vague, or `grga search` returns
 too few useful hits. This pattern falls back to L3 (LLM) to reformulate
-or expand the query, then closes the refeed loop by voting the new
-keyword pairs into the graph so future queries hit them for free.
+or expand the query in-session.
 
 The pattern is deliberately **the last resort**: it is the only grga verb
-that costs tokens. Exhaust `search`, `expand`, and `related` first.
+that costs tokens. Exhaust `search`, `expand`, and `related` first. The
+LLM output is consumed in-session only — this skill does not persist it
+into the offline graph.
 
 ## Storyboard
 
@@ -15,11 +16,8 @@ that costs tokens. Exhaust `search`, `expand`, and `related` first.
 3. Agent runs `grga suggest --intent reformulate` on the raw query.
 4. Agent takes the returned `queries[]` / `keywords[]` and re-runs
    `grga search`.
-5. `suggest` already voted the emitted keyword pairs into
-   `llm_extension_votes`.
-6. Later (batch / task-boundary), agent runs `grga index promote` to
-   graduate high-vote pairs into `keyword_pairs`; next time
-   `related --mode graph` will surface them without LLM cost.
+5. Agent continues the reflection loop with the new hits (expand /
+   related as needed).
 
 ## Commands
 
@@ -35,7 +33,6 @@ grga suggest "乐观的例子" \
     --intent reformulate \
     --hits /tmp/hits.json \
     --directory tests/fixtures/docs \
-    --db /tmp/grga.db \
     --json > /tmp/sugg.json
 
 # 3) Re-run search with each reformulated expression, merge results.
@@ -43,11 +40,11 @@ for q in $(jq -r '.queries[]' /tmp/sugg.json); do
     grga search "$q" -d tests/fixtures/docs --json >> /tmp/all_hits.jsonl
 done
 
-# 4) Later, refeed the graph. --dry-run first to inspect.
-grga index promote --threshold 3 --db /tmp/grga.db --dry-run --json
-
-# 5) Commit the promotion when comfortable.
-grga index promote --threshold 3 --db /tmp/grga.db --json
+# 4) Guardrail: re-probe any LLM-produced query before trusting it —
+#    it is unvalidated and can be either empty or explosive.
+for q in $(jq -r '.queries[]' /tmp/sugg.json); do
+    grga probe "$q" -d tests/fixtures/docs --json
+done
 ```
 
 ## Expected shape of `suggest --intent reformulate`
@@ -65,8 +62,7 @@ grga index promote --threshold 3 --db /tmp/grga.db --json
   "tokens_used": 312,
   "prompt_tokens": 248,
   "completion_tokens": 64,
-  "model": "gpt-4o-mini",
-  "votes": {"pairs_seen": 2, "pairs_recorded": 2, "votes_added": 3.0}
+  "model": "gpt-4o-mini"
 }
 ```
 
@@ -90,17 +86,13 @@ Choose the intent based on what the caller currently has:
   `search + expand` (see `search-expand-chapter.md`).
 - **The corpus is small and mostly Markdown.** Structure alone
   (`heading_path`, `--mode heading`) often beats an LLM roundtrip.
-- **In evaluation / dry runs.** Pass `--no-votes` to `suggest` so the
-  graph is not polluted with experimental pairs. You can still parse the
-  suggestion; only the write side is skipped.
 
-## Refeed hygiene
+## Loop hygiene
 
-- `promote --dry-run` prints exactly what would be merged; it never
-  writes. Use it to sanity-check surprising pairs before committing.
-- `llm_extension_votes` rows are **never deleted** by `promote`; if a
-  wrong pair is graduated, revert by editing `keyword_pairs` directly.
-- Default threshold is `3` votes. Raise it (`--threshold 5+`) for a
-  strict corpus; lower it (`--threshold 2`) for aggressive experimentation.
-- Scope promotion with `--directory <dir>` when the corpus contains
-  unrelated sub-projects and you want to isolate each project's graph.
+- **Always re-probe LLM output** before spending on `search` — the
+  suggestion is unvalidated.
+- Cap the T3 loop at 1-2 escalations per user task; if it still stalls,
+  report the evidence gap rather than looping further.
+- LLM suggestions are consumed **in-session**. Persisting them into the
+  offline graph (vote accumulation / promotion) is a user-side offline
+  task, out of scope for this retrieval skill.

@@ -6,13 +6,13 @@ at trigger time.
 
 ## The core idea
 
-grga is designed around a **single per-user knowledge graph**:
-`~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`). Every
-`index build` writes into that shared DB using the `directory` column as
-a partition key, and every query verb defaults to **filtering results by
-`--directory`** — scope is a *query-time filter*, not a partition
-boundary. Give `-d ./project_a` and you narrow the answer to that corpus;
-omit `-d` and the whole per-user graph is in scope（跨 scope 求和）。
+grga reads from a **single per-user knowledge graph**:
+`~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`). The DB is
+**built offline by the user** (outside this skill); every query verb
+here defaults to **filtering results by `--directory`** — scope is a
+*query-time filter*, not a partition boundary. Give `-d ./project_a` and
+you narrow the answer to that corpus; omit `-d` and the whole per-user
+graph is in scope（跨 scope 求和）。
 
 Why: grga's target caller is an AI agent that hops across corpora
 (novels, papers, code, notes) in one session. Keeping the graph unified
@@ -20,36 +20,21 @@ turns cross-corpus co-occurrence into a *feature* (recall the concept
 regardless of which corpus you were browsing yesterday) while
 `--directory` still lets a query stay inside one project when needed.
 
-Index each corpus once, then all query verbs share the graph:
+The user is expected to have indexed each corpus once offline; from this
+skill's perspective all query verbs simply read that shared graph. If a
+scope is missing from the index, `related` / `graph inspect` return
+empty — treat as "no signal" and proceed with the other evidence.
 
-```bash
-grga index build -s ~/novels  --db ~/.config/grga/deep_keywords.db --json
-grga index build -s ~/papers  --db ~/.config/grga/deep_keywords.db --json
-grga index build -s ~/code    --db ~/.config/grga/deep_keywords.db --json
-# `related "x" -d ~/papers` sees only papers; omit -d to search all three.
-```
+## v9 起 pair 是累积知识资产（read-side view）
 
-## v9 起 pair 是累积知识资产
+`keyword_pairs`（+ `keyword_stats` + `scope_stats`）在离线 build 阶段
+写入，是 grga 从语料学到的知识资产。从本 skill 的角度只需要知道：
 
-`keyword_pairs`（+ `keyword_stats` + `scope_stats`）是 grga 从语料**学到
-的知识资产**，不是可派生的中间表。它遵循 grow-and-refine 语义：
-
-- **随语料更新/新增而 refine**：新文件的共现增量 UPSERT 进已有资产。
-- **不随语料删除而销毁**：删源文件**不动** pair 表。只有显式 `grga index
-  forget` 才清理某 scope 的资产。
-- **可跨语料迁移复用**（未来方向）：一个语料学到的 pair 字典可服务另一
-  个语料，见 `docs/design/plan-2026-07-12-keyword-primary.md` §8。
-
-写入期存储契约（build 时固化的资产下界）：
-
-| Flag | 默认 | 作用 |
-|---|---:|---|
-| `--min-pair-count` | 5 | 单 scope 内 `cooccur_count < 5` 的 pair 不入表 |
-| `--min-npmi-build` | 0.2 | `npmi < 0.2` 的 pair 不入表（`llm_promoted` 不受此限） |
-
-**门槛只能在 build 期放松，不能在读侧救回**：低于门槛的 pair 根本没被
-记忆。`related --mode graph --min-npmi` 只能**收紧**读侧地板（`0.2 →
-0.3`），不能低于写入期门槛。
+- 资产在读侧不可变；本 skill 不写入。
+- 覆盖范围由用户的离线 build 决定；未覆盖的 scope 上 `related` 为空。
+- 写入期门槛（`--min-pair-count` / `--min-npmi-build`）已在 build 期
+  固化。读侧 `--min-npmi` 只能**收紧**，不能放松到写入期门槛以下——
+  想放宽下界属于离线索引维护，不在本 skill 内解决。
 
 ## 关于跨 scope
 
@@ -103,7 +88,7 @@ The shared per-user DB is the default. Pass an explicit `--db` when:
 | `scope_stats` | per-dir_id scalar：`n_chunks`（npmi 分母 N）/ `n_docs` / `vocab_size` |
 | `heading_docs` | Markdown 章节表（`related --mode heading` / `expand --level chapter` 用） |
 | `auto_ngram_dict` | tokenizer 学到的 n-gram 字典 |
-| `llm_extension_votes` | LLM 提出的 pair 投票暂存（`grga index promote` 达阈值才升级） |
+| `llm_extension_votes` | LLM 提出的 pair 投票暂存（离线 promote 才升级；本 skill 不读写） |
 
 **v8/v9 已删除**：`chunks`（唯一读者是 npmi 分母，改读 `scope_stats.n_chunks`
 后即可删）、`keyword_chunks`（45GB 线性怪兽；chunk 只在 build 期 RAM

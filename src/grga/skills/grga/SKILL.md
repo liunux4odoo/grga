@@ -1,6 +1,6 @@
 ---
 name: grga
-description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga v2 verbs (probe / search / expand / related / suggest) plus the offline index build/promote helpers, and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
+description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga v2 read verbs (probe / search / expand / related / suggest) and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index has already been built by the user; if `related` / `graph inspect` returns empty, treat that as "no signal available" and continue with the remaining evidence. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
 ---
 
 # grga skill
@@ -10,30 +10,47 @@ grga v2 is a **local, structure-aware search toolbox** built on top of
 caller agent can compose them into a reflection loop without hidden
 state and without paying LLM cost until absolutely necessary.
 
+## !!**MANDATORY RULES**!!
+
+- **Always use `grga` for keyword search.** While this skill is active,
+  `grga` covers every search need. Unless the user explicitly requests
+  otherwise or a task genuinely cannot be served by any `grga` verb, do
+  **not** reach for `grep`, `rg`, `sqlite3`, ad-hoc `find -exec grep`,
+  or similar tools to hunt for keywords, patterns, or DB rows. Route
+  the search through the appropriate verb (`probe` / `search` /
+  `expand` / `related` / `suggest`) instead.
+- **Post-processing is fine.** `sed`, `awk`, `wc`, `sort`, `uniq`,
+  `jq`, `cut`, and friends remain the right tools for slicing,
+  counting, aggregating, or reformatting `grga` output. Pipe `grga
+  --json` (or plain) into them freely.
+- **Naming the bypass.** If a task truly needs a non-`grga` search
+  tool, first name the specific `grga` verb being bypassed and the
+  concrete reason it is insufficient (see the anti-patterns section).
+  Absent that justification, the urge is muscle memory, not necessity.
+
 ## 30-second quickstart
 
 ```bash
-grga index build --scope ./docs --json  # 1) one-time (or on mtime change) offline index
-grga probe "your query" --directory ./docs --json                            # 2) cheap size check before a full search
-grga search "your query" --directory ./docs --json                           # 3) baseline hits + metadata
-grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 4) widen one hit into chapter/paragraph/lines
-grga related "keyword" --mode graph --json  # 5) candidate related keywords via co-occurrence (needs step 1); pipe them into rga for passages.
+grga probe "your query" --directory ./docs --json                            # 1) cheap size check before a full search
+grga search "your query" --directory ./docs --json                           # 2) baseline hits + metadata
+grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 3) widen one hit into chapter/paragraph/lines
+grga related "keyword" --json  # 4) candidate related keywords via co-occurrence (needs a pre-built offline index); pipe them into rga for passages. Empty result → no signal, move on.
 ```
 
 `suggest` is the LLM fallback and runs only on demand — see
-`examples/search-suggest-promote.md`.
+`examples/search-suggest.md`.
 
 ## Storage model at a glance
 
-grga writes every `index build` into **one shared per-user knowledge
-graph** at `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`).
-The `directory` column is a partition key, and every query verb defaults
-to filtering by `--directory` — so **scope is a query-time filter, not a
+grga reads a **shared per-user knowledge graph** at
+`~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`), built
+**offline by the user beforehand**. This skill never writes to it. The
+`directory` column is a partition key, and every query verb defaults to
+filtering by `--directory` — so **scope is a query-time filter, not a
 partition boundary**。
 
 - **Isolation is the default** on `related --mode graph`：不传 `-d` 时
-  跨所有 scope 求和；传 `-d` 时只看该 scope 的共现资产。v9 起 pair 是
-  **累积知识资产**（grow-and-refine），跨语料的显式合并/复用是未来方向。
+  跨所有 scope 求和；传 `-d` 时只看该 scope 的共现资产。
 - **`related --mode heading` is cross-scope by default**（heading paths
   resist same-name-different-meaning noise）。Add `--same-scope` to
   restrict.
@@ -51,13 +68,10 @@ Use grga when the task involves any of the following on a local directory:
 - Turning a single hit into a **wider textual context** (nearby lines,
   paragraph, Markdown chapter, whole file).
 - Answering "**what else is related to this?**" via co-occurrence graph
-  （v3 起返回候选关键字 + `npmi`，caller 用 ripgrep 找片段）, directory
-  proximity（v3 已删，改走 `grga search --json` 聚合）, or shared
+  （v3 起返回候选关键字 + `npmi`，caller 用 ripgrep 找片段）, or shared
   Markdown heading paths（返回文档）.
 - Asking an LLM to expand keywords, rerank hits, or reformulate a vague
   query — only after cheaper layers have been tried.
-- Building/refreshing the offline L2 graph index, or promoting
-  well-voted LLM keyword pairs into the permanent graph.
 
 Do **not** use for: web/HTTP fetches, editing files, autonomous "agent"
 loops (grga verbs are stateless — the caller owns the loop), or the
@@ -65,9 +79,8 @@ separate `grga deep-search` LLM-planned QA command.
 
 ## The five verbs (contract summary)
 
-Every verb accepts `--json`. All are **idempotent** and **read-only** by
-default, except `suggest` (votes into `llm_extension_votes`) and `index
-build` / `index promote` (write the DB). Full signatures and per-field
+Every verb accepts `--json`. All are **idempotent** and **read-only**,
+except `suggest` (which calls an LLM). Full signatures and per-field
 semantics in `references/verbs.md`; authoritative JSON schemas in
 `docs/api.md`.
 
@@ -76,22 +89,21 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
 | `grga probe <q> -d <dir>` | `rga --count-matches` — returns `total_lines`, `file_count` without bodies. Makes no decision. | About to `search` an unfamiliar corpus / broad keyword / huge file — want a cheap size signal first. |
 | `grga search <q> -d <dir>` | Hits + Layer 2 position metadata (`occurrence_index`, `line_ratio`, `nearby_hits`) + Layer 1 `heading_path` for Markdown. Space-separated terms are **implicit AND** (v2 breaking; `--implicit-or` restores OR). `--max-total N` (default 1000) sets `truncated`. | Concrete query string. First **evidence-fetching** verb — but for open-ended queries a T2-bookend `related` sweep precedes T1 (see workflow). |
 | `grga expand <path>:<line> --level <lines\|paragraph\|chapter\|document>` | Turn one hit into a `Context` block. Degrades `chapter → paragraph → lines(±3) → lines(±0)`. Always read the returned `level`. Never invokes an LLM. | Hit is interesting and surrounding text is needed; want a whole Markdown chapter; quoting a block into another prompt. |
-| `grga related <kw…> --mode <graph\|heading> --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi`**（v3 起不再返回文档，caller 用 ripgrep 找片段；查 `keyword_pairs`），`heading` 返回共享 Markdown heading path 的**文档**。v3 起 `--mode dir` 已删除——改用 `grga search --json` 后按目录聚合。**Precondition**: `grga index build` must have run first, else empty. | Caller has keywords and needs to broaden — not deepen — the exploration. |
-| `grga suggest <q> --intent <expand\|rerank\|reformulate> --hits <hits.json>` | **Only** verb that calls an LLM. Emitted `keyword_pairs` vote into `llm_extension_votes` unless `--no-votes`; run `grga index promote` to graduate them. | Search returns too few / low-quality results, or query is intrinsically vague. **Never** the first verb (see "Stuck signals" for triggers and relaxed guardrails). |
+| `grga related <kw…> --mode <graph\|heading> --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi`**（v3 起不再返回文档，caller 用 ripgrep 找片段；查 `keyword_pairs`），`heading` 返回共享 Markdown heading path 的**文档**。v3 起 `--mode dir` 已删除——改用 `grga search --json` 后按目录聚合。**Precondition**: the offline index must already have been built by the user; if not, `related` returns `{"results": []}` — treat empty as "no signal, move on". | Caller has keywords and needs to broaden — not deepen — the exploration. |
+| `grga suggest <q> --intent <expand\|rerank\|reformulate> --hits <hits.json>` | **Only** verb that calls an LLM. Returns reformulated queries / expanded keywords / rerankings. | Search returns too few / low-quality results, or query is intrinsically vague. **Never** the first verb (see "Stuck signals" for triggers and relaxed guardrails). |
 
-### Supporting commands (offline / infra)
+### Supporting commands (read-side only)
 
-- `grga index build -s <scope> --db <path>` — index a scope's segments
-  and `heading_docs` into the shared graph. Prerequisite for `related`.
-  **Also valid inline** during a stuck-signal escalation (see
-  `references/reflection-loop.md` § index build).
-- `grga index promote --threshold N --db <path> [--dry-run]` — merge
-  high-vote pairs from `llm_extension_votes` into `keyword_pairs`.
-  Idempotent.
 - `grga graph inspect <keyword> --db <path>` — diagnostic on a keyword's
   scope distribution, top co-occurring keywords, polysemy signal. **Not
   a substitute for `related`** (see `references/reflection-loop.md`
-  § T2 is `related`, not `graph inspect`).
+  § T2 is `related`, not `graph inspect`). Empty output means the
+  keyword is not in the offline index — treat as "no signal" and skip.
+
+> Offline index construction (`grga index build` / `index rebuild` /
+> `index promote`) is **out of scope for this skill**. The user is
+> expected to have built the graph beforehand. Do not run those
+> commands from within the skill loop.
 
 ## Tiered reflection workflow
 
@@ -199,13 +211,14 @@ rationale in `references/reflection-loop.md` § stuck signals.
 
 | Signal | First choice | Rationale |
 |---|---|---|
-| Vocabulary-mismatch | **T2-escalate `related`** (build index inline if absent) | Corpus uses a term not guessed yet; structural neighbours route around wrong vocabulary. |
+| Vocabulary-mismatch | **T2-escalate `related`** (if the offline index has it; empty → move on) | Corpus uses a term not guessed yet; structural neighbours route around wrong vocabulary. |
 | Literal-fixation | **T3 `suggest --intent reformulate`** | Stuck in a literal spelling; LLM's job is to break the frame. |
 | Wandering | **T3 `suggest --intent expand`** | Keyword space under-expanded; more probing in-family won't help. |
 | Hit-paradox | **T3 `suggest --intent rerank`** | Hits exist but ordering is wrong. |
 
-Missing index is a build-inline trigger, never a waiver — this applies
-equally to the mandatory T2-bookends.
+Empty `related` from a missing / partial offline index is **not** a
+trigger to build one inside the skill — treat it as "no graph signal
+for this seed" and fall through to T3 or continue with T1 evidence.
 
 ## Caller anti-patterns
 
@@ -242,8 +255,8 @@ Four worked examples ship with this skill:
   mentions X" (search → expand chapter, degrades to paragraph on non-md).
 - `examples/search-related-graph.md` — "find other files discussing the
   same concept" (search → collect keywords → related graph).
-- `examples/search-suggest-promote.md` — cold-start / vague-query loop
-  with LLM reflection and refeeding.
+- `examples/search-suggest.md` — cold-start / vague-query loop
+  with in-session LLM reflection.
 
 Composition notes:
 
@@ -257,7 +270,6 @@ Composition notes:
   --intent rerank` first, then `expand` top 3-5.
 - **Re-probe LLM output** from `suggest --intent reformulate` before
   searching it.
-- **Vote hygiene**: pass `--no-votes` in dry-run / evaluation contexts.
 
 ## Practical CLI invariants
 
@@ -291,4 +303,4 @@ Detailed material loaded on demand:
 | `references/storage-model.md` | Scoped query is thin and weighing `-d` vs cross-scope 求和; deciding `--db` override; indexing multiple corpora. |
 | `references/reflection-loop.md` | Executing a tier (T0-T3); need per-tier decision tables, seed selection, stuck-signal thresholds, `graph inspect` disambiguation, or `suggest` context relaxation. |
 | `references/anti-patterns.md` | Considering a `grep` / `sqlite3` / copy-to-clean-path shortcut, or an identity-disambiguation query. |
-| `references/troubleshooting.md` | A verb misbehaves — empty `related`, `expand` degraded, `suggest` hangs, promoted pairs not showing up. |
+| `references/troubleshooting.md` | A verb misbehaves — empty `related`, `expand` degraded, `suggest` hangs. |

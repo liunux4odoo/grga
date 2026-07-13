@@ -11,12 +11,14 @@ search` 找原文片段是 caller 的职责。
 
 ## Storyboard
 
-1. Prep once: 为语料建离线共现索引。
+1. Precondition: the corpus's offline co-occurrence index already exists
+   (built by the user; not a skill step). If missing, `related` returns
+   empty — skip to `--mode heading` or plain search.
 2. User: *"哪些文件提到 brew？还有什么和它相关？"*
 3. Agent 跑 `grga search` 拿字面命中 + matched keywords。
 4. Agent 从 top 命中里抽一小撮关键字种子。
 5. Agent 调 `grga related --mode graph` 拿**候选关键字**（`kw` + `npmi` +
-   `chunk_df` + `via_seed`）。
+   `chunk_df` + `via_seed`）。空结果视为"无信号"，直接跳过。
 6. Agent 把 seed + 候选关键字拼进 `rga -e`（或 `grga search` 的 OR 查询）
    找原文片段。
 7. 如需按结构维度补充，另调 `--mode heading` 拿共享 Markdown 章节的文档。
@@ -24,12 +26,6 @@ search` 找原文片段是 caller 的职责。
 ## Commands
 
 ```bash
-# 0) One-time (or on-repo-change) offline build.
-grga index build \
-    --scope tests/fixtures/cross_heading \
-    --db /tmp/grga.db \
-    --json
-
 # 1) Literal search for the seed term.
 grga search "brew" \
     --directory tests/fixtures/cross_heading \
@@ -81,18 +77,20 @@ Interpretation:
   词自身的 chunk 频次，hub 词判别信号）、`source`。
 - 排序为 `(via_seed, -npmi, kw)`。取前几个高 `npmi` 候选拼进 ripgrep。
 - 想剔除 hub 词：过滤掉 `chunk_df` 过高的候选（阈值由 caller 定）。
-- 空 `{"results": []}` 意味着索引缺失，或 seed 无共现信号（例如 hub seed
-  的所有 pair 在写入期被 npmi 门槛过滤）。此时重建索引，或改用
-  `--mode heading`。
+- 空 `{"results": []}` 意味着离线索引未覆盖此 seed（例如 hub seed 的所有
+  pair 在写入期被 npmi 门槛过滤）。**在本 skill 内直接跳过**——改用
+  `--mode heading`、换一个 low-DF seed，或就用手头的 T1 证据继续。索引
+  构建/维护属于用户离线动作，不由 skill 触发。
 
 ## When *not* to use this pattern
 
 - **The user gave a natural-language question, not a keyword.** Run
   `grga suggest --intent reformulate` first to convert it to concrete
   keywords, then use those with `related`.
-- **The index has not been built.** `related --mode graph` will return
-  `{"results": []}`. Build the index, or改用 `--mode heading`（走
-  `heading_docs`，仍返回文档）。
+- **The offline index does not cover this scope.** `related --mode
+  graph` returns `{"results": []}` — fall back to `--mode heading`
+  （走 `heading_docs`，仍返回文档）or drop the T2 step entirely for
+  this task.
 - **You want a specific *chapter* across files** — that is
   `--mode heading` (see the `heading` example in the sidebar file
   `../SKILL.md`).
@@ -102,15 +100,13 @@ Interpretation:
 
 ## Tuning the read-side npmi floor（defaults are usually right）
 
-写入期资产已固化下界 `npmi >= 0.2`（build 门槛，见
-`docs/design/plan-2026-07-12-keyword-primary.md` §3.3）。`related --mode
-graph` 的 `--min-npmi` 是**读侧地板**：只能**收紧**（如 `0.3` 只保留强
-关联），**不能放松到 0.2 以下**（低于 0.2 的 pair 根本没被记入资产）。
+写入期资产已固化下界 `npmi >= 0.2`（用户离线 build 时确定）。`related
+--mode graph` 的 `--min-npmi` 是**读侧地板**：只能**收紧**（如 `0.3` 只
+保留强关联），**不能放松到写入期门槛以下**（低于门槛的 pair 根本没被
+记入资产）。
 
-- 小型合成语料上候选很稀 → 写入期门槛 0.2 已经过滤掉了噪声边；重建索引
-  时可用 `grga index build --min-npmi-build 0`（写入期放宽下界），而不是
-  在读侧调 `--min-npmi`。
 - 想只看强关联 → 抬高 `--min-npmi`（如 `0.3`）。
+- 若召回不足，属离线索引重建选择，不在本 skill 内解决。
 
 ## Composition tip
 

@@ -78,10 +78,11 @@ Two independent capabilities, choose based on what is missing:
   source code, document only for small files. Always read the returned
   `level` field — it reflects what was actually achieved.
 - **Need other documents / concepts on the same topic** → `grga related`。
-  `mode=graph`（需 `index build`）返回**候选关键字 + `npmi`**（v3 起不再
-  返回文档；caller 拿候选关键字后走 ripgrep 找片段）；`mode=heading` 走
-  `heading_docs`，返回共享 Markdown 章节的文档。v3 起 `--mode dir` 已
-  移除，改用 `grga search --json` 后按目录聚合。
+  `mode=graph`（需事先由用户离线构建索引）返回**候选关键字 + `npmi`**
+  （v3 起不再返回文档；caller 拿候选关键字后走 ripgrep 找片段）；
+  `mode=heading` 走 `heading_docs`，返回共享 Markdown 章节的文档。v3 起
+  `--mode dir` 已移除，改用 `grga search --json` 后按目录聚合。若索引
+  未覆盖 seed，`{"results": []}` 视为"无信号，跳过"。
 
 Compose both: after `expand --level chapter`, feed the chapter's
 headings back into `related --mode heading` to find sibling chapters.
@@ -201,28 +202,19 @@ Guardrails:
 - Cap the overall T3 loop at a small number of escalations (typically
   1-2). If it still stalls, report evidence gaps rather than looping
   further.
-- `--no-votes` during dry runs / evaluation so `llm_extension_votes` is
-  not polluted.
 
-## Refeed (task boundary)
+## Task boundary
 
-Periodically — at task completion or on a schedule — promote well-voted
-pairs into the permanent graph so future queries hit them without LLM
-cost:
-
-```bash
-grga index promote --dry-run --db <path> --json   # inspect first
-grga index promote            --db <path> --json   # commit
-```
-
-After a promote, `related --mode graph` picks up the new edges
-automatically on the next call.
+`suggest` output (keywords, queries, rankings) is consumed **in-session**
+by feeding it back into `search` / `related` / `expand`. This skill does
+not persist LLM suggestions into the offline graph; promotion into the
+long-lived index is a user-owned offline task.
 
 ## Stuck signals & escalation (detail)
 
 SKILL.md keeps the short list of four signals + the escalation table.
-This section is the **binding definition** — thresholds, symptoms,
-multi-signal interactions, and inline-index-build rationale.
+This section is the **binding definition** — thresholds, symptoms, and
+multi-signal interactions.
 
 **None of the thresholds are hard rules.** Tighten on small / familiar
 corpora where mistakes should trigger fast; loosen on large / unfamiliar
@@ -272,34 +264,24 @@ literal wordings all zero-hit), prefer the **cheaper** action first
 (T2-escalate `related` before T3 `suggest`). Escalate to the more
 expensive tier only if the cheaper one also fails to unblock.
 
-### `index build` is part of the reflection path, not just infra
+### A missing offline index is not a build trigger
 
-`grga index build -s <scope> --db <path> --json` is documented as
-"offline / infra" because it is offline work, but that framing
-undersells its role. **When a stuck signal points to T2 and the corpus
-is not yet indexed, building the index inline is the correct next
-action** — typically < 60s on a small-to-medium corpus, often faster
-than another round of T0/T1 variants. Read "offline / infra" as
-"one-off cost, amortised across every subsequent T2 call in the
-session", not "prerequisite the caller must have handled before the
-session."
-
-Pattern when T2 is chosen but the index is absent:
-
-```bash
-grga index build -s <dir> --db <path> --json      # < 60s typical
-grga related <seed> --mode graph --db <path> --json
-```
-
-This applies equally to the mandatory T2-bookends: a missing index is a
-build-inline trigger, never a waiver.
+`related --mode graph` needs an offline index built by the user. If it
+is absent or does not cover the seed, `related` returns
+`{"results": []}`. This skill is **retrieval-only** — do **not** run
+`grga index build` from inside the loop to fill the gap. Read empty
+`related` as "no graph signal for this seed" and fall through: try a
+different seed, `--mode heading`, T3 `suggest`, or continue on the T1
+evidence already in hand. This applies equally to the T2-bookends — a
+missing index simply means the bookend produced no additional signal,
+not that a build must be triggered.
 
 ### `suggest` guardrails: production vs. exploration
 
 The verb-level guardrail "never the first verb, capped at 1-2
 escalations per task" is written for the **production caller context** —
-a real end-user query on a well-understood corpus where LLM cost and
-graph-vote pollution both matter.
+a real end-user query on a well-understood corpus where LLM cost
+matters.
 
 Relax in two other contexts:
 
@@ -307,9 +289,7 @@ Relax in two other contexts:
   not yet known; a `suggest --intent expand` early in the session is
   legitimate and often cheaper than five wrong-terminology probes.
 - **Skill / workflow testing, exploratory analysis.** Deliberately
-  exercising the loop; `suggest` is what is being tested. Pass
-  `--no-votes` to prevent test queries from polluting
-  `llm_extension_votes`.
+  exercising the loop; `suggest` is what is being tested.
 
 The 1-2-escalation cap still applies **per user task**, not per session
 in exploratory contexts.

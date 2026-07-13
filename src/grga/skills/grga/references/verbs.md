@@ -5,9 +5,10 @@ keeps each verb's one-line purpose and "Use when"; this file holds the
 conceptual signatures and per-field semantics. Authoritative JSON schemas
 for every command live in `docs/api.md` in the grga repo.
 
-All verbs are **idempotent** and **read-only** by default, except
-`suggest` (which may vote into `llm_extension_votes`) and `index build` /
-`index promote` (which write to the SQLite graph DB).
+All verbs are **idempotent** and **read-only**, except `suggest` (which
+calls an LLM). This skill does not include the offline write-side
+commands (`index build` / `index rebuild` / `index promote`); the graph
+DB is assumed to have been built by the user beforehand.
 
 ## 0. `probe`
 
@@ -126,16 +127,8 @@ Edge filter (`--mode graph` only):
 
 - `--min-npmi FLOAT` — **读侧地板**。写入期资产已固化下界（build 默认
   `--min-npmi-build 0.2`，低于此的 pair 根本没被记入 `keyword_pairs`）。
-  `--min-npmi` 只能**收紧**到 ≥ 写入期门槛；不能放松。想让更多噪声边参与
-  召回，需在 `index build` 时用更低的 `--min-npmi-build`（有代价：写入
-  期资产膨胀）。
-
-写入期资产存储契约（`index build` / `index rebuild` 上）：
-
-- `--min-pair-count`（默认 5）：单 scope 内 `cooccur_count < N` 的 pair
-  不记入资产。
-- `--min-npmi-build`（默认 0.2）：`npmi < X` 的 pair 不记入资产。
-  `llm_promoted` 的 pair 不受此门槛约束。
+  `--min-npmi` 只能**收紧**到 ≥ 写入期门槛；不能放松。若召回不足，属
+  离线索引构建选择，不在本 skill 内解决。
 
 **v3 破变清单**（对齐 `docs/design/decisions.md` §"2026-07-13"）：
 - `--mode dir` 移除；`--alpha` / `--iters` / `--cross-scope` / `--preview`
@@ -145,18 +138,19 @@ Edge filter (`--mode graph` only):
 - `keyword_chunks` 表在 schema v8 已删除，`related --mode graph` 不再
   经 doc 聚合；文档级证据由 caller 用返回的关键字走 ripgrep 自取。
 
-**Precondition**: `grga index build -s <dir> --db <path>` must have been
-run against the corpus (or any indexed scope inside the shared DB) first,
-otherwise `related` returns `{"results": []}`.
+**Precondition**: the offline graph index must already exist for the
+target scope. If it does not, `related` returns `{"results": []}` —
+treat that as "no signal, move on". Building the index is a user-side
+offline task, not a skill action.
 
 ## 4. `suggest`
 
 ```
-suggest(query, hits, *, intent, directory, max_hits=20, no_votes=False,
+suggest(query, hits, *, intent, directory, max_hits=20,
         llm_base_url, llm_api_key, llm_model, db_path) ->
   {intent, keywords[], queries[], keyword_pairs[[a,b],...],
    ranking[], scores{}, reason, llm_generated: true,
-   tokens_used, prompt_tokens, completion_tokens, model, votes: {...}}
+   tokens_used, prompt_tokens, completion_tokens, model}
 ```
 
 The **only** verb that calls an LLM. It never runs autonomously; the caller
@@ -168,12 +162,11 @@ Intents:
 - `rerank`     — return a `ranking` (list of indices into the supplied `hits`) plus per-index `scores`.
 - `reformulate` — rewrite a vague natural-language query into concrete search expressions in `queries[]`.
 
-By default, emitted `keyword_pairs` are voted into `llm_extension_votes`. After
-enough votes accumulate, run `grga index promote` to graduate them into
-`keyword_pairs`, at which point `related --mode graph` picks them up for free.
+The suggestions are consumed in-session: feed `keywords[]` / `queries[]`
+back into `search` / `related`. Persisting them into the offline graph
+(vote accumulation / promotion) is out of scope for this retrieval-only
+skill.
 
-## Supporting commands (offline / infra)
+## Supporting command (read-side diagnostic)
 
-- `grga index build -s <scope> --db <path> --json` — 增量索引一个目录 scope 的 chunk 共现进**共享**用户知识图。写入 `keyword_pairs`（chunk_cooccur，带 `npmi`）+ `keyword_stats`（per-scope chunk_df）+ `scope_stats`（分母 N）+ `heading_docs`（Markdown 结构）。**pair 是累积知识资产**：删源文件不销毁资产，新增/更新文件增量 UPSERT 进已有资产。scope 存为 `dir_id` 外键（v5 归一化）。写入期门槛 `--min-pair-count`（默认 5）+ `--min-npmi-build`（默认 0.2）固化资产下界；低于门槛的 pair **根本不进表**（读侧无法救回）。`--chunk-mode line`（默认）或 `--chunk-mode chars --chunk-max-chars 600 --chunk-min-chars 300`。v8 起 **`chunks` / `keyword_chunks` 表已删除**——chunk 只在 build 期 RAM 存活。`grga index rebuild` 是全清重建（DELETE 该 scope 后等价重跑 build）。
-- `grga index promote --threshold N --db <path> [--dry-run] --json` — merge high-vote pairs from `llm_extension_votes` into `keyword_pairs`（`source='llm_promoted'`, `npmi` NULL）。Idempotent; `--dry-run` reports without writing.
-- `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`, and a `suspected_polysemy` warning. Run it on a bridge keyword before扩大 seed 集或跨 scope 查询。
+- `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`, and a `suspected_polysemy` warning. Run it on a bridge keyword before扩大 seed 集或跨 scope 查询。Empty (`total_docs == 0`) means the keyword is not in the offline index — treat as "no signal" and skip.
