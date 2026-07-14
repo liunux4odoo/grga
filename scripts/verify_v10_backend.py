@@ -257,8 +257,12 @@ def main() -> None:
         finally:
             conn.close()
 
-        # 9) `record_votes(scope=None)` silently skips; explicit path-shaped
-        #    scope in the KeywordLibrary layer is rejected loudly.
+        # 9) `record_votes(scope=None)` silently skips.
+        #    Slash-shaped scope names (e.g. "/小说/科幻") are ACCEPTED —
+        #    v10's pre-review path-shaped guard on KeywordLibrary was
+        #    removed on purpose so users can organise scopes as
+        #    hierarchical labels. The layer boundary is enforced by the
+        #    CLI's --scope vs --directory split, not by string shape.
         from grga.graph.votes import record_votes
         from grga.deep_search import KeywordLibrary
 
@@ -270,13 +274,13 @@ def main() -> None:
 
         lib = KeywordLibrary(str(db_path))
         try:
-            path_rejected = False
-            try:
-                lib._scope_id("/tmp/looks-like-a-path")
-            except ValueError:
-                path_rejected = True
-            check(path_rejected,
-                  "KeywordLibrary._scope_id rejects path-shaped input")
+            slash_scope_id = lib._scope_id("/小说/科幻")
+            check(isinstance(slash_scope_id, int) and slash_scope_id > 0,
+                  "KeywordLibrary._scope_id accepts a slash-shaped name")
+            # Round-trip: the same name resolves to the same id.
+            slash_scope_id_ro = lib._scope_id_ro("/小说/科幻")
+            check(slash_scope_id_ro == slash_scope_id,
+                  "slash-shaped scope name round-trips through interner")
         finally:
             lib.close()
 

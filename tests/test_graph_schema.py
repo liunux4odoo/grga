@@ -341,7 +341,12 @@ def test_resolve_scope_name_whitespace_only_raises():
 def test_resolve_scope_name_does_not_resolve_paths(tmp_path: Path):
     """v10 invariant: scope names are opaque handles. ``resolve_scope_name``
     does not call ``Path.resolve`` / ``expanduser``, so a name that happens
-    to look like a path is stored verbatim (this is a design choice, not a
-    footgun — ``KeywordLibrary`` has a separate path-shaped guard)."""
+    to look like a path is stored verbatim. Users may deliberately organise
+    scopes as hierarchical labels (``/小说/科幻``, ``/小说/仙侠``); the
+    knowledge/evidence boundary is enforced by the CLI's ``--scope`` vs
+    ``--directory`` split, not by string-shape heuristics."""
     tricky = str(tmp_path / "not-a-real-scope")
     assert resolve_scope_name(tricky) == tricky
+    # Hierarchical / slash-shaped scope names are accepted verbatim.
+    assert resolve_scope_name("/小说/科幻") == "/小说/科幻"
+    assert resolve_scope_name("  /小说/仙侠  ") == "/小说/仙侠"

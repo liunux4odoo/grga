@@ -169,35 +169,6 @@ def _coerce_float(value):
         return None
 
 
-def _reject_path_shaped_scope(name):
-    """Raise ``ValueError`` for scope names that look like filesystem paths.
-
-    v10 fail-loud guard: a caller that still passes a resolved directory
-    (``/home/me/corpus`` or ``C:\\corpus``) where a logical scope name is
-    expected would otherwise silently create a `scopes` row named after
-    the path, contaminating the knowledge layer. Reject up-front so the
-    stale call site surfaces during development.
-    """
-    if not isinstance(name, str):
-        return
-    text = name.strip()
-    if not text:
-        return
-    if text.startswith("/") or text.startswith("~"):
-        raise ValueError(
-            f"scope name looks like a filesystem path: {name!r}. "
-            "v10 requires a logical name (e.g. 'physics-cn'). If you "
-            "meant to bind a directory to a scope, pass --scope <name> "
-            "--directory <path> to `grga index build`."
-        )
-    # Windows drive letter (``C:\...`` or ``C:/...``).
-    if len(text) >= 3 and text[1] == ":" and text[0].isalpha() and text[2] in ("\\", "/"):
-        raise ValueError(
-            f"scope name looks like a Windows path: {name!r}. "
-            "v10 requires a logical name (e.g. 'physics-cn')."
-        )
-
-
 class KeywordLibrary:
     def __init__(self, path, decay_factor=DEFAULT_DECAY_FACTOR, min_count=DEFAULT_MIN_COUNT):
         self.path = Path(path).expanduser()
@@ -223,7 +194,6 @@ class KeywordLibrary:
 
         if getattr(self, "_interner", None) is None:
             self._interner = IdInterner(self.conn)
-        _reject_path_shaped_scope(scope_name)
         return self._interner.scope_id(scope_name)
 
     def _kw_id(self, kw):
@@ -238,7 +208,6 @@ class KeywordLibrary:
 
         if getattr(self, "_interner", None) is None:
             self._interner = IdInterner(self.conn)
-        _reject_path_shaped_scope(scope_name)
         return self._interner.scope_id_ro(scope_name)
 
     def decay(self, scope_name):
