@@ -85,12 +85,25 @@ pair 是核心知识资产，累积增长；graph 查询走亚毫秒 index-only 
 | `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图（反污染门）。v10 API：`scope: Optional[str]` 参数，`None` 时静默跳过写入（知识必须有名）。`get_votes` JOIN `scopes.name` 回文本 |
 | `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`（`source='llm_promoted'`，`npmi` NULL）；`promoted_at` 列做幂等标记，防止同一投票被二次升级 |
 | `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_stats` + `keyword_pairs` 回文本；`docs_by_scope` 现在按逻辑 scope 名分组。**v10 新增 knowledge-only 分支**：当 seed 在 `keyword_stats` 有条目但 `docs` 为空（`grga index import` 后典型），返回 `evidence_hint` 说明需要在本机 build 才能获得 doc 分布 |
+| `scope.py` | **v10 scope 管理**：`list_scopes` / `bind_directory` / `unbind_directory` / `rename_scope` / `remove_scope`。`remove_scope` 默认只删证据层（`scope_directories` + `docs` + `keyword_docs` + `heading_docs`），知识保留；`purge_knowledge=True` 才连 `keyword_pairs` / `keyword_stats` / `scope_stats` / `auto_ngram_dict` / `llm_extension_votes` + `scopes` 行一起清（design D6 grow-and-refine 例外闸门）。对应 CLI `grga scope list/bind/unbind/rename/rm` |
+| `pack.py` | **知识包 export / import**（plan-2026-07-14 §5）：SQLite `.grgapkg` 文件，只含知识层（scopes + keywords + keyword_pairs + keyword_stats + scope_stats + auto_ngram_dict + llm_extension_votes + meta），证据层剥离。`export_knowledge_pack(scope=..., out_path=...)` 支持单 scope 与 `scope=None` 全量；`import_knowledge_pack(pack, as_scope=...)` 只允许 `--as`，`merge_into` 显式 NotImplementedError（D9）。`meta.grga_pack.*` 命名空间做格式/版本校验；kw_id 通过 get-or-insert 全量 remap，pack 内不同机器切换零冲突。对应 CLI `grga index export/import` |
 
 **反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 →
 进入 `keyword_pairs`(`source='llm_promoted'`) → `related --mode graph` 免费拿到。
 
 **scope 多选**（v10）：`related --scope a --scope b` 走 `WHERE scope_id IN (?, ?)`；
-不加 `--scope` = 跨全部 scope union。见 `docs/design/plan-2026-07-14-scope-directory-split.md` §4。
+单 scope 用 `scope_id = ?` 保持 `idx_kp_a_npmi` 的 index-ordered LIMIT 亚毫秒
+早停；不加 `--scope` = 跨全部 scope union。见 `docs/design/plan-2026-07-14-scope
+-directory-split.md` §4。**v3.1 契约**（同文档 §5.3）：`RelatedKeyword.scopes:
+List[str]` 附在每条候选上，告知它在本次查询范围内命中的 scope 名子集——`--json`
+消费者可以据此路由后续 ripgrep 到正确的 `scope_directories` 绑定，不需要再跑
+`graph inspect` 反查。
+
+**知识可迁移工作流**：`grga index export --scope <name> --out X.grgapkg` →
+拷贝到另一台机器 → `grga index import X.grgapkg --as <local-name>` → 可选
+`grga scope bind <local-name> <本机语料路径>` → `grga index build --scope
+<local-name> --directory <本机语料路径> --seed-ngram-from <local-name>` 重建
+证据 + 借用刚导入的分词字典冷启动（否则需要重新检测短语）。
 
 > v10 已删除：pre-v10 `directories` intern 表（绝对路径 shard）、`resolve_scope_key`、
 > `scope_write_key`。历史设计见 `docs/design/plan-2026-07-12-keyword-primary.md`。

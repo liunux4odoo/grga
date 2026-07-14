@@ -151,16 +151,30 @@ class RelatedKeyword:
         kw:            casefold candidate keyword.
         npmi:          Bouma npmi of the (via_seed, kw) chunk co-occurrence,
                        as stored at build time (never recomputed at query
-                       time — see design §3.2).
-        cooccur_count: raw chunk co-occurrence count.
+                       time — see design §3.2). When the query touches
+                       multiple scopes, this is the **max** npmi across
+                       those scopes (index-ordered LIMIT semantics); use
+                       :attr:`scopes` to see which scopes contributed.
+        cooccur_count: raw chunk co-occurrence count. Same "max across
+                       returned scopes" caveat as npmi.
         via_seed:      the seed that expanded to this candidate. Preserved
                        so callers can decide how to fuse (they can, we do
                        not).
         chunk_df:      candidate's own scope-level chunk df — hub-word
                        discriminator (design §related-signals-v3 §chunk_df).
+                       Cross-scope query sums this across the queried
+                       scopes (SUM(chunk_df) via keyword_stats).
         source:        ``chunk_cooccur`` (npmi-scored) or ``llm_promoted``
                        (npmi may be NULL upstream but is stored 0.0 here for
                        consistent typing).
+        scopes:        v3.1 (plan-2026-07-14 §5.3): the scope names within
+                       the caller's query range that carry this pair. Lets
+                       an agent route follow-up ripgrep at the right scope
+                       binding without a per-candidate ``inspect`` round-trip.
+                       Cross-scope query (``scopes=None``): all scopes that
+                       memorised the pair. Single-scope query: the singleton
+                       list of that scope. Always populated (never empty
+                       when the row is returned).
     """
 
     kw: str
@@ -169,6 +183,7 @@ class RelatedKeyword:
     via_seed: str
     chunk_df: int
     source: str
+    scopes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -178,6 +193,7 @@ class RelatedKeyword:
             "via_seed": self.via_seed,
             "chunk_df": int(self.chunk_df),
             "source": self.source,
+            "scopes": list(self.scopes),
         }
 
 
@@ -388,11 +404,17 @@ def _related_keywords_impl(
     # cross-scope case (see plan-2026-07-12-related-perf).
 
     seen_kw_ids: set = set()
-    per_seed_rows: List[Tuple[str, List[Tuple[int, str, float, float]]]] = []
+    # Per-seed candidate rows: (nbr_id, source, npmi, cooccur, scope_ids set).
+    per_seed_rows: List[
+        Tuple[str, List[Tuple[int, str, float, float, "frozenset[int]"]]]
+    ] = []
+    # Every scope_id that appeared on any surviving edge — used at the end
+    # for one batched scope_id → name reverse-lookup.
+    hit_scope_ids: set = set()
 
     for (seed_id, seed_text) in seed_ids:
         rows_a = conn.execute(
-            f"SELECT kw_b_id, npmi, cooccur_count, source "
+            f"SELECT kw_b_id, npmi, cooccur_count, source, scope_id "
             f"FROM keyword_pairs "
             f"WHERE {scope_filter}kw_a_id = ? AND source = ? AND npmi >= ? "
             f"ORDER BY npmi DESC LIMIT ?",
@@ -400,7 +422,7 @@ def _related_keywords_impl(
              float(min_npmi), int(limit_per_seed)),
         ).fetchall()
         rows_b = conn.execute(
-            f"SELECT kw_a_id, npmi, cooccur_count, source "
+            f"SELECT kw_a_id, npmi, cooccur_count, source, scope_id "
             f"FROM keyword_pairs "
             f"WHERE {scope_filter}kw_b_id = ? AND source = ? AND npmi >= ? "
             f"ORDER BY npmi DESC LIMIT ?",
@@ -409,13 +431,13 @@ def _related_keywords_impl(
         ).fetchall()
         # llm_promoted: no npmi filter (may be NULL).
         rows_llm_a = conn.execute(
-            f"SELECT kw_b_id, npmi, cooccur_count, source "
+            f"SELECT kw_b_id, npmi, cooccur_count, source, scope_id "
             f"FROM keyword_pairs "
             f"WHERE {scope_filter}kw_a_id = ? AND source = ?",
             (*scope_params, seed_id, "llm_promoted"),
         ).fetchall()
         rows_llm_b = conn.execute(
-            f"SELECT kw_a_id, npmi, cooccur_count, source "
+            f"SELECT kw_a_id, npmi, cooccur_count, source, scope_id "
             f"FROM keyword_pairs "
             f"WHERE {scope_filter}kw_b_id = ? AND source = ?",
             (*scope_params, seed_id, "llm_promoted"),
@@ -423,27 +445,42 @@ def _related_keywords_impl(
 
         # Merge + dedupe within one seed. A pair with the same (kw_a, kw_b)
         # but different ``source`` values keeps both provenance rows.
-        merged: Dict[Tuple[int, str], Tuple[float, float]] = {}
+        # ``merged`` value: (best_npmi, best_cooccur, scope_ids_set).
+        # The npmi / cooccur are the MAX across scopes; the scope set
+        # accumulates every scope this pair hit so callers can route
+        # follow-up work at the right binding (design v3.1 §5.3).
+        merged: Dict[Tuple[int, str], Tuple[float, float, set]] = {}
         for r in list(rows_a) + list(rows_b) + list(rows_llm_a) + list(rows_llm_b):
             nbr_id = int(r[0])
             npmi_val = float(r[1]) if r[1] is not None else 0.0
             cooccur = float(r[2])
             src = str(r[3])
+            sid = int(r[4])
             key = (nbr_id, src)
             prev = merged.get(key)
-            if prev is None or npmi_val > prev[0]:
-                merged[key] = (npmi_val, cooccur)
+            if prev is None:
+                merged[key] = (npmi_val, cooccur, {sid})
+            else:
+                prev_npmi, prev_cooccur, prev_scopes = prev
+                new_scopes = prev_scopes | {sid}
+                if npmi_val > prev_npmi:
+                    merged[key] = (npmi_val, cooccur, new_scopes)
+                else:
+                    # Keep the higher-npmi row's npmi/cooccur but still
+                    # record that this scope carries the pair.
+                    merged[key] = (prev_npmi, prev_cooccur, new_scopes)
 
         ranked = sorted(
             [
-                (nbr_id, src, npmi_val, cooccur)
-                for (nbr_id, src), (npmi_val, cooccur) in merged.items()
+                (nbr_id, src, npmi_val, cooccur, frozenset(scopes))
+                for (nbr_id, src), (npmi_val, cooccur, scopes) in merged.items()
             ],
             key=lambda t: (-t[2], t[0]),
         )[:limit_per_seed]
 
-        for (nbr_id, _src, _npmi_val, _cooccur) in ranked:
+        for (nbr_id, _src, _npmi_val, _cooccur, scope_set) in ranked:
             seen_kw_ids.add(nbr_id)
+            hit_scope_ids.update(scope_set)
         per_seed_rows.append((seed_text, ranked))
 
     if not seen_kw_ids:
@@ -481,12 +518,33 @@ def _related_keywords_impl(
             ):
                 chunk_df_map[int(r[0])] = int(r[1] or 0)
 
+    # v3.1: batch-resolve scope_id → name for every scope that carried at
+    # least one returned edge. One query per DB call regardless of how
+    # many pairs — chunk-partitioned like the kw lookups above.
+    scope_name_map: Dict[int, str] = {}
+    hit_scope_list = list(hit_scope_ids)
+    for i in range(0, len(hit_scope_list), 900):
+        piece = hit_scope_list[i:i + 900]
+        ph = ",".join("?" for _ in piece)
+        for r in conn.execute(
+            f"SELECT id, name FROM scopes WHERE id IN ({ph})", piece
+        ):
+            scope_name_map[int(r[0])] = str(r[1])
+
     all_results: List[RelatedKeyword] = []
     for seed_text, ranked in per_seed_rows:
-        for (nbr_id, src, npmi_val, cooccur) in ranked:
+        for (nbr_id, src, npmi_val, cooccur, scope_set) in ranked:
             kw = kw_text.get(nbr_id, "")
             if not kw:
                 continue
+            # Reverse-map the scope ids to names, sort ascending for a
+            # stable ``--json`` contract. Unknown ids (shouldn't happen —
+            # every id came from the batch we just looked up) are dropped.
+            scopes = sorted(
+                scope_name_map[sid]
+                for sid in scope_set
+                if sid in scope_name_map
+            )
             all_results.append(
                 RelatedKeyword(
                     kw=kw,
@@ -495,6 +553,7 @@ def _related_keywords_impl(
                     via_seed=seed_text,
                     chunk_df=chunk_df_map.get(nbr_id, 0),
                     source=src,
+                    scopes=scopes,
                 )
             )
     all_results.sort(key=lambda r: (r.via_seed, -r.npmi, r.kw))

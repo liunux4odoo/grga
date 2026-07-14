@@ -78,7 +78,13 @@ def test_related_keywords_returns_relatedkeyword_type(sidecar_env, tmp_path):
     assert r.chunk_df > 0
     assert r.source == "chunk_cooccur"
     d = r.to_dict()
-    assert set(d) == {"kw", "npmi", "cooccur_count", "via_seed", "chunk_df", "source"}
+    assert set(d) == {
+        "kw", "npmi", "cooccur_count", "via_seed", "chunk_df", "source",
+        "scopes",
+    }
+    # v3.1 (plan-2026-07-14 §5.3): scopes carries the query-range scope
+    # names for this candidate. Single-scope build → singleton list.
+    assert d["scopes"] == ["test-scope"]
 
 
 def test_related_keywords_no_fusion_multi_seed(sidecar_env, tmp_path):
@@ -260,6 +266,110 @@ def test_related_keywords_scope_filter(sidecar_env, tmp_path):
     ).results
     kws_multi = {r.kw for r in res_multi}
     assert {"beta", "zeta"} <= kws_multi
+
+
+def test_related_keywords_scopes_field_multi_scope(sidecar_env, tmp_path):
+    """v3.1: ``RelatedKeyword.scopes`` tells the caller which scopes carry
+    each candidate (plan-2026-07-14 §5.3, decision D14).
+
+    Setup: alpha+beta lives in both scopes; alpha+zeta only in scope-a;
+    alpha+omega only in scope-b. A cross-scope query must attribute each
+    candidate to its correct scope list.
+    """
+    scope_a = tmp_path / "a"
+    scope_b = tmp_path / "b"
+    scope_a.mkdir()
+    scope_b.mkdir()
+    (scope_a / "doc.txt").write_text(
+        "\n".join(
+            [f"alpha beta shared line {i}" for i in range(6)]
+            + [f"alpha zeta line {i}" for i in range(3)]
+            + ["alpha solo"]
+        ),
+        encoding="utf-8",
+    )
+    (scope_b / "doc.txt").write_text(
+        "\n".join(
+            [f"alpha beta shared line {i}" for i in range(6)]
+            + [f"alpha omega line {i}" for i in range(3)]
+            + ["alpha solo"]
+        ),
+        encoding="utf-8",
+    )
+    db = tmp_path / "graph.db"
+    build_graph_index(
+        "scope-a", directory=scope_a, db_path=db,
+        min_pair_count=1, min_npmi=0.0,
+    )
+    build_graph_index(
+        "scope-b", directory=scope_b, db_path=db,
+        min_pair_count=1, min_npmi=0.0,
+    )
+
+    # Cross-scope query: no scope filter → each candidate carries its
+    # actual scope list.
+    result = related_keywords(
+        ["alpha"], min_npmi=0.0, db_path=db,
+    ).results
+    by_kw = {r.kw: r for r in result}
+    # beta appears in both scopes → both names.
+    assert "beta" in by_kw
+    assert set(by_kw["beta"].scopes) == {"scope-a", "scope-b"}
+    # zeta only in scope-a.
+    if "zeta" in by_kw:
+        assert by_kw["zeta"].scopes == ["scope-a"]
+    # omega only in scope-b.
+    if "omega" in by_kw:
+        assert by_kw["omega"].scopes == ["scope-b"]
+
+    # Single-scope filter: scopes list is a singleton of the filter.
+    only_a = related_keywords(
+        ["alpha"], min_npmi=0.0, db_path=db, scopes=["scope-a"],
+    ).results
+    for r in only_a:
+        assert r.scopes == ["scope-a"]
+
+    # Multi-scope filter: same as cross-scope but scoped down.
+    both = related_keywords(
+        ["alpha"], min_npmi=0.0, db_path=db, scopes=["scope-a", "scope-b"],
+    ).results
+    beta_both = next((r for r in both if r.kw == "beta"), None)
+    assert beta_both is not None
+    assert set(beta_both.scopes) == {"scope-a", "scope-b"}
+
+
+def test_related_keywords_scopes_sorted_deterministic(sidecar_env, tmp_path):
+    """``scopes`` list is sorted ascending — stable ``--json`` output."""
+    scope_z = tmp_path / "z"
+    scope_a = tmp_path / "a"
+    scope_z.mkdir()
+    scope_a.mkdir()
+    # Co-occurrence must vary so alpha+beta survives Gate 1 (the glued
+    # df_a==df_b==co degenerate case is dropped). gamma dilutes beta.
+    text = "\n".join(
+        [f"alpha beta line {i}" for i in range(6)]
+        + [f"beta gamma line {i}" for i in range(2)]
+        + ["alpha solo"]
+    )
+    (scope_z / "doc.txt").write_text(text, encoding="utf-8")
+    (scope_a / "doc.txt").write_text(text, encoding="utf-8")
+    db = tmp_path / "graph.db"
+    build_graph_index(
+        "zzz", directory=scope_z, db_path=db,
+        min_pair_count=1, min_npmi=0.0,
+    )
+    build_graph_index(
+        "aaa", directory=scope_a, db_path=db,
+        min_pair_count=1, min_npmi=0.0,
+    )
+    result = related_keywords(["alpha"], min_npmi=0.0, db_path=db).results
+    # Pick any candidate that surfaced in BOTH scopes (identical corpora,
+    # so at least one such candidate exists). Its scopes list must be
+    # sorted ascending: ["aaa", "zzz"] (not insertion / build order).
+    both = [r for r in result if len(r.scopes) == 2]
+    assert both, f"expected a cross-scope candidate, got {[(r.kw, r.scopes) for r in result]}"
+    for r in both:
+        assert r.scopes == sorted(r.scopes) == ["aaa", "zzz"]
 
 
 def test_related_keywords_limit_per_seed(sidecar_env, tmp_path):

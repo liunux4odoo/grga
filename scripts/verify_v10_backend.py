@@ -290,6 +290,53 @@ def main() -> None:
         check(_normalise_scopes(["physics-cn", ""]) == ["physics-cn"],
               "_normalise_scopes drops blank items but keeps real names")
 
+        # 11) v3.1 (plan-2026-07-14 §5.3): RelatedKeyword.scopes carries
+        #     the query-range scope names for each candidate.
+        one_scope_result = related_keywords(
+            ["alpha"],
+            scopes=["physics-cn"],
+            db_path=str(db_path),
+            min_npmi=0.0,
+        )
+        check(all(r.scopes == ["physics-cn"] for r in one_scope_result.results),
+              "single-scope query: RelatedKeyword.scopes is singleton")
+
+        # Build a second scope on the same corpus so we can exercise the
+        # multi-scope path (independent scope, same pairs).
+        build_graph_index(
+            "physics-en",
+            directory=corpus,
+            db_path=str(db_path),
+            mode="rebuild",
+            refresh_ngram="never",
+            chunk_mode="line",
+            min_pair_count=2,
+            min_npmi=0.0,
+        )
+        multi = related_keywords(
+            ["alpha"],
+            scopes=["physics-cn", "physics-en"],
+            db_path=str(db_path),
+            min_npmi=0.0,
+        )
+        both_scopes = [r for r in multi.results if len(r.scopes) == 2]
+        check(both_scopes,
+              "multi-scope query: at least one candidate has scopes from both")
+        for r in both_scopes:
+            check(r.scopes == sorted(r.scopes),
+                  f"scopes list sorted ascending: {r.scopes}")
+            check(r.scopes == ["physics-cn", "physics-en"],
+                  f"scopes union both queried scopes: {r.scopes}")
+
+        cross = related_keywords(
+            ["alpha"],
+            scopes=None,
+            db_path=str(db_path),
+            min_npmi=0.0,
+        )
+        check(all(r.scopes for r in cross.results),
+              "cross-scope query: every result has non-empty scopes")
+
         print("\nALL CHECKS PASSED")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -51,6 +51,8 @@ index_app = typer.Typer(no_args_is_help=True, help="Build and manage the L2 grap
 app.add_typer(index_app, name="index")
 graph_app = typer.Typer(no_args_is_help=True, help="Inspect the shared user-scoped graph.")
 app.add_typer(graph_app, name="graph")
+scope_app = typer.Typer(no_args_is_help=True, help="Manage logical scope names + local directory bindings (v10).")
+app.add_typer(scope_app, name="scope")
 
 CONFIG_PATH = Path.home() / ".config" / "grga" / "settings.json"
 
@@ -1118,6 +1120,7 @@ def index_build_command(
     ngram_iters: int = typer.Option(2, "--ngram-iters", help="Auto n-gram detection passes (used only by `rebuild`; `build` ignores this and does at most one detection iteration on changed files)."),
     max_ngram_n: int = typer.Option(4, "--max-ngram-n", help="Longest n-gram considered by auto-phrase detection (default 4, covers e.g. 联合国行星防御理事会 / 赫尔辛根默斯肯 / PDC常任理事国)."),
     refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy for build: `append` runs single-iter detection on changed files and unions new phrases into the dict; `never` skips detection and reuses the existing dict as-is."),
+    seed_ngram_from: Optional[str] = typer.Option(None, "--seed-ngram-from", help="Cold-start the tokeniser with another scope's auto n-gram dictionary (v10). Useful after `grga index import` when the target scope has knowledge but no local phrases yet. The seed is layered UNDER the target's own entries (target wins on collision). No-op if the seed scope is missing or equals the target."),
     append: bool = typer.Option(False, "--append", help="[deprecated] Same effect as the new default (`build` is incremental and never clears the vocabulary). Prints a deprecation warning."),
     replace: bool = typer.Option(False, "--replace", help="[deprecated] Wipe the scope's asset + index + derived layers and rebuild from scratch. Use `grga index forget --all` followed by `grga index build`, or `grga index rebuild --refresh-ngram=replace` instead."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
@@ -1196,6 +1199,7 @@ def index_build_command(
             max_file_kb=max_file_kb,
             ngram_iters=ngram_iters,
             max_ngram_n=max_ngram_n,
+            seed_ngram_from=seed_ngram_from,
             text_progress=text_progress,
             rich_on_event=rich_on_event,
         )
@@ -1222,6 +1226,7 @@ def index_rebuild_command(
     ngram_iters: int = typer.Option(2, "--ngram-iters", help="Full-scope detection passes. Default 2 (the frozen convergence point from experiments/autongram_2026_07_11)."),
     max_ngram_n: int = typer.Option(4, "--max-ngram-n"),
     refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy: `append` keeps the existing dict and adds newly detected phrases (default); `never` skips detection and uses the current dict as-is; `replace` clears the dict first, then relearns from the full scope."),
+    seed_ngram_from: Optional[str] = typer.Option(None, "--seed-ngram-from", help="Cold-start the tokeniser with another scope's auto n-gram dictionary (v10). Useful after `grga index import`. Target-scope entries take precedence on collision."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Full-scope re-scan: clear the index + derived layers, then rebuild.
@@ -1270,6 +1275,7 @@ def index_rebuild_command(
             max_file_kb=max_file_kb,
             ngram_iters=ngram_iters,
             max_ngram_n=max_ngram_n,
+            seed_ngram_from=seed_ngram_from,
             text_progress=text_progress,
             rich_on_event=rich_on_event,
         )
@@ -1297,6 +1303,7 @@ def _run_index_build(
     max_file_kb: int,
     ngram_iters: int,
     max_ngram_n: int,
+    seed_ngram_from: Optional[str] = None,
     text_progress,
     rich_on_event,
 ):
@@ -1321,6 +1328,7 @@ def _run_index_build(
         max_file_bytes=max_file_kb * 1024,
         ngram_iters=ngram_iters,
         max_ngram_n=max_ngram_n,
+        seed_ngram_from=seed_ngram_from,
         mode=mode,
         refresh_ngram=refresh_ngram,
         progress=text_progress,
@@ -1507,6 +1515,108 @@ def index_promote_command(
     for pair in stats.pairs:
         mark = " [already]" if pair.already_promoted else ""
         typer.echo(f"  {pair.vote_count:g}  {pair.keyword_a} <-> {pair.keyword_b}{mark}")
+
+
+# ---------------------------------------------------------------------------
+# grga index export / import — knowledge pack (v10, plan-2026-07-14 §5)
+# ---------------------------------------------------------------------------
+
+
+@index_app.command("export")
+def index_export_command(
+    out: Path = typer.Option(..., "--out", "-o", resolve_path=True, help="Destination .grgapkg file. Overwritten if it exists."),
+    scope: Optional[str] = typer.Option(None, "--scope", "-s", help="Single scope name to export. Omit + pass `--all` to export every scope in the DB."),
+    all_scopes: bool = typer.Option(False, "--all", help="Export every scope in the DB into one pack. Mutually exclusive with --scope."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="Source SQLite graph library path."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
+):
+    """Write a portable knowledge pack (SQLite ``.grgapkg``).
+
+    A pack carries only the **knowledge layer** (scopes / keywords /
+    keyword_pairs / keyword_stats / scope_stats / auto_ngram_dict /
+    llm_extension_votes / meta). Evidence (docs / keyword_docs / etc.) is
+    stripped so the pack is machine-portable — reuse it on another host
+    via ``grga index import`` and rebuild local evidence with
+    ``grga index build``.
+
+    Design: docs/design/plan-2026-07-14-scope-directory-split.md §5.
+    """
+    from grga.graph.pack import export_knowledge_pack
+
+    if bool(scope) == bool(all_scopes):
+        typer.echo(
+            "export: pass exactly one of --scope <name> or --all",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    try:
+        stats = export_knowledge_pack(
+            out_path=out,
+            scope=scope if scope else None,
+            db_path=str(db_path) if db_path else None,
+        )
+    except LookupError as exc:
+        typer.echo(f"export: {exc}", err=True)
+        raise typer.Exit(1)
+    except ValueError as exc:
+        typer.echo(f"export: {exc}", err=True)
+        raise typer.Exit(2)
+
+    if json_output:
+        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        return
+    typer.echo(
+        f"exported {len(stats.scopes_included)} scope(s) → {stats.out_path}\n"
+        f"  scopes: {', '.join(stats.scopes_included)}\n"
+        f"  keywords={stats.n_keywords} pairs={stats.n_pairs} "
+        f"stats={stats.n_stats} ngram={stats.n_auto_ngram} "
+        f"votes={stats.n_votes}  ({stats.elapsed_seconds:.2f}s)"
+    )
+
+
+@index_app.command("import")
+def index_import_command(
+    pack: Path = typer.Argument(..., exists=True, dir_okay=False, resolve_path=True, help="Knowledge pack (.grgapkg) to import."),
+    as_scope: str = typer.Option(..., "--as", "-a", help="Target scope name to create in the destination DB. Must not collide with an existing scope."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="Destination SQLite graph library path."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
+):
+    """Import a knowledge pack under a new scope name.
+
+    The pack must contain exactly one scope (single-scope export). The
+    caller re-labels it via ``--as`` to avoid collisions. Evidence layer
+    is not touched — run ``grga index build --scope <as> --directory
+    <path>`` on this machine afterwards to attach local corpus.
+
+    ``--merge-into`` is not implemented this round (npmi merge policy
+    undecided; see design doc §5.2 / D9).
+    """
+    from grga.graph.pack import import_knowledge_pack
+
+    try:
+        stats = import_knowledge_pack(
+            pack,
+            as_scope=as_scope,
+            db_path=str(db_path) if db_path else None,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(f"import: {exc}", err=True)
+        raise typer.Exit(1)
+    except NotImplementedError as exc:
+        typer.echo(f"import: {exc}", err=True)
+        raise typer.Exit(2)
+
+    if json_output:
+        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        return
+    typer.echo(
+        f"imported {stats.pack_path} → scope {stats.into_scope!r}\n"
+        f"  new keywords={stats.n_keywords_new} pairs={stats.n_pairs} "
+        f"stats={stats.n_stats} ngram={stats.n_auto_ngram} "
+        f"votes={stats.n_votes} scope_stats={stats.scope_stats_written} "
+        f"({stats.elapsed_seconds:.2f}s)"
+    )
 
 
 @app.command("suggest")
@@ -1757,6 +1867,169 @@ def graph_inspect_command(
                 )
     if report.get("suspected_polysemy"):
         typer.echo(f"suspected_polysemy: {report['polysemy_hint']}", err=True)
+
+
+# ---------------------------------------------------------------------------
+# grga scope — logical scope management (v10)
+# ---------------------------------------------------------------------------
+
+
+@scope_app.command("list")
+def scope_list_command(
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON."),
+):
+    """List every logical scope with its local directory bindings + sizes.
+
+    Empty ``directories`` means the scope carries knowledge only (typical
+    after ``grga index import`` before a local re-``build``).
+    """
+    from grga.graph.scope import list_scopes
+
+    scopes = list_scopes(db_path=str(db_path) if db_path else None)
+    if json_output:
+        typer.echo(json.dumps(
+            [s.to_dict() for s in scopes], ensure_ascii=False, indent=2
+        ))
+        return
+    if not scopes:
+        typer.echo("no scopes in this DB — run `grga index build --scope <name> --directory <path>` first", err=True)
+        return
+    for s in scopes:
+        dirs = ", ".join(d.directory for d in s.directories) or "(no local bindings)"
+        typer.echo(
+            f"{s.name}  pairs={s.n_pairs}  keywords={s.n_keywords}  docs={s.n_docs}\n"
+            f"  {dirs}"
+        )
+
+
+@scope_app.command("bind")
+def scope_bind_command(
+    scope: str = typer.Argument(..., help="Logical scope name."),
+    directory: Path = typer.Argument(..., exists=True, resolve_path=True, help="Local directory to bind to the scope."),
+    role: Optional[str] = typer.Option(None, "--role", help="Optional binding role tag (e.g. `primary` / `mirror`)."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+):
+    """Bind a local directory to a logical scope (evidence-layer metadata).
+
+    Idempotent — repeat calls refresh ``indexed_at``. Creates the scope
+    on demand if it does not exist yet. Does not touch corpus files
+    (use `grga index build` for that).
+    """
+    from grga.graph.scope import bind_directory
+
+    bind_directory(
+        scope, directory,
+        role=role,
+        db_path=str(db_path) if db_path else None,
+    )
+    typer.echo(f"bound {directory} → scope {scope!r}")
+
+
+@scope_app.command("unbind")
+def scope_unbind_command(
+    scope: str = typer.Argument(..., help="Logical scope name."),
+    directory: Optional[Path] = typer.Argument(None, resolve_path=True, help="Directory to unbind (omit to unbind every directory for this scope)."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+):
+    """Remove one (or every) directory binding for a scope.
+
+    Metadata-only — does not delete corpus files, indexed docs, or the
+    scope's knowledge assets. Use `grga scope rm` for that.
+    """
+    from grga.graph.scope import unbind_directory
+
+    n = unbind_directory(
+        scope, directory,
+        db_path=str(db_path) if db_path else None,
+    )
+    if n == 0:
+        typer.echo(f"no matching binding for scope {scope!r}", err=True)
+        raise typer.Exit(0)
+    typer.echo(f"unbound {n} directory binding(s) from scope {scope!r}")
+
+
+@scope_app.command("rename")
+def scope_rename_command(
+    old_name: str = typer.Argument(..., help="Current scope name."),
+    new_name: str = typer.Argument(..., help="New scope name."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+):
+    """Rename a scope. Knowledge assets survive intact (single-row UPDATE)."""
+    from grga.graph.scope import rename_scope
+
+    try:
+        rename_scope(
+            old_name, new_name,
+            db_path=str(db_path) if db_path else None,
+        )
+    except LookupError as exc:
+        typer.echo(f"scope rename: {exc}", err=True)
+        raise typer.Exit(1)
+    except FileExistsError as exc:
+        typer.echo(f"scope rename: {exc}", err=True)
+        raise typer.Exit(1)
+    except ValueError as exc:
+        typer.echo(f"scope rename: {exc}", err=True)
+        raise typer.Exit(2)
+    typer.echo(f"renamed scope {old_name!r} → {new_name!r}")
+
+
+@scope_app.command("rm")
+def scope_rm_command(
+    scope: str = typer.Argument(..., help="Logical scope name to remove."),
+    knowledge: bool = typer.Option(False, "--knowledge", help="Also delete the scope's knowledge assets (keyword_pairs / keyword_stats / scope_stats / auto_ngram_dict / llm_extension_votes) AND the scope row itself. Without this flag only the evidence layer (bindings + docs + doc-level indexes) is removed; the scope's memorised knowledge stays."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
+):
+    """Remove a scope's evidence (default) or evidence + knowledge (``--knowledge``).
+
+    Default: wipe ``scope_directories`` + ``docs`` + ``keyword_docs`` +
+    ``heading_docs`` + v1 heat counters. The scope's knowledge (pairs /
+    stats / ngram dict / votes) is left memorised — this matches design
+    D6 (`grow-and-refine`: knowledge is never destroyed by evidence loss).
+
+    ``--knowledge``: additionally purge knowledge assets and delete the
+    ``scopes`` row itself. Not reversible without a knowledge-pack backup.
+    """
+    from grga.graph.scope import remove_scope
+
+    if not yes:
+        action = "evidence + knowledge (irreversible)" if knowledge else "evidence only"
+        typer.echo(
+            f"About to remove scope {scope!r} — {action}. "
+            "Re-run with --yes to confirm.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    stats = remove_scope(
+        scope,
+        purge_knowledge=knowledge,
+        db_path=str(db_path) if db_path else None,
+    )
+    if json_output:
+        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        return
+    if not stats.scope_row_removed and stats.docs_removed == 0 and stats.directory_bindings_removed == 0:
+        typer.echo(f"scope {scope!r} not found (no-op)", err=True)
+        raise typer.Exit(0)
+    typer.echo(
+        f"scope {scope!r} removed: "
+        f"bindings={stats.directory_bindings_removed} "
+        f"docs={stats.docs_removed} "
+        f"keyword_docs={stats.keyword_docs_removed} "
+        f"heading_docs={stats.heading_docs_removed}"
+    )
+    if knowledge:
+        typer.echo(
+            f"  knowledge purged: pairs={stats.pairs_removed} "
+            f"stats={stats.stats_rows_removed} "
+            f"votes={stats.votes_removed} "
+            f"ngram={stats.ngram_rows_removed} "
+            f"scope_row={stats.scope_row_removed}"
+        )
 
 
 def main():

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grga.dev/schemas/related-signals-v3.json",
   "title": "grga related signals v3",
-  "description": "Contract for `grga related --json` under the v9 keyword-primary architecture. See docs/design/related-signals-v3.md. v3.0 (2026-07-13): `--mode graph` now returns candidate *keywords* (RelatedKeyword) instead of documents; the pre-v3 `expansion` block, `crossed_scopes_preview`, `keyword_contributions`, and `graph_signals` are all gone (PPR + doc aggregation removed in Phase 3b-2). v3.1 (2026-07-13): graph envelope adds `resolved_seeds` — per-seed vocabulary probe that disambiguates empty results (unknown seed vs. isolated / over-filtered seed). `--mode heading` retains the doc-oriented shape minus the removed fields. `--mode dir` is removed entirely (raises at CLI level; use `grga search --json | aggregate` instead). Replaces schemas/related-signals-v2.json.",
+  "description": "Contract for `grga related --json` under the v9 keyword-primary architecture. See docs/design/related-signals-v3.md. v3.0 (2026-07-13): `--mode graph` now returns candidate *keywords* (RelatedKeyword) instead of documents; the pre-v3 `expansion` block, `crossed_scopes_preview`, `keyword_contributions`, and `graph_signals` are all gone (PPR + doc aggregation removed in Phase 3b-2). v3.1 (2026-07-13): graph envelope adds `resolved_seeds` — per-seed vocabulary probe that disambiguates empty results (unknown seed vs. isolated / over-filtered seed). v3.1a (2026-07-14, plan-2026-07-14 §5.3): `related_keyword` gains `scopes` — the logical scope names within the caller's query range that carry this pair (MINOR bump, caller ignoring the new field is safe); `related_doc.directory` → `scope` and `qualified_path` removed (v10 knowledge / evidence split rename). `--mode heading` retains the doc-oriented shape minus the removed fields. `--mode dir` is removed entirely (raises at CLI level; use `grga search --json | aggregate` instead). Replaces schemas/related-signals-v2.json.",
   "anyOf": [
     {
       "$comment": "graph mode envelope — candidate keywords with association evidence + a per-seed vocabulary probe (resolved_seeds). An empty results array is also valid.",
@@ -59,9 +59,9 @@
       }
     },
     "related_keyword": {
-      "description": "One candidate keyword expanded from a seed via chunk_cooccur or llm_promoted evidence in `keyword_pairs`.",
+      "description": "One candidate keyword expanded from a seed via chunk_cooccur or llm_promoted evidence in `keyword_pairs`. v3.1 (plan-2026-07-14 §5.3): adds `scopes` — the logical scope names within the caller's query range that carry this pair. Lets agents route follow-up ripgrep at the right binding without a per-candidate `graph inspect` round-trip.",
       "type": "object",
-      "required": ["kw", "npmi", "cooccur_count", "via_seed", "chunk_df", "source"],
+      "required": ["kw", "npmi", "cooccur_count", "via_seed", "chunk_df", "source", "scopes"],
       "additionalProperties": false,
       "properties": {
         "kw": {
@@ -70,11 +70,11 @@
           "minLength": 1
         },
         "npmi": {
-          "description": "Normalized pointwise mutual information stored at build time. For chunk_cooccur edges: > 0 and typically <= 1. For llm_promoted edges: stored as 0.0 (NPMI is NULL in the DB but promoted here so the JSON shape stays uniform).",
+          "description": "Normalized pointwise mutual information stored at build time. For chunk_cooccur edges: > 0 and typically <= 1. For llm_promoted edges: stored as 0.0 (NPMI is NULL in the DB but promoted here so the JSON shape stays uniform). Multi-scope query: the max npmi across the queried scopes (use `scopes` to see which scopes contributed).",
           "type": "number"
         },
         "cooccur_count": {
-          "description": "Raw chunk co-occurrence count of (via_seed, kw) at build time.",
+          "description": "Raw chunk co-occurrence count of (via_seed, kw) at build time. Multi-scope query: the count from the same row that supplied `npmi` (not a sum).",
           "type": "number",
           "minimum": 0
         },
@@ -84,7 +84,7 @@
           "minLength": 1
         },
         "chunk_df": {
-          "description": "Candidate keyword's own scope-level chunk df (from keyword_stats.chunk_df). Hub-word discriminator: caller may filter e.g. `chunk_df / total_chunks_in_scope > 0.1` client-side. 0 when the candidate has no keyword_stats row (only reachable via llm_promoted edges without corpus evidence).",
+          "description": "Candidate keyword's own scope-level chunk df (from keyword_stats.chunk_df). Hub-word discriminator: caller may filter e.g. `chunk_df / total_chunks_in_scope > 0.1` client-side. 0 when the candidate has no keyword_stats row (only reachable via llm_promoted edges without corpus evidence). Multi-scope query: SUM(chunk_df) across the queried scopes.",
           "type": "integer",
           "minimum": 0
         },
@@ -92,6 +92,12 @@
           "description": "Edge provenance. `chunk_cooccur` = derived from build-time chunk co-occurrence. `llm_promoted` = written by `grga index promote` after LLM voting.",
           "type": "string",
           "enum": ["chunk_cooccur", "llm_promoted"]
+        },
+        "scopes": {
+          "description": "v3.1: the scope names (from `scopes.name`) within the caller's query range that carry this (via_seed, kw, source) pair. Single-scope query: singleton of that scope. Multi-scope query: the subset of the queried scopes that actually memorised the pair. Cross-scope query (no scope filter): every scope in the DB that carries this pair. Sorted ascending for deterministic JSON output; never empty when the row is returned.",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1
         }
       }
     },

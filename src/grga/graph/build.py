@@ -1000,6 +1000,35 @@ def _load_auto_dict(conn, scope_id: int) -> Dict[str, dict]:
     return out
 
 
+def _load_seed_auto_dict(
+    conn,
+    target_scope_id: int,
+    seed_scope_name: str,
+) -> Dict[str, dict]:
+    """Load ``seed_scope_name``'s ``auto_ngram_dict`` as seed vocabulary.
+
+    Used by the ``--seed-ngram-from`` flow (plan-2026-07-14 §6): after
+    ``grga index import``, the target scope has knowledge (pairs / stats)
+    but a blank auto_ngram_dict. Passing an existing sibling scope here
+    lets the tokeniser cold-start with its domain vocabulary instead of
+    re-detecting phrases from scratch.
+
+    Returns ``{}`` when the seed scope does not exist, so the build
+    silently falls back to normal detection.
+    """
+    row = conn.execute(
+        "SELECT id FROM scopes WHERE name = ?", (seed_scope_name,)
+    ).fetchone()
+    if row is None:
+        return {}
+    seed_scope_id = int(row[0])
+    if seed_scope_id == target_scope_id:
+        # Seeding from self is a no-op — the normal load already picks
+        # up the target's own rows.
+        return {}
+    return _load_auto_dict(conn, seed_scope_id)
+
+
 def _persist_auto_dict(conn, scope_id: int, entries: Iterable[dict], now: str) -> None:
     """Upsert ``entries`` into ``auto_ngram_dict`` for ``scope_id``."""
     rows = [
@@ -1294,6 +1323,7 @@ def build_graph_index(
     replace: Optional[bool] = None,
     ngram_iters: int = DEFAULT_NGRAM_ITERS,
     max_ngram_n: int = DEFAULT_MAX_NGRAM_N,
+    seed_ngram_from: Optional[str] = None,
     progress: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[[dict], None]] = None,
 ) -> BuildStats:
@@ -1592,6 +1622,29 @@ def build_graph_index(
         # Seed the working dict. ``refresh_ngram="replace"`` on rebuild
         # already dropped the DB rows above, so this loads empty.
         auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_id)
+
+        # v10 optional cold-start (plan-2026-07-14 §6): borrow a sibling
+        # scope's auto_ngram_dict as a starting vocabulary. Typical use
+        # after ``grga index import`` when the target scope has no local
+        # phrases yet; layers the seed *under* the target's own entries so
+        # the target always wins on collisions (its own npmi/count are
+        # more accurate for its corpus).
+        if seed_ngram_from:
+            seed_dict = _load_seed_auto_dict(
+                conn, scope_id, seed_ngram_from,
+            )
+            if seed_dict:
+                seeded = 0
+                for phrase, entry in seed_dict.items():
+                    if phrase not in auto_dict:
+                        auto_dict[phrase] = entry
+                        seeded += 1
+                _emit(
+                    "seed_ngram_loaded",
+                    from_scope=seed_ngram_from,
+                    phrases_seeded=seeded,
+                    phrases_skipped=len(seed_dict) - seeded,
+                )
 
         if mode == "rebuild" and refresh_ngram in ("append", "replace"):
             iters = max(1, int(ngram_iters))

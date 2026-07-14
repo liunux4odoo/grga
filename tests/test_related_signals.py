@@ -123,7 +123,11 @@ def test_related_graph_v3_related_keyword_fields(graph_scope, schema):
     for r in payload["results"]:
         assert set(r.keys()) == {
             "kw", "npmi", "cooccur_count", "via_seed", "chunk_df", "source",
+            "scopes",
         }, f"unexpected RelatedKeyword shape: {sorted(r.keys())}"
+        # v3.1: scopes must be a non-empty list of scope names.
+        assert isinstance(r["scopes"], list) and r["scopes"]
+        assert all(isinstance(s, str) and s for s in r["scopes"])
         assert isinstance(r["kw"], str) and r["kw"]
         assert isinstance(r["npmi"], (int, float))
         assert r["cooccur_count"] >= 0
