@@ -96,9 +96,9 @@
       }
     },
     "related_doc": {
-      "description": "One related document (heading mode only). No `keyword_contributions` in v3 — that block was PPR-specific and PPR was removed in Phase 3b-2.",
+      "description": "One related document (heading mode only). No `keyword_contributions` in v3 — that block was PPR-specific and PPR was removed in Phase 3b-2. v10 (plan-2026-07-14): the pre-v10 `directory` (absolute filesystem path) is replaced by `scope` (logical scope name, portable across machines); `qualified_path` is gone — callers resolve to a physical path via `scope_directories` when needed.",
       "type": "object",
-      "required": ["doc_path", "score", "mode", "reason", "keywords", "directory", "qualified_path"],
+      "required": ["doc_path", "score", "mode", "reason", "keywords", "scope"],
       "additionalProperties": false,
       "properties": {
         "doc_path": {"type": "string"},
@@ -110,13 +110,13 @@
           "type": "array",
           "items": {"type": "string"}
         },
-        "directory": {
+        "scope": {
+          "description": "Logical scope name this doc was indexed under (v10). Null when the doc is not attributed to any scope (should not happen post-v10 build).",
           "oneOf": [
             {"type": "string"},
             {"type": "null"}
           ]
-        },
-        "qualified_path": {"type": "string"}
+        }
       }
     }
   }

@@ -31,7 +31,7 @@ def indexed_scope(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"scope": scope, "db": db}
 
 
@@ -46,7 +46,7 @@ def test_graph_mode_raises_migration_hint(indexed_scope):
             ["grga"],
             mode="graph",
             db_path=indexed_scope["db"],
-            directory=indexed_scope["scope"],
+            scope="test-scope",
         )
 
 
@@ -61,7 +61,7 @@ def test_dir_mode_raises_migration_hint(indexed_scope):
             ["brew"],
             mode="dir",
             db_path=indexed_scope["db"],
-            directory=indexed_scope["scope"],
+            scope="test-scope",
         )
 
 
@@ -70,7 +70,7 @@ def test_heading_mode_crosses_documents(indexed_scope):
         ["brew"],
         mode="heading",
         db_path=indexed_scope["db"],
-        directory=indexed_scope["scope"],
+        scope="test-scope",
         limit=10,
     )
     docs = {r.doc_path for r in results}
@@ -85,7 +85,7 @@ def test_invalid_mode_raises(indexed_scope):
 
 def test_empty_seed_returns_empty(indexed_scope):
     assert (
-        related([""], mode="heading", db_path=indexed_scope["db"], directory=indexed_scope["scope"])
+        related([""], mode="heading", db_path=indexed_scope["db"], scope="test-scope")
         == []
     )
 
@@ -96,7 +96,7 @@ def test_unknown_keyword_gracefully_degrades(indexed_scope):
         ["totally-unknown-token"],
         mode="heading",
         db_path=indexed_scope["db"],
-        directory=indexed_scope["scope"],
+        scope="test-scope",
     )
     assert result == []
 
@@ -113,7 +113,7 @@ def cross_heading_indexed(monkeypatch, tmp_path, cross_heading_fixture):
     """
     monkeypatch.setenv("GRGA_SIDECAR_ROOT", str(tmp_path / "sidecars"))
     db = tmp_path / "graph.db"
-    build_graph_index(cross_heading_fixture, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("cross-heading", directory=cross_heading_fixture, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"scope": cross_heading_fixture, "db": db}
 
 
@@ -123,7 +123,7 @@ def test_heading_mode_leaf_match_across_parents(cross_heading_indexed):
         ["homebrew-only"],
         mode="heading",
         db_path=cross_heading_indexed["db"],
-        directory=cross_heading_indexed["scope"],
+        scope="cross-heading",
         limit=10,
     )
     docs = {r.doc_path for r in results}
@@ -139,7 +139,7 @@ def test_heading_mode_shared_leaf_reaches_third_document(cross_heading_indexed):
         ["homebrew-only"],
         mode="heading",
         db_path=cross_heading_indexed["db"],
-        directory=cross_heading_indexed["scope"],
+        scope="cross-heading",
         limit=10,
     )
     docs = {r.doc_path for r in results}
@@ -158,7 +158,7 @@ def test_heading_mode_seed_docs_are_excluded(cross_heading_indexed):
         ["安装指南"],  # heading token that only occurs in install.md
         mode="heading",
         db_path=cross_heading_indexed["db"],
-        directory=cross_heading_indexed["scope"],
+        scope="cross-heading",
         limit=10,
     )
     assert all(r.doc_path != "install.md" for r in results)

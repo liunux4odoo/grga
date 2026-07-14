@@ -28,8 +28,7 @@ def sidecar_env(monkeypatch, tmp_path):
 def _build(scope: Path, db: Path, **kw) -> None:
     # min_npmi=0.0 so tiny-corpus pairs survive the write gate; the read
     # path is what these tests exercise.
-    build_graph_index(
-        scope, db_path=db, min_pair_count=1, min_npmi=0.0, **kw
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0, **kw
     )
 
 
@@ -167,7 +166,7 @@ def test_related_keywords_resolved_seeds_unknown_scope(sidecar_env, tmp_path):
         ["alpha", "totally_absent"],
         min_npmi=0.0,
         db_path=db,
-        directory=tmp_path / "never_indexed",
+        scopes=["never-indexed"],
     )
     assert result.results == []
     assert result.resolved_seeds == [
@@ -210,7 +209,7 @@ def test_related_keywords_min_npmi_floor(sidecar_env, tmp_path):
 
 
 def test_related_keywords_scope_filter(sidecar_env, tmp_path):
-    """``directory`` restricts candidates to pairs from that scope."""
+    """``scopes`` restricts candidates to pairs from those scopes (v10 multi-select)."""
     scope_a = tmp_path / "a"
     scope_b = tmp_path / "b"
     scope_a.mkdir()
@@ -224,12 +223,19 @@ def test_related_keywords_scope_filter(sidecar_env, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    _build(scope_a, db)
-    _build(scope_b, db)
+    # Build each corpus under its own logical scope so we can filter later.
+    build_graph_index(
+        "scope-a", directory=scope_a, db_path=db,
+        min_pair_count=1, min_npmi=0.0,
+    )
+    build_graph_index(
+        "scope-b", directory=scope_b, db_path=db,
+        min_pair_count=1, min_npmi=0.0,
+    )
 
     # Scoped to A: alpha → beta only.
     res_a = related_keywords(
-        ["alpha"], min_npmi=0.0, db_path=db, directory=scope_a,
+        ["alpha"], min_npmi=0.0, db_path=db, scopes=["scope-a"],
     ).results
     kws_a = {r.kw for r in res_a}
     assert "beta" in kws_a
@@ -237,16 +243,23 @@ def test_related_keywords_scope_filter(sidecar_env, tmp_path):
 
     # Scoped to B: alpha → zeta only.
     res_b = related_keywords(
-        ["alpha"], min_npmi=0.0, db_path=db, directory=scope_b,
+        ["alpha"], min_npmi=0.0, db_path=db, scopes=["scope-b"],
     ).results
     kws_b = {r.kw for r in res_b}
     assert "zeta" in kws_b
     assert "beta" not in kws_b
 
-    # Cross-scope (no directory): alpha → both.
+    # Cross-scope (no scopes filter): alpha → both.
     res_all = related_keywords(["alpha"], min_npmi=0.0, db_path=db).results
     kws_all = {r.kw for r in res_all}
     assert {"beta", "zeta"} <= kws_all
+
+    # Multi-scope union: scopes=[a, b] must union both → both hits.
+    res_multi = related_keywords(
+        ["alpha"], min_npmi=0.0, db_path=db, scopes=["scope-a", "scope-b"],
+    ).results
+    kws_multi = {r.kw for r in res_multi}
+    assert {"beta", "zeta"} <= kws_multi
 
 
 def test_related_keywords_limit_per_seed(sidecar_env, tmp_path):

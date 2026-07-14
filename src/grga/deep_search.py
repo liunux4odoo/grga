@@ -33,6 +33,7 @@ DEFAULT_MIN_COUNT = 0.1
 # corpus cannot wedge the caller. Pass max_total explicitly to override.
 DEEP_SEARCH_MAX_TOTAL = 20000
 DEEP_SEARCH_DEFAULTS = {
+    "scope": None,
     "llm_base_url": None,
     "llm_api_key": None,
     "llm_model_name": None,
@@ -168,6 +169,35 @@ def _coerce_float(value):
         return None
 
 
+def _reject_path_shaped_scope(name):
+    """Raise ``ValueError`` for scope names that look like filesystem paths.
+
+    v10 fail-loud guard: a caller that still passes a resolved directory
+    (``/home/me/corpus`` or ``C:\\corpus``) where a logical scope name is
+    expected would otherwise silently create a `scopes` row named after
+    the path, contaminating the knowledge layer. Reject up-front so the
+    stale call site surfaces during development.
+    """
+    if not isinstance(name, str):
+        return
+    text = name.strip()
+    if not text:
+        return
+    if text.startswith("/") or text.startswith("~"):
+        raise ValueError(
+            f"scope name looks like a filesystem path: {name!r}. "
+            "v10 requires a logical name (e.g. 'physics-cn'). If you "
+            "meant to bind a directory to a scope, pass --scope <name> "
+            "--directory <path> to `grga index build`."
+        )
+    # Windows drive letter (``C:\...`` or ``C:/...``).
+    if len(text) >= 3 and text[1] == ":" and text[0].isalpha() and text[2] in ("\\", "/"):
+        raise ValueError(
+            f"scope name looks like a Windows path: {name!r}. "
+            "v10 requires a logical name (e.g. 'physics-cn')."
+        )
+
+
 class KeywordLibrary:
     def __init__(self, path, decay_factor=DEFAULT_DECAY_FACTOR, min_count=DEFAULT_MIN_COUNT):
         self.path = Path(path).expanduser()
@@ -188,12 +218,13 @@ class KeywordLibrary:
         ensure_schema(self.conn)
         self.conn.commit()
 
-    def _dir_id(self, directory):
+    def _scope_id(self, scope_name):
         from grga.graph.ids import IdInterner
 
         if getattr(self, "_interner", None) is None:
             self._interner = IdInterner(self.conn)
-        return self._interner.dir_id(directory)
+        _reject_path_shaped_scope(scope_name)
+        return self._interner.scope_id(scope_name)
 
     def _kw_id(self, kw):
         from grga.graph.ids import IdInterner
@@ -202,101 +233,107 @@ class KeywordLibrary:
             self._interner = IdInterner(self.conn)
         return self._interner.kw_id(kw)
 
-    def _dir_id_ro(self, directory):
+    def _scope_id_ro(self, scope_name):
         from grga.graph.ids import IdInterner
 
         if getattr(self, "_interner", None) is None:
             self._interner = IdInterner(self.conn)
-        return self._interner.dir_id_ro(directory)
+        _reject_path_shaped_scope(scope_name)
+        return self._interner.scope_id_ro(scope_name)
 
-    def decay(self, directory):
+    def decay(self, scope_name):
         if not (0 < self.decay_factor < 1):
             return
-        dir_id = self._dir_id_ro(directory)
-        if dir_id is None:
+        scope_id = self._scope_id_ro(scope_name)
+        if scope_id is None:
             return
-        params = (self.decay_factor, dir_id)
-        self.conn.execute("UPDATE keyword_counts SET count = count * ? WHERE dir_id = ?", params)
-        self.conn.execute("UPDATE keyword_sources SET count = count * ? WHERE dir_id = ?", params)
-        self.conn.execute("DELETE FROM keyword_counts WHERE dir_id = ? AND count < ?", (dir_id, self.min_count))
-        self.conn.execute("DELETE FROM keyword_sources WHERE dir_id = ? AND count < ?", (dir_id, self.min_count))
+        params = (self.decay_factor, scope_id)
+        self.conn.execute("UPDATE keyword_counts SET count = count * ? WHERE scope_id = ?", params)
+        self.conn.execute("UPDATE keyword_sources SET count = count * ? WHERE scope_id = ?", params)
+        self.conn.execute("DELETE FROM keyword_counts WHERE scope_id = ? AND count < ?", (scope_id, self.min_count))
+        self.conn.execute("DELETE FROM keyword_sources WHERE scope_id = ? AND count < ?", (scope_id, self.min_count))
         self.conn.commit()
 
-    def add_keywords(self, scope, directory, keywords):
+    def add_keywords(self, source, scope_name, keywords):
+        """Increment per-scope keyword counters + record LLM votes.
+
+        ``source`` is the ``keyword_counts.scope`` TEXT column (a role
+        label such as ``"user"`` — pre-v10 name preserved to avoid
+        churning the deep-search heat contract). ``scope_name`` is the
+        v10 logical scope (portable across machines).
+        """
         terms = _normalize_keywords(keywords)
         if not terms:
             return
         now = _now()
-        dir_id = self._dir_id(directory)
+        scope_id = self._scope_id(scope_name)
         for term in terms:
             kw_id = self._kw_id(term)
             self.conn.execute(
                 """
-                INSERT INTO keyword_counts (scope, dir_id, kw_id, count, updated_at)
+                INSERT INTO keyword_counts (scope, scope_id, kw_id, count, updated_at)
                 VALUES (?, ?, ?, 1, ?)
-                ON CONFLICT(scope, dir_id, kw_id)
+                ON CONFLICT(scope, scope_id, kw_id)
                 DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
                 """,
-                (scope, dir_id, kw_id, now),
+                (source, scope_id, kw_id, now),
             )
-        # Since the chunk-level migration (schema v4) keyword_pairs is a
-        # multi-source table gated by anti-pollution (only ``chunk_cooccur``
-        # from build and ``llm_promoted`` from ``grga index promote`` may
-        # write). The v1 LLM-driven deep-search pairs are now routed through
-        # ``llm_extension_votes`` — several deep-search co-mentions of the
-        # same pair accumulate votes, then ``grga index promote`` graduates
-        # them into ``keyword_pairs`` when the threshold is reached. This
-        # keeps a single write path for the graph and matches the plan's
-        # "两种 source 只允许 chunk_cooccur / llm_promoted" contract.
+        # Deep-search LLM-driven pair signals are routed through
+        # ``llm_extension_votes`` (anti-pollution gate). Several
+        # deep-search co-mentions of the same pair accumulate votes,
+        # then ``grga index promote`` graduates them into
+        # ``keyword_pairs`` when the threshold is reached.
         if len(terms) >= 2:
             try:
                 from grga.graph.votes import record_votes_from_keywords
 
                 record_votes_from_keywords(
-                    terms, directory=directory, weight=1.0, conn=self.conn
+                    terms, scope=scope_name, weight=1.0, conn=self.conn
                 )
             except Exception:
-                # Vote recording is best-effort auxiliary — a failure here
-                # must not derail the deep-search primary flow.
+                # Vote recording is best-effort auxiliary — a failure
+                # here must not derail the deep-search primary flow.
                 pass
 
-    def add_sources(self, directory, keywords, path, line_number):
+    def add_sources(self, scope_name, keywords, path, line_number):
         terms = _normalize_keywords(keywords)
         if not terms or not path:
             return
         line = int(line_number) if isinstance(line_number, int) else 0
         now = _now()
-        dir_id = self._dir_id(directory)
+        scope_id = self._scope_id(scope_name)
         self.conn.executemany(
             """
-            INSERT INTO keyword_sources (dir_id, kw_id, path, line_number, count, updated_at)
+            INSERT INTO keyword_sources (scope_id, kw_id, path, line_number, count, updated_at)
             VALUES (?, ?, ?, ?, 1, ?)
-            ON CONFLICT(dir_id, kw_id, path, line_number)
+            ON CONFLICT(scope_id, kw_id, path, line_number)
             DO UPDATE SET count = count + 1, updated_at = excluded.updated_at
             """,
-            [(dir_id, self._kw_id(term), path, line, now) for term in terms],
+            [(scope_id, self._kw_id(term), path, line, now) for term in terms],
         )
 
     def commit(self):
         self.conn.commit()
 
-    def history(self, directory, seed_keywords, limit=30, global_library=False):
-        # Pair history now reads from ``llm_extension_votes`` (the pre-promote
+    def history(self, scope_name, seed_keywords, limit=30, global_library=False):
+        # Pair history reads from ``llm_extension_votes`` (the pre-promote
         # buffer that deep-search co-mentions feed into). ``keyword_pairs``
-        # in schema v5 is a graph-facing table with a different PK; the
-        # ``history`` caller (deep-search's query-plan seed) needs the raw
-        # LLM-driven co-occurrence buffer, not the promoted / chunk edges.
+        # in v10 is a graph-facing knowledge asset with different write
+        # gates; the ``history`` caller (deep-search's query-plan seed)
+        # needs the raw LLM-driven co-occurrence buffer, not the promoted
+        # / chunk edges.
         seeds = [item for item in _normalize_keywords(seed_keywords)]
         params = []
         where = []
         if not global_library:
-            dir_id = self._dir_id_ro(directory)
-            if dir_id is None:
-                # Unknown scope in the intern table => no votes / counts to
-                # report. Match the previous "return []"-on-miss semantics.
+            scope_id = self._scope_id_ro(scope_name)
+            if scope_id is None:
+                # Unknown scope in the intern table => no votes / counts
+                # to report. Match the previous "return []"-on-miss
+                # semantics.
                 return []
-            where.append("v.dir_id = ?")
-            params.append(dir_id)
+            where.append("v.scope_id = ?")
+            params.append(scope_id)
         if seeds:
             placeholders = ",".join("?" for _ in seeds)
             lowered = [item.casefold() for item in seeds]
@@ -335,11 +372,11 @@ class KeywordLibrary:
         count_params = []
         count_where = []
         if not global_library:
-            dir_id = self._dir_id_ro(directory)
-            if dir_id is None:
+            scope_id = self._scope_id_ro(scope_name)
+            if scope_id is None:
                 return []
-            count_where.append("c.dir_id = ?")
-            count_params.append(dir_id)
+            count_where.append("c.scope_id = ?")
+            count_params.append(scope_id)
         count_clause = (" WHERE " + " AND ".join(count_where)) if count_where else ""
         rows = self.conn.execute(
             f"""
@@ -360,6 +397,7 @@ class KeywordLibrary:
 def deep_search_directory(
     directory,
     query,
+    scope=None,
     llm_base_url=None,
     llm_api_key=None,
     llm_model_name=None,
@@ -388,6 +426,7 @@ def deep_search_directory(
     try:
         result = _deep_search_directory(
             directory=directory,
+            scope=scope,
             query=str(query or "").strip(),
             llm_base_url=llm_base_url,
             llm_api_key=llm_api_key,
@@ -422,6 +461,7 @@ def deep_search_directory(
 def _deep_search_directory(
     directory,
     query,
+    scope=None,
     llm_base_url=None,
     llm_api_key=None,
     llm_model_name=None,
@@ -458,7 +498,25 @@ def _deep_search_directory(
         return {"ok": False, "error": "max_extract_segments must be greater than 0", "matches": []}
 
     target = Path(directory).expanduser().resolve()
-    directory_key = str(target)
+    if not (scope and str(scope).strip()):
+        # v10 requires an explicit logical scope name (plan-2026-07-14
+        # §9.1). We do NOT auto-derive one from the directory path — the
+        # user is asked to be explicit about which knowledge domain this
+        # deep-search run belongs to. Whitespace-only names are treated
+        # the same as missing so the structured error fires instead of a
+        # bare ValueError from resolve_scope_name below.
+        return {
+            "ok": False,
+            "error": (
+                "deep_search requires an explicit --scope <name>; "
+                "there is no auto-derivation from --directory in v10. "
+                "See docs/design/plan-2026-07-14-scope-directory-split.md."
+            ),
+            "matches": [],
+        }
+    from grga.graph.schema import resolve_scope_name
+
+    scope_name = resolve_scope_name(scope)
     database_file = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     _log_debug(debug, f"数据库路径: {database_file}")
 
@@ -482,7 +540,7 @@ def _deep_search_directory(
     if strategy == "horizontal":
         return _execute_horizontal_plan(
             target=target,
-            directory_key=directory_key,
+            scope_name=scope_name,
             query=query,
             plan=advanced_plan,
             client=client,
@@ -504,7 +562,7 @@ def _deep_search_directory(
     if strategy == "multi_hop":
         return _execute_multihop_plan(
             target=target,
-            directory_key=directory_key,
+            scope_name=scope_name,
             query=query,
             plan=advanced_plan,
             client=client,
@@ -528,7 +586,7 @@ def _deep_search_directory(
     # direct / keyword_expand / fallback 均落到本地分层搜索。
     return _run_tiered_search(
         target=target,
-        directory_key=directory_key,
+        scope_name=scope_name,
         query=query,
         client=client,
         model_name=model_name,
@@ -557,7 +615,7 @@ def _deep_search_directory(
 
 def _run_tiered_search(
     target,
-    directory_key,
+    scope_name,
     query,
     client,
     model_name,
@@ -601,10 +659,10 @@ def _run_tiered_search(
 
     library = KeywordLibrary(database_file, decay_factor=decay_factor, min_count=min_keyword_count)
     try:
-        library.decay(directory_key)
+        library.decay(scope_name)
         _log_debug(debug, "关键词库衰减完成")
 
-        history = library.history(directory_key, [], limit=30, global_library=global_library)
+        history = library.history(scope_name, [], limit=30, global_library=global_library)
         _log_debug(debug, f"关键词历史记录数: {len(history)}")
 
         initial_plan = _build_query_plan(
@@ -661,7 +719,7 @@ def _run_tiered_search(
         for group in keyword_groups or []:
             all_keywords.extend(group)
         current_keywords = _normalize_keywords(all_keywords or initial_plan.get("keywords", []))
-        library.add_keywords("user", directory_key, current_keywords)
+        library.add_keywords("user", scope_name, current_keywords)
         library.commit()
 
         all_matches = []
@@ -747,7 +805,8 @@ def _run_tiered_search(
             "strategy": strategy,
             "initial_query_expression": "; ".join(current_expressions),
             "patterns": [item["query_expression"] for item in iterations if item.get("query_expression")],
-            "directory": directory_key,
+            "scope": scope_name,
+            "directory": str(target),
             "iterations": iterations,
             "stop_reason": stop_reason,
             "db_path": str(database_file),
@@ -1086,7 +1145,7 @@ def _clean_answer_key(value):
 def _run_advanced_fallbacks(
     *,
     target,
-    directory_key,
+    scope_name,
     query,
     client,
     model_name,
@@ -1124,7 +1183,7 @@ def _run_advanced_fallbacks(
     _log_debug(debug, f"触发分层兜底搜索: {query}")
     fallback = _run_tiered_search(
         target=target,
-        directory_key=directory_key,
+        scope_name=scope_name,
         query=query,
         client=client,
         model_name=model_name,
@@ -1222,7 +1281,7 @@ def _run_advanced_fallbacks(
 
 def _execute_horizontal_plan(
     target,
-    directory_key,
+    scope_name,
     query,
     plan,
     client,
@@ -1296,7 +1355,7 @@ def _execute_horizontal_plan(
         entity_terms = [value for value in fields.values() if value and value != "未找到"]
         extra_matches, extra_patterns, extra_iterations, stop_suffix = _run_advanced_fallbacks(
             target=target,
-            directory_key=directory_key,
+            scope_name=scope_name,
             query=query,
             client=client,
             model_name=model_name,
@@ -1329,7 +1388,8 @@ def _execute_horizontal_plan(
         "strategy": "horizontal",
         "initial_query_expression": "; ".join(patterns),
         "patterns": patterns,
-        "directory": directory_key,
+        "scope": scope_name,
+        "directory": str(target),
         "plan": plan,
         "answer": {"text": _format_horizontal_answer(query, fields), "fields": fields, "citations": citations},
         "iterations": iterations,
@@ -1340,7 +1400,7 @@ def _execute_horizontal_plan(
 
 def _execute_multihop_plan(
     target,
-    directory_key,
+    scope_name,
     query,
     plan,
     client,
@@ -1435,7 +1495,7 @@ def _execute_multihop_plan(
         _log_debug(debug, f"多跳停止于 {stop_reason}，触发兜底搜索: {query}")
         extra_matches, extra_patterns, extra_iterations, stop_suffix = _run_advanced_fallbacks(
             target=target,
-            directory_key=directory_key,
+            scope_name=scope_name,
             query=query,
             client=client,
             model_name=model_name,
@@ -1468,7 +1528,8 @@ def _execute_multihop_plan(
         "strategy": "multi_hop",
         "initial_query_expression": "; ".join(patterns),
         "patterns": patterns,
-        "directory": directory_key,
+        "scope": scope_name,
+        "directory": str(target),
         "plan": plan,
         "answer": {"text": _format_multihop_answer(query, context, reasoning_chain), "fields": context, "reasoning_chain": reasoning_chain, "citations": citations},
         "iterations": iterations,

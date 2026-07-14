@@ -136,7 +136,7 @@ def test_build_populates_chunk_tables(sidecar_env, tmp_path):
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     assert stats.files_scanned >= 3
     assert stats.files_indexed >= 3
     # v9: chunks_written may be 0 (no chunks table in v9); the meaningful
@@ -189,10 +189,10 @@ def test_replace_flag_clears_previous_chunk_rows(sidecar_env, tmp_path):
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     (scope / "install.md").unlink()
 
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     assert stats.files_indexed == 2  # usage.md + code.py
 
     conn = connect(db)
@@ -227,28 +227,28 @@ def test_build_preserves_llm_promoted_pairs(sidecar_env, tmp_path):
     from grga.graph.ids import IdInterner
     from grga.graph.schema import LLM_PROMOTED_SOURCE, ensure_schema
 
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     # Insert an llm_promoted pair for this scope.
     conn = connect(db)
     try:
         ensure_schema(conn)
         interner = IdInterner(conn)
-        dir_id = interner.dir_id(str(scope.resolve()))
+        scope_id = interner.scope_id("test-scope")
         kw_a = interner.kw_id("llmx")
         kw_b = interner.kw_id("llmy")
         conn.execute(
-            "INSERT INTO keyword_pairs (dir_id, kw_a_id, kw_b_id, "
+            "INSERT INTO keyword_pairs (scope_id, kw_a_id, kw_b_id, "
             "source, cooccur_count, npmi, updated_at) "
             "VALUES (?, ?, ?, ?, 5, NULL, '2026-01-01')",
-            (dir_id, kw_a, kw_b, LLM_PROMOTED_SOURCE),
+            (scope_id, kw_a, kw_b, LLM_PROMOTED_SOURCE),
         )
         conn.commit()
     finally:
         conn.close()
 
     # Rebuild: chunk_cooccur is replaced, llm_promoted preserved.
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -272,11 +272,11 @@ def test_v1_counts_not_touched_by_build(sidecar_env, tmp_path):
     from grga.deep_search import KeywordLibrary
 
     lib = KeywordLibrary(db)
-    lib.add_keywords("global", str(scope), ["alpha", "beta"])
+    lib.add_keywords("global", "test-scope", ["alpha", "beta"])
     lib.commit()
     lib.close()
 
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -542,7 +542,7 @@ def test_build_populates_auto_ngram_dict(sidecar_env, tmp_path):
     )
     (scope / "santi.txt").write_text(body * 3, encoding="utf-8")
     db = tmp_path / "graph.db"
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=2)
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=2)
     assert stats.ngram_iters_run == 2
     assert stats.ngram_phrases_written >= 1
 
@@ -567,7 +567,7 @@ def test_build_hybrid_keeps_code_identifiers(sidecar_env, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -583,7 +583,7 @@ def test_build_ngram_iters_respected(sidecar_env, tmp_path):
     scope.mkdir()
     (scope / "a.txt").write_text("hello world\n", encoding="utf-8")
     db = tmp_path / "graph.db"
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=3)
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=3)
     assert stats.ngram_iters_run == 3
 
 
@@ -605,31 +605,31 @@ def test_build_populates_keyword_stats(sidecar_env, tmp_path):
     _write_scope(scope)
     db = tmp_path / "graph.db"
 
-    stats = build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     assert stats.keyword_stats_written > 0, \
         "build must populate keyword_stats"
 
     conn = connect(db)
     try:
         # keyword_stats derived aggregate should equal the hand-computed
-        # aggregate from keyword_docs (dir_id, kw_id):
+        # aggregate from keyword_docs (scope_id, kw_id):
         #   chunk_df = SUM(chunk_count)
         #   doc_df   = COUNT(*)
         #   total_occurrences = SUM(occurrence_count)
         expected = {
             (int(row[0]), int(row[1])): (int(row[2]), int(row[3]), int(row[4]))
             for row in conn.execute(
-                "SELECT dir_id, kw_id, "
+                "SELECT scope_id, kw_id, "
                 "       COALESCE(SUM(chunk_count), 0), COUNT(*), "
                 "       COALESCE(SUM(occurrence_count), 0) "
                 "FROM keyword_docs "
-                "GROUP BY dir_id, kw_id"
+                "GROUP BY scope_id, kw_id"
             )
         }
         got = {
             (int(row[0]), int(row[1])): (int(row[2]), int(row[3]), int(row[4]))
             for row in conn.execute(
-                "SELECT dir_id, kw_id, chunk_df, doc_df, total_occurrences "
+                "SELECT scope_id, kw_id, chunk_df, doc_df, total_occurrences "
                 "FROM keyword_stats"
             )
         }
@@ -637,9 +637,9 @@ def test_build_populates_keyword_stats(sidecar_env, tmp_path):
 
         # scope_stats.n_chunks = SUM(docs.n_chunks_with_kw) per scope.
         for row in conn.execute(
-            "SELECT s.dir_id, s.n_chunks, "
+            "SELECT s.scope_id, s.n_chunks, "
             "       (SELECT COALESCE(SUM(d.n_chunks_with_kw), 0) FROM docs d "
-            "        WHERE d.dir_id = s.dir_id) "
+            "        WHERE d.scope_id = s.scope_id) "
             "FROM scope_stats s"
         ):
             assert row[1] == row[2], \
@@ -662,8 +662,7 @@ def test_build_write_time_gate_default_filters_low_score_pairs(sidecar_env, tmp_
 
     # Explicit production-default settings.
     from grga.graph.schema import BUILD_MIN_NPMI, BUILD_MIN_PAIR_COUNT
-    stats = build_graph_index(
-        scope, db_path=db,
+    stats = build_graph_index("test-scope", directory=scope, db_path=db,
         min_pair_count=BUILD_MIN_PAIR_COUNT,
         min_npmi=BUILD_MIN_NPMI,
     )
@@ -699,8 +698,7 @@ def test_build_min_npmi_opt_out(sidecar_env, tmp_path):
     lines = ["alpha beta seen"] * 6 + ["alpha solo"]
     (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
     db = tmp_path / "graph.db"
-    stats = build_graph_index(
-        scope, db_path=db, min_pair_count=5, min_npmi=0.0,
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=5, min_npmi=0.0,
     )
     assert stats.pairs_written > 0, "min_npmi=0.0 must admit pairs with defined npmi"
 
@@ -719,8 +717,7 @@ def test_build_min_pair_count_opt_out(sidecar_env, tmp_path):
         "alpha beta\nalpha solo\ngamma delta\ngamma solo\n", encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    stats = build_graph_index(
-        scope, db_path=db, min_pair_count=1, min_npmi=0.0,
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0,
     )
     # (alpha,beta) co=1 df_a=2 df_b=1 → independent; (gamma,delta) likewise.
     # (alpha,solo)/(gamma,solo) also independent. Assert the two concept
@@ -777,7 +774,7 @@ def test_independence_gate_drops_fully_glued_pairs(sidecar_env, tmp_path):
         "\n".join(["alpha beta"] * 5), encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -810,7 +807,7 @@ def test_independence_gate_keeps_one_way_attachment(sidecar_env, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -848,7 +845,7 @@ def test_adaptive_min_pair_count_none_resolves_from_n_chunks(sidecar_env, tmp_pa
     (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
     db = tmp_path / "graph.db"
     # Explicit None to exercise the sentinel path.
-    build_graph_index(scope, db_path=db, min_pair_count=None, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=None, min_npmi=0.0)
 
     conn = connect(db)
     try:
@@ -908,7 +905,7 @@ def test_independence_gate_survives_incremental_grow_only_accumulation(
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, mode="rebuild")
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild")
 
     # Sanity: build 1 admits the pair.
     def _pair_row():
@@ -938,7 +935,7 @@ def test_independence_gate_survives_incremental_grow_only_accumulation(
         "\n".join(["alpha beta v2"] * 4 + ["alpha only v2"] * 1),
         encoding="utf-8",
     )
-    build_graph_index(scope, db_path=db, mode="build", refresh_ngram="never")
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="build", refresh_ngram="never")
 
     co_after_build2 = _pair_row()
     # Under strict Gate 1 the pair survives despite the grow-only skew

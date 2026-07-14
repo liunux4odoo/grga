@@ -1,8 +1,8 @@
-"""``related()`` API — L2 graph neighbours (chunk-level, v8 keyword-primary).
+"""``related()`` API — L2 graph neighbours (v10 scope-aware).
 
 Two entry points, both read-only, deterministic, LLM-free:
 
-* :func:`related_keywords` — v8 graph-expansion primitive. Takes seed
+* :func:`related_keywords` — graph-expansion primitive. Takes seed
   keywords, returns a :class:`RelatedKeywordsResult` bundling the flat
   candidate stream (``results``: ``kw``/``npmi``/``cooccur``/``chunk_df``/
   ``via_seed``/``source``) with a per-seed vocabulary probe
@@ -10,14 +10,15 @@ Two entry points, both read-only, deterministic, LLM-free:
   full-graph load. Multi-seed queries expand each seed independently
   without fusion (caller decides). The probe disambiguates the "empty
   results" case: unknown seed vs. isolated seed.
-  Design: ``docs/design/plan-2026-07-12-keyword-primary.md`` §4.
+
+  v10 (plan-2026-07-14): the ``directory`` scope filter became a
+  **multi-select** ``scopes`` list of logical names. ``scope_id IN (...)``
+  keeps the composite-PK index usable per scope; ``None`` = cross-scope
+  union. See design §4.
 
 * :func:`related` — legacy doc-oriented API, now supports only
   ``mode="heading"`` (documents that share a Markdown ``heading_path``
-  with a seed-containing document). The pre-v8 ``mode="graph"`` and
-  ``mode="dir"`` were removed in Phase 3b-2 — call ``related_keywords``
-  for graph expansion, or ``grga search --json`` for directory-level
-  aggregation via a Unix pipeline.
+  with a seed-containing document).
 """
 from __future__ import annotations
 
@@ -27,7 +28,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from grga.graph.schema import connect, ensure_schema, CHUNK_COOCCUR_SOURCE
+from grga.graph.schema import (
+    connect,
+    ensure_schema,
+    resolve_scope_name,
+    CHUNK_COOCCUR_SOURCE,
+)
 
 VALID_MODES = ("heading",)
 DEFAULT_LIMIT = 20
@@ -54,17 +60,16 @@ def _default_min_npmi() -> float:
 class Related:
     """A single related document with provenance.
 
-    ``doc_path`` is relative to its indexed scope. In cross-scope results
-    the same relative path can occur in several scopes, so ``directory``
-    disambiguates: it holds the resolved scope root the document was
-    indexed under (``None`` when unknown / not tracked). ``qualified_path``
-    joins the two into a filesystem-resolvable path.
+    ``doc_path`` is relative to whatever directory the scope was
+    ``grga index build``-ed under on this machine. ``scope`` is the
+    logical scope name (v10) — the caller looks up
+    ``scope_directories`` when it needs to resolve to a filesystem path
+    for ripgrep follow-up.
 
-    v8/v9 note: post ``mode='graph'`` removal (Phase 3b-2), the only
-    remaining consumer of this class is ``mode='heading'`` (matched
-    heading paths shared with the seed docs). The pre-v8 per-doc
-    ``keyword_contributions`` block is gone — graph expansion now returns
-    :class:`RelatedKeyword` records directly.
+    v10 note: pre-v10 ``directory`` field (an absolute path) is renamed
+    to ``scope`` (logical name). The pre-v10 ``qualified_path`` helper
+    is gone — resolve the physical path via ``grga.graph.ids
+    .IdInterner.list_directories(scope_id)`` when needed.
     """
 
     doc_path: str
@@ -72,14 +77,7 @@ class Related:
     mode: str
     reason: str = ""
     keywords: List[str] = field(default_factory=list)
-    directory: Optional[str] = None
-
-    @property
-    def qualified_path(self) -> str:
-        """Scope-qualified path (``<directory>/<doc_path>`` when scoped)."""
-        if self.directory:
-            return str(Path(self.directory) / self.doc_path)
-        return self.doc_path
+    scope: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -88,8 +86,7 @@ class Related:
             "mode": self.mode,
             "reason": self.reason,
             "keywords": list(self.keywords),
-            "directory": self.directory,
-            "qualified_path": self.qualified_path,
+            "scope": self.scope,
         }
 
 
@@ -97,10 +94,39 @@ def _fold(term: str) -> str:
     return term.casefold().strip()
 
 
-def _resolve_directory(directory: Optional[Union[str, Path]]) -> Optional[str]:
-    if directory is None:
+def _normalise_scopes(
+    scopes: Optional[Sequence[str]],
+) -> Optional[List[str]]:
+    """Normalise a user-supplied scope list to unique, valid names.
+
+    * ``None`` -> ``None`` (no scope filter, cross-scope union).
+    * empty sequence -> ``None`` (same as above; treat empty as "all").
+    * a sequence containing only empty/whitespace items -> ``None``
+      (documented "empty → all" fallback; empty items are dropped, not
+      an error — read-side API callers that forward an unset field must
+      not hit a ``ValueError``).
+    * one or more real names -> validated + deduped list, order preserved.
+
+    Empty/whitespace *items* inside the list are silently skipped rather
+    than raising, so ``related_keywords(scopes=[""])`` behaves like
+    ``scopes=None``. See plan-2026-07-14 §4.
+    """
+    if scopes is None:
         return None
-    return str(Path(directory).expanduser().resolve())
+    seen: set = set()
+    out: List[str] = []
+    for name in scopes:
+        # Drop empty/whitespace items before the strict normaliser so a
+        # forwarded blank field degrades to "all scopes" instead of an
+        # uncaught ValueError from resolve_scope_name.
+        if name is None or not str(name).strip():
+            continue
+        resolved = resolve_scope_name(name)
+        if resolved is None or resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    return out or None
 
 
 # ---------------------------------------------------------------------------
@@ -218,33 +244,26 @@ def related_keywords(
     limit_per_seed: int = DEFAULT_LIMIT_PER_SEED,
     min_npmi: Optional[float] = None,
     db_path: Union[str, Path, None] = None,
-    directory: Optional[Union[str, Path]] = None,
+    scopes: Optional[Sequence[str]] = None,
 ) -> RelatedKeywordsResult:
-    """v8 graph-expansion primitive: seeds → candidate keywords + evidence.
+    """Graph-expansion primitive: seeds → candidate keywords + evidence.
 
     For each seed keyword, load its top ``limit_per_seed`` neighbours from
     ``keyword_pairs`` (ordered by stored ``npmi DESC``), tagged with which
     seed they came from. **No PPR, no full-graph load, no adjacency cache.**
-    The index ``(dir_id, kw_a_id, npmi DESC)`` + its mirror on ``kw_b_id``
-    turn the double lookup into ``O(limit_per_seed)`` per seed, giving
-    sub-millisecond hot-path even on hub seeds (fanout 1500+).
+    The index ``(scope_id, kw_a_id, npmi DESC)`` + its mirror on ``kw_b_id``
+    turn the double lookup into ``O(limit_per_seed)`` per seed.
 
     Semantics:
 
     * ``min_npmi`` may only *tighten* the write-time floor
-      (:data:`BUILD_MIN_NPMI` = 0.2). Passing a lower value has no effect —
-      pairs below the write floor were never memorised (design §3.3).
-    * Multi-seed queries return per-seed rows without fusion. Duplicate
-      candidates (same ``kw`` reached from multiple seeds) appear multiple
-      times with different ``via_seed`` values; caller decides how to
-      aggregate.
-    * ``directory`` is a per-scope filter: only pairs whose ``dir_id``
-      matches the resolved scope are returned. ``None`` = no filter
-      (cross-scope search).
-    * ``resolved_seeds`` reports, for each distinct queried seed, whether it
-      exists in the vocabulary (``in_index``). This is the multi-seed probe:
-      it separates an unknown seed from a known-but-isolated one when
-      ``results`` is empty. See :class:`SeedResolution`.
+      (:data:`BUILD_MIN_NPMI` = 0.2). Passing a lower value has no effect.
+    * Multi-seed queries return per-seed rows without fusion.
+    * ``scopes`` is a **multi-select** per-scope filter (v10): only pairs
+      whose ``scope_id`` is in the resolved set are returned. ``None`` (or
+      empty) = no filter (cross-scope union). See plan-2026-07-14 §4.
+    * ``resolved_seeds`` reports, for each distinct queried seed, whether
+      it exists in the vocabulary (``in_index``).
 
     Args:
         seeds:          query seed keywords (casefold-normalised internally).
@@ -253,13 +272,13 @@ def related_keywords(
                         resolves to :data:`DEFAULT_MIN_NPMI` or
                         ``GRGA_PPR_MIN_NPMI``.
         db_path:        SQLite path (defaults to shared deep-search DB).
-        directory:      optional scope filter (resolved absolute path).
+        scopes:         optional multi-select scope-name filter.
 
     Returns:
         A :class:`RelatedKeywordsResult` whose ``results`` is the flat list
         of :class:`RelatedKeyword`, sorted by ``(via_seed, -npmi, kw)``, and
         whose ``resolved_seeds`` reports per-seed vocabulary membership in
-        first-seen input order. ``results`` is empty when no seed resolves.
+        first-seen input order.
     """
     seed_folded: List[str] = []
     seen_seeds: set = set()
@@ -273,7 +292,7 @@ def related_keywords(
     from grga.deep_search import DEFAULT_DB_PATH
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
-    scope_key = _resolve_directory(directory)
+    scope_names = _normalise_scopes(scopes)
     effective_min_npmi = (
         _default_min_npmi() if min_npmi is None else float(min_npmi)
     )
@@ -285,7 +304,7 @@ def related_keywords(
             seed_folded,
             limit_per_seed=limit_per_seed,
             min_npmi=effective_min_npmi,
-            scope_key=scope_key,
+            scope_names=scope_names,
         )
     finally:
         conn.close()
@@ -297,13 +316,14 @@ def _related_keywords_impl(
     *,
     limit_per_seed: int,
     min_npmi: float,
-    scope_key: Optional[str],
+    scope_names: Optional[Sequence[str]],
 ) -> RelatedKeywordsResult:
     """Core query path for :func:`related_keywords`.
 
-    Split out so tests can hand-inject a connection without going through
-    the DB-path resolver. The DB schema must already be at v8. ``seeds`` is
+    Split out so tests can hand-inject a connection. ``seeds`` is
     expected casefold-normalised and de-duplicated (order preserved).
+    ``scope_names`` is a validated list of logical scope names or
+    ``None`` (cross-scope).
     """
     # Resolve seeds → kw_ids first (scope-independent) so the per-seed
     # ``resolved_seeds`` probe is populated even when the scope is unknown.
@@ -319,18 +339,21 @@ def _related_keywords_impl(
         SeedResolution(seed=s, in_index=s in text_to_id) for s in seeds
     ]
 
-    # Resolve dir_id filter (if any). Unknown scope → zero candidates, but
-    # the vocabulary probe above still stands.
-    dir_id: Optional[int] = None
-    if scope_key is not None:
-        row = conn.execute(
-            "SELECT id FROM directories WHERE path = ?", (scope_key,)
-        ).fetchone()
-        if row is None:
+    # Resolve scope_id filter (if any). Unknown scopes are dropped; if a
+    # non-empty scope list resolves to zero known scopes, no candidate
+    # can match — return early (the vocabulary probe above still stands).
+    scope_ids: List[int] = []
+    if scope_names is not None:
+        s_placeholders = ",".join("?" for _ in scope_names)
+        rows = conn.execute(
+            f"SELECT id FROM scopes WHERE name IN ({s_placeholders})",
+            list(scope_names),
+        ).fetchall()
+        scope_ids = [int(r[0]) for r in rows]
+        if not scope_ids:
             return RelatedKeywordsResult(
                 results=[], resolved_seeds=resolved_seeds
             )
-        dir_id = int(row[0])
 
     seed_ids: List[Tuple[int, str]] = []
     for s in seeds:
@@ -339,52 +362,63 @@ def _related_keywords_impl(
     if not seed_ids:
         return RelatedKeywordsResult(results=[], resolved_seeds=resolved_seeds)
 
-    dir_filter = ""
-    dir_params: List = []
-    if dir_id is not None:
-        dir_filter = "dir_id = ? AND "
-        dir_params = [dir_id]
-    # TODO(perf): cross-scope path (dir_id is None) currently full-scans
-    # idx_keyword_pairs_b because the (dir_id, kw_a_id, npmi DESC) composite
-    # cannot be used without a dir_id prefix. Warm cost ~700 ms on prod DB
-    # vs ~14 ms with a scope. Acceptable for the rare --cross-scope case,
-    # but worth revisiting (iterate known dir_ids and UNION, or add a
-    # non-prefixed npmi index for cross-scope) if it becomes a hot path.
+    # Scope-filter shape. The composite index
+    # ``idx_kp_a_npmi (scope_id, kw_a_id, npmi DESC)`` supports an
+    # ordered-LIMIT walk ONLY when the leading column is an equality
+    # predicate. ``scope_id IN (a, b, ...)`` forces SQLite to materialise
+    # every matching row across the listed scopes into a temp b-tree and
+    # sort before applying LIMIT — losing the sub-millisecond fast path
+    # for the very common single-scope call. Therefore:
+    #
+    #   * len == 1  → ``scope_id = ?`` (index-ordered LIMIT preserved)
+    #   * len >= 2  → ``scope_id IN (...)`` (accepts the temp-sort cost)
+    #   * scope_ids empty (cross-scope) → no clause (full-index scan)
+    scope_filter = ""
+    scope_params: List = []
+    if len(scope_ids) == 1:
+        scope_filter = "scope_id = ? AND "
+        scope_params = [scope_ids[0]]
+    elif len(scope_ids) >= 2:
+        sp = ",".join("?" for _ in scope_ids)
+        scope_filter = f"scope_id IN ({sp}) AND "
+        scope_params = list(scope_ids)
+    # TODO(perf): cross-scope path (scope_names is None) full-scans
+    # idx_kp_b_npmi because the (scope_id, kw_a_id, npmi DESC) composite
+    # cannot be used without a scope_id prefix. Acceptable for the rare
+    # cross-scope case (see plan-2026-07-12-related-perf).
 
     seen_kw_ids: set = set()
     per_seed_rows: List[Tuple[str, List[Tuple[int, str, float, float]]]] = []
 
     for (seed_id, seed_text) in seed_ids:
-        # chunk_cooccur a-side + b-side; each ORDER BY npmi DESC LIMIT
-        # walks ``idx_kp_a_npmi`` / ``idx_kp_b_npmi`` in index order.
         rows_a = conn.execute(
             f"SELECT kw_b_id, npmi, cooccur_count, source "
             f"FROM keyword_pairs "
-            f"WHERE {dir_filter}kw_a_id = ? AND source = ? AND npmi >= ? "
+            f"WHERE {scope_filter}kw_a_id = ? AND source = ? AND npmi >= ? "
             f"ORDER BY npmi DESC LIMIT ?",
-            (*dir_params, seed_id, CHUNK_COOCCUR_SOURCE,
+            (*scope_params, seed_id, CHUNK_COOCCUR_SOURCE,
              float(min_npmi), int(limit_per_seed)),
         ).fetchall()
         rows_b = conn.execute(
             f"SELECT kw_a_id, npmi, cooccur_count, source "
             f"FROM keyword_pairs "
-            f"WHERE {dir_filter}kw_b_id = ? AND source = ? AND npmi >= ? "
+            f"WHERE {scope_filter}kw_b_id = ? AND source = ? AND npmi >= ? "
             f"ORDER BY npmi DESC LIMIT ?",
-            (*dir_params, seed_id, CHUNK_COOCCUR_SOURCE,
+            (*scope_params, seed_id, CHUNK_COOCCUR_SOURCE,
              float(min_npmi), int(limit_per_seed)),
         ).fetchall()
         # llm_promoted: no npmi filter (may be NULL).
         rows_llm_a = conn.execute(
             f"SELECT kw_b_id, npmi, cooccur_count, source "
             f"FROM keyword_pairs "
-            f"WHERE {dir_filter}kw_a_id = ? AND source = ?",
-            (*dir_params, seed_id, "llm_promoted"),
+            f"WHERE {scope_filter}kw_a_id = ? AND source = ?",
+            (*scope_params, seed_id, "llm_promoted"),
         ).fetchall()
         rows_llm_b = conn.execute(
             f"SELECT kw_a_id, npmi, cooccur_count, source "
             f"FROM keyword_pairs "
-            f"WHERE {dir_filter}kw_b_id = ? AND source = ?",
-            (*dir_params, seed_id, "llm_promoted"),
+            f"WHERE {scope_filter}kw_b_id = ? AND source = ?",
+            (*scope_params, seed_id, "llm_promoted"),
         ).fetchall()
 
         # Merge + dedupe within one seed. A pair with the same (kw_a, kw_b)
@@ -417,7 +451,8 @@ def _related_keywords_impl(
 
     # Batched translate: nbr kw_id → text + chunk_df. Chunk-partitioned to
     # dodge SQLITE_MAX_VARIABLE_NUMBER. ``keyword_stats`` rows are per-scope;
-    # cross-scope (dir_id is None) sums across scopes.
+    # a multi-scope (or cross-scope) query sums chunk_df across the selected
+    # scopes (hub-word signal only; not a ranking input — plan-2026-07-14 §4.2).
     kw_text: Dict[int, str] = {}
     chunk_df_map: Dict[int, int] = {}
     id_list = list(seen_kw_ids)
@@ -429,13 +464,15 @@ def _related_keywords_impl(
             f"SELECT id, kw FROM keywords WHERE id IN ({ph})", piece
         ):
             kw_text[int(r[0])] = str(r[1])
-        if dir_id is not None:
+        if scope_ids:
+            sp = ",".join("?" for _ in scope_ids)
             for r in conn.execute(
-                f"SELECT kw_id, chunk_df FROM keyword_stats "
-                f"WHERE kw_id IN ({ph}) AND dir_id = ?",
-                (*piece, dir_id),
+                f"SELECT kw_id, SUM(chunk_df) FROM keyword_stats "
+                f"WHERE kw_id IN ({ph}) AND scope_id IN ({sp}) "
+                f"GROUP BY kw_id",
+                (*piece, *scope_ids),
             ):
-                chunk_df_map[int(r[0])] = int(r[1])
+                chunk_df_map[int(r[0])] = int(r[1] or 0)
         else:
             for r in conn.execute(
                 f"SELECT kw_id, SUM(chunk_df) FROM keyword_stats "
@@ -477,41 +514,38 @@ def related(
     mode: str = "heading",
     limit: int = DEFAULT_LIMIT,
     db_path: Union[str, Path, None] = None,
-    directory: Optional[Union[str, Path]] = None,
+    scope: Optional[str] = None,
     same_scope: bool = False,
 ) -> List[Related]:
     """Return documents related to ``keywords`` under the chosen ``mode``.
 
-    v8 keyword-primary (Phase 3b-2): the doc-returning modes are now just
-    ``heading``. ``graph`` and ``dir`` are removed; graph expansion returns
-    keywords, not docs — call :func:`related_keywords` for that. Design:
-    ``docs/design/plan-2026-07-12-keyword-primary.md`` §4.
+    v10: the single-scope filter is a logical scope name. The
+    doc-returning modes are now just ``heading``. ``graph`` and ``dir``
+    are removed; graph expansion returns keywords, not docs — call
+    :func:`related_keywords` for that.
 
     Args:
         keywords: seed keywords (query terms).
         mode: currently only ``heading`` is supported.
         limit: maximum number of results.
         db_path: SQLite path (defaults to shared deep-search DB).
-        directory: optional scope filter for seed lookup.
-        same_scope: restrict heading matches to ``directory`` too (reverts
-            to pre-v2.2 default).
+        scope: optional scope-name filter for seed lookup.
+        same_scope: restrict heading matches to ``scope`` too.
 
     Raises:
-        ValueError: if ``mode`` is not ``heading``. ``graph`` and ``dir``
-            surface an explicit hint pointing at :func:`related_keywords`.
+        ValueError: if ``mode`` is not ``heading``.
     """
     if mode == "graph":
         raise ValueError(
-            "mode='graph' was removed in v8 keyword-primary (Phase 3b-2). "
+            "mode='graph' was removed in v8 keyword-primary. "
             "Use grga.related.related_keywords() to expand seeds to "
-            "candidate keywords + npmi/cooccur evidence. See "
-            "docs/design/plan-2026-07-12-keyword-primary.md §4."
+            "candidate keywords + npmi/cooccur evidence."
         )
     if mode == "dir":
         raise ValueError(
-            "mode='dir' was removed in v8 keyword-primary (Phase 3b-2). "
+            "mode='dir' was removed in v8 keyword-primary. "
             "Use `grga search --json` to enumerate seed-containing docs, "
-            "then aggregate by directory client-side (Unix pipeline)."
+            "then aggregate by directory client-side."
         )
     if mode not in VALID_MODES:
         raise ValueError(
@@ -525,14 +559,14 @@ def related(
     from grga.deep_search import DEFAULT_DB_PATH
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
-    scope_key = _resolve_directory(directory)
+    scope_name = resolve_scope_name(scope)
     conn = connect(target_db)
     try:
         ensure_schema(conn)
         return _related_heading(
             conn, seeds, limit,
-            seed_scope_key=scope_key,
-            match_scope_key=scope_key if same_scope else None,
+            seed_scope_name=scope_name,
+            match_scope_name=scope_name if same_scope else None,
         )
     finally:
         conn.close()
@@ -546,39 +580,36 @@ def related(
 def _docs_for_keywords_chunks(
     conn: sqlite3.Connection,
     keywords: Sequence[str],
-    scope_key: Optional[str],
+    scope_name: Optional[str],
 ) -> Dict[Tuple[str, str], Tuple[float, set]]:
-    """Aggregate ``keyword_docs`` to ``{(directory, doc_path): (weight, kws)}``.
+    """Aggregate ``keyword_docs`` to ``{(scope, doc_path): (weight, kws)}``.
 
     ``weight`` is the summed ``occurrence_count`` across the seed keywords
     for each doc. ``kws`` is the set of seed keywords that hit this doc.
-
-    v9 note: reads the doc-level inverted index ``keyword_docs``. The
-    pre-v9 ``keyword_chunks`` self-join is gone; each ``keyword_docs`` row
-    already carries the per-doc occurrence total, so the lookup is a
-    single indexed join.
+    v10: the tuple key's first element is the logical scope name (not
+    a filesystem path).
     """
     if not keywords:
         return {}
     placeholders = ",".join("?" for _ in keywords)
     params: List = list(keywords)
     where = f"k.kw IN ({placeholders})"
-    if scope_key is not None:
-        where += " AND dir.path = ?"
-        params.append(scope_key)
+    if scope_name is not None:
+        where += " AND s.name = ?"
+        params.append(scope_name)
     rows = conn.execute(
-        f"SELECT dir.path AS directory, k.kw AS keyword, d.doc_path AS doc_path, "
+        f"SELECT s.name AS scope, k.kw AS keyword, d.doc_path AS doc_path, "
         f"kd.occurrence_count AS total, kd.chunk_count AS chunks "
         f"FROM keyword_docs kd "
         f"JOIN keywords k ON k.id = kd.kw_id "
         f"JOIN docs d ON d.id = kd.doc_id "
-        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"JOIN scopes s ON s.id = d.scope_id "
         f"WHERE {where}",
         params,
     ).fetchall()
     out: Dict[Tuple[str, str], Tuple[float, set]] = {}
     for row in rows:
-        key = (row["directory"], row["doc_path"])
+        key = (row["scope"], row["doc_path"])
         prev_w, prev_kws = out.get(key, (0.0, set()))
         prev_kws = set(prev_kws)
         prev_kws.add(row["keyword"])
@@ -598,26 +629,26 @@ def _related_heading(
     seeds: Sequence[str],
     limit: int,
     *,
-    seed_scope_key: Optional[str],
-    match_scope_key: Optional[str],
+    seed_scope_name: Optional[str],
+    match_scope_name: Optional[str],
 ) -> List[Related]:
-    seed_docs = _docs_for_keywords_chunks(conn, seeds, seed_scope_key)
+    seed_docs = _docs_for_keywords_chunks(conn, seeds, seed_scope_name)
     if not seed_docs:
         return []
     seed_doc_set: set = set(seed_docs.keys())
-    seed_directories = {directory for directory, _ in seed_doc_set}
+    seed_scopes = {scope for scope, _ in seed_doc_set}
 
     seed_doc_paths = sorted({doc for _, doc in seed_doc_set})
     doc_ph = ",".join("?" for _ in seed_doc_paths)
-    dir_ph = ",".join("?" for _ in seed_directories)
-    where = f"d.doc_path IN ({doc_ph}) AND dir.path IN ({dir_ph})"
-    params: List = [*seed_doc_paths, *sorted(seed_directories)]
+    scope_ph = ",".join("?" for _ in seed_scopes)
+    where = f"d.doc_path IN ({doc_ph}) AND s.name IN ({scope_ph})"
+    params: List = [*seed_doc_paths, *sorted(seed_scopes)]
     rows = conn.execute(
-        f"SELECT DISTINCT dir.path AS directory, d.doc_path AS doc_path, "
+        f"SELECT DISTINCT s.name AS scope, d.doc_path AS doc_path, "
         f"hd.heading_path AS heading_path "
         f"FROM heading_docs hd "
         f"JOIN docs d ON d.id = hd.doc_id "
-        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"JOIN scopes s ON s.id = d.scope_id "
         f"WHERE {where}",
         params,
     ).fetchall()
@@ -627,7 +658,7 @@ def _related_heading(
     seed_full_paths: List[str] = []
     seed_leaves: List[str] = []
     for row in rows:
-        if (row["directory"], row["doc_path"]) not in seed_doc_set:
+        if (row["scope"], row["doc_path"]) not in seed_doc_set:
             continue
         heading_path = row["heading_path"] or ""
         if not heading_path:
@@ -655,15 +686,15 @@ def _related_heading(
         params.extend(seed_leaves)
         params.extend([f"% > {leaf}" for leaf in seed_leaves])
     combined = " OR ".join(f"({part})" for part in where_parts)
-    if match_scope_key is not None:
-        combined = f"({combined}) AND dir.path = ?"
-        params.append(match_scope_key)
+    if match_scope_name is not None:
+        combined = f"({combined}) AND s.name = ?"
+        params.append(match_scope_name)
     rows = conn.execute(
-        f"SELECT dir.path AS directory, hd.heading_path AS heading_path, "
+        f"SELECT s.name AS scope, hd.heading_path AS heading_path, "
         f"d.doc_path AS doc_path "
         f"FROM heading_docs hd "
         f"JOIN docs d ON d.id = hd.doc_id "
-        f"JOIN directories dir ON dir.id = d.dir_id "
+        f"JOIN scopes s ON s.id = d.scope_id "
         f"WHERE {combined}",
         params,
     ).fetchall()
@@ -673,7 +704,7 @@ def _related_heading(
     doc_score: Dict[tuple, float] = {}
     doc_headings: Dict[tuple, set] = {}
     for row in rows:
-        key = (row["directory"], row["doc_path"])
+        key = (row["scope"], row["doc_path"])
         if key in seed_doc_set:
             continue
         heading_path = row["heading_path"] or ""
@@ -694,11 +725,11 @@ def _related_heading(
             score=score,
             mode="heading",
             reason="shared-heading",
-            keywords=sorted(doc_headings.get((directory, doc), set())),
-            directory=directory,
+            keywords=sorted(doc_headings.get((scope, doc), set())),
+            scope=scope,
         )
-        for (directory, doc), score in doc_score.items()
+        for (scope, doc), score in doc_score.items()
     ]
-    results.sort(key=lambda r: (-r.score, r.doc_path, r.directory or ""))
+    results.sort(key=lambda r: (-r.score, r.doc_path, r.scope or ""))
     return results[:limit]
 

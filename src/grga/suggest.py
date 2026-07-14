@@ -299,7 +299,7 @@ def suggest(
     hits: Sequence[Union[Hit, Mapping[str, Any]]] = (),
     *,
     intent: str = "expand",
-    directory: Optional[Union[str, Path]] = None,
+    scope: Optional[str] = None,
     max_hits: int = DEFAULT_MAX_HITS,
     snippet_chars: int = DEFAULT_SNIPPET_CHARS,
     record_votes_enabled: bool = True,
@@ -318,7 +318,9 @@ def suggest(
         hits: current hits (:class:`Hit` objects or v1 dicts). Empty for
             cold-start ``reformulate`` requests.
         intent: one of ``expand``, ``rerank``, ``reformulate``.
-        directory: scope key for vote recording (usually the search dir).
+        scope: logical scope name (v10) to attribute vote records to.
+            ``None`` disables vote recording (no scope to attribute
+            knowledge to).
         max_hits: cap on how many hits get shipped to the LLM.
         snippet_chars: per-hit text truncation before serialisation.
         record_votes_enabled: when ``True`` (default), emitted keyword pairs
@@ -398,7 +400,7 @@ def suggest(
                 if pairs:
                     pair_result = record_votes(
                         pairs,
-                        directory=directory,
+                        scope=scope,
                         weight=vote_weight,
                         conn=vote_conn,
                     )
@@ -406,7 +408,7 @@ def suggest(
                 if keywords and len(keywords) >= 2:
                     clique_result = record_votes_from_keywords(
                         keywords,
-                        directory=directory,
+                        scope=scope,
                         weight=vote_weight * 0.5,
                         conn=vote_conn,
                     )

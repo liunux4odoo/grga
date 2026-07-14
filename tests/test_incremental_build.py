@@ -120,16 +120,14 @@ def test_incremental_no_change(tmp_path, sidecar_env):
     db = tmp_path / "graph.db"
 
     # Initial rebuild.
-    s1 = build_graph_index(
-        scope, db_path=db, mode="rebuild", refresh_ngram="append",
+    s1 = build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild", refresh_ngram="append",
     )
     assert s1.mode == "rebuild"
     assert s1.docs_added == s1.files_indexed
     assert s1.pairs_written > 0
 
     # No changes on disk → everything classified as unchanged.
-    s2 = build_graph_index(
-        scope, db_path=db, mode="build", refresh_ngram="append",
+    s2 = build_graph_index("test-scope", directory=scope, db_path=db, mode="build", refresh_ngram="append",
     )
     assert s2.mode == "build"
     assert s2.docs_unchanged == 3
@@ -145,7 +143,7 @@ def test_incremental_modify_file(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     # Modify a.md substantially.
@@ -156,7 +154,7 @@ def test_incremental_modify_file(tmp_path, sidecar_env):
              (Path(scope / "a.md").stat().st_atime + 1,
               Path(scope / "a.md").stat().st_mtime + 2))
 
-    s = build_graph_index(scope, db_path=db, mode="build",
+    s = build_graph_index("test-scope", directory=scope, db_path=db, mode="build",
                           refresh_ngram="append")
     assert s.docs_updated == 1
     assert s.docs_unchanged == 2
@@ -166,9 +164,9 @@ def test_incremental_modify_file(tmp_path, sidecar_env):
     conn = connect(db)
     ensure_schema(conn)
     interner = IdInterner(conn)
-    scope_dir_id = interner.dir_id(str(scope.resolve()))
+    scope_dir_id = interner.scope_id("test-scope")
     row = conn.execute(
-        "SELECT id, n_chunks_with_kw FROM docs WHERE dir_id = ? AND doc_path = ?",
+        "SELECT id, n_chunks_with_kw FROM docs WHERE scope_id = ? AND doc_path = ?",
         (scope_dir_id, "a.md"),
     ).fetchone()
     doc_id = int(row[0])
@@ -185,7 +183,7 @@ def test_incremental_delete_file_cleans_index(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     # Snapshot doc rows before deletion.
@@ -196,7 +194,7 @@ def test_incremental_delete_file_cleans_index(tmp_path, sidecar_env):
 
     (scope / "b.txt").unlink()
 
-    s = build_graph_index(scope, db_path=db, mode="build",
+    s = build_graph_index("test-scope", directory=scope, db_path=db, mode="build",
                           refresh_ngram="append")
     assert s.docs_removed == 1
     assert s.docs_unchanged == 2
@@ -224,13 +222,13 @@ def test_incremental_add_new_file(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     (scope / "d.md").write_text(
         "# 新文档\n\n新词 出现 新词 出现\n" * 5, encoding="utf-8"
     )
-    s = build_graph_index(scope, db_path=db, mode="build",
+    s = build_graph_index("test-scope", directory=scope, db_path=db, mode="build",
                           refresh_ngram="append")
     assert s.docs_added == 1
     assert s.docs_unchanged == 3
@@ -240,7 +238,8 @@ def test_build_replace_refresh_ngram_is_rejected(tmp_path):
     """Combining mode='build' with refresh_ngram='replace' must raise."""
     with pytest.raises(ValueError, match="refresh_ngram='replace'"):
         build_graph_index(
-            tmp_path, mode="build", refresh_ngram="replace",
+            "test-scope", directory=tmp_path, mode="build",
+            refresh_ngram="replace",
         )
 
 
@@ -249,7 +248,7 @@ def test_metadata_only_updates_hash_row(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     # Touch b.txt but keep contents identical.
@@ -259,7 +258,7 @@ def test_metadata_only_updates_hash_row(tmp_path, sidecar_env):
     )
     os.utime(scope / "b.txt", (st.st_atime + 1, st.st_mtime + 5))
 
-    s = build_graph_index(scope, db_path=db, mode="build",
+    s = build_graph_index("test-scope", directory=scope, db_path=db, mode="build",
                           refresh_ngram="append")
     assert s.docs_metadata_only == 1
     assert s.docs_updated == 0
@@ -276,26 +275,26 @@ def test_forget_all_wipes_scope(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
-    fs = forget_scope_phrases(scope, db_path=db, all_phrases=True)
+    fs = forget_scope_phrases("test-scope", db_path=db, all_phrases=True)
     assert fs.all_wiped is True
 
     conn = connect(db)
     ensure_schema(conn)
     interner = IdInterner(conn)
-    scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
+    scope_dir_id = interner.scope_id_ro("test-scope")
     assert scope_dir_id is not None
     assert conn.execute(
-        "SELECT COUNT(*) FROM docs WHERE dir_id = ?", (scope_dir_id,)
+        "SELECT COUNT(*) FROM docs WHERE scope_id = ?", (scope_dir_id,)
     ).fetchone()[0] == 0
     assert conn.execute(
-        "SELECT COUNT(*) FROM keyword_pairs WHERE dir_id = ? AND source = ?",
+        "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     ).fetchone()[0] == 0
     assert conn.execute(
-        "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ?",
+        "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ?",
         (scope_dir_id,),
     ).fetchone()[0] == 0
     conn.close()
@@ -313,29 +312,29 @@ def test_forget_phrase_cascades_keyword_docs(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     # 罗辑 exists in both a.md and b.txt. Forget it.
-    fs = forget_scope_phrases(scope, db_path=db, phrases=["罗辑"])
+    fs = forget_scope_phrases("test-scope", db_path=db, phrases=["罗辑"])
     assert fs.keyword_chunks_removed > 0
 
     conn = connect(db)
     ensure_schema(conn)
     interner = IdInterner(conn)
-    scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
+    scope_dir_id = interner.scope_id_ro("test-scope")
     kw_id = interner.kw_id_ro("罗辑")
     # Either the keyword was interned but its rows are all gone, or the
     # keyword row itself never existed (short corpus, stopword-adjacent).
     if kw_id is not None:
         count = conn.execute(
             "SELECT COUNT(*) FROM keyword_docs "
-            "WHERE kw_id = ? AND dir_id = ?",
+            "WHERE kw_id = ? AND scope_id = ?",
             (kw_id, scope_dir_id),
         ).fetchone()[0]
         assert count == 0
         pair_count = conn.execute(
-            "SELECT COUNT(*) FROM keyword_pairs WHERE dir_id = ? "
+            "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? "
             "AND source = ? AND (kw_a_id = ? OR kw_b_id = ?)",
             (scope_dir_id, CHUNK_COOCCUR_SOURCE, kw_id, kw_id),
         ).fetchone()[0]
@@ -348,10 +347,10 @@ def test_forget_missing_phrase_is_noop(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
-    fs = forget_scope_phrases(scope, db_path=db, phrases=["not_a_real_phrase"])
+    fs = forget_scope_phrases("test-scope", db_path=db, phrases=["not_a_real_phrase"])
     assert "not_a_real_phrase" in fs.phrases_missing
     assert fs.keyword_chunks_removed == 0
 
@@ -371,7 +370,7 @@ def test_forget_phrase_case_insensitive_matches_stored_dict(tmp_path, sidecar_en
     )
 
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     # Seed a mixed-case dict entry directly (the small toy corpus does
@@ -381,28 +380,28 @@ def test_forget_phrase_case_insensitive_matches_stored_dict(tmp_path, sidecar_en
     conn = connect(db)
     ensure_schema(conn)
     interner = IdInterner(conn)
-    scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
+    scope_dir_id = interner.scope_id_ro("test-scope")
     conn.execute(
         "INSERT INTO auto_ngram_dict "
-        "(dir_id, phrase, n, count, npmi, branch_ent, updated_at) "
+        "(scope_id, phrase, n, count, npmi, branch_ent, updated_at) "
         "VALUES (?, 'PDC主席', 2, 5, 0.9, 2.0, '2026-07-11T00:00:00Z')",
         (scope_dir_id,),
     )
     conn.commit()
     assert conn.execute(
-        "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ? AND phrase = ?",
+        "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ? AND phrase = ?",
         (scope_dir_id, "PDC主席"),
     ).fetchone()[0] == 1
     conn.close()
 
     # Forget using lower-case input.
-    fs = forget_scope_phrases(scope, db_path=db, phrases=["pdc主席"])
+    fs = forget_scope_phrases("test-scope", db_path=db, phrases=["pdc主席"])
     assert fs.ngram_dict_removed == 1
     # The stored dict row must be gone.
     conn = connect(db)
     ensure_schema(conn)
     remaining = conn.execute(
-        "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ? AND phrase = ?",
+        "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ? AND phrase = ?",
         (scope_dir_id, "PDC主席"),
     ).fetchone()[0]
     conn.close()
@@ -425,7 +424,7 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     from grga.graph import build as build_mod
@@ -438,7 +437,7 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
 
     monkeypatch.setattr(build_mod, "_finalize_pairs_from_temp", _counting_finalize)
 
-    s = build_graph_index(scope, db_path=db, mode="build",
+    s = build_graph_index("test-scope", directory=scope, db_path=db, mode="build",
                           refresh_ngram="append")
     assert s.docs_unchanged == 3
     assert s.docs_updated == 0
@@ -451,9 +450,9 @@ def test_incremental_no_change_skips_pair_recompute(tmp_path, sidecar_env, monke
     conn = connect(db)
     ensure_schema(conn)
     interner = IdInterner(conn)
-    scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
+    scope_dir_id = interner.scope_id_ro("test-scope")
     db_pair_count = conn.execute(
-        "SELECT COUNT(*) FROM keyword_pairs WHERE dir_id = ? AND source = ?",
+        "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     ).fetchone()[0]
     conn.close()
@@ -476,7 +475,7 @@ def test_rebuild_docs_added_matches_scan(tmp_path, sidecar_env):
     (scope / "empty.txt").write_text("the and for the\n", encoding="utf-8")
 
     db = tmp_path / "graph.db"
-    s = build_graph_index(scope, db_path=db, mode="rebuild",
+    s = build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                           refresh_ngram="append")
     assert s.docs_added == s.files_scanned
     # Verify docs table actually got the empty-keyword file too.
@@ -491,16 +490,16 @@ def test_forget_on_missing_scope_is_noop(tmp_path):
     scope = tmp_path / "empty_scope"
     scope.mkdir()
     db = tmp_path / "graph.db"
-    fs = forget_scope_phrases(scope, db_path=db, all_phrases=True)
+    fs = forget_scope_phrases("test-scope", db_path=db, all_phrases=True)
     assert fs.all_wiped is True
     assert fs.ngram_dict_removed == 0
 
 
 def test_forget_requires_exactly_one_mode(tmp_path):
     with pytest.raises(ValueError, match="exactly one"):
-        forget_scope_phrases(tmp_path, phrases=["x"], all_phrases=True)
+        forget_scope_phrases("nonexistent-scope", phrases=["x"], all_phrases=True)
     with pytest.raises(ValueError, match="exactly one"):
-        forget_scope_phrases(tmp_path)
+        forget_scope_phrases("nonexistent-scope")
 
 
 # ---------------------------------------------------------------------------
@@ -524,28 +523,28 @@ def test_rebuild_is_idempotent(tmp_path, sidecar_env):
     _write_corpus(scope)
     db = tmp_path / "graph.db"
 
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     conn = connect(db)
     ensure_schema(conn)
     interner = IdInterner(conn)
-    scope_dir_id = interner.dir_id_ro(str(scope.resolve()))
+    scope_dir_id = interner.scope_id_ro("test-scope")
     before_rows = conn.execute(
         "SELECT kw_a_id, kw_b_id, cooccur_count, npmi FROM keyword_pairs "
-        "WHERE dir_id = ? AND source = ?",
+        "WHERE scope_id = ? AND source = ?",
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     ).fetchall()
     conn.close()
 
     # Second rebuild.
-    build_graph_index(scope, db_path=db, mode="rebuild",
+    build_graph_index("test-scope", directory=scope, db_path=db, mode="rebuild",
                       refresh_ngram="append")
 
     conn = connect(db)
     after_rows = conn.execute(
         "SELECT kw_a_id, kw_b_id, cooccur_count, npmi FROM keyword_pairs "
-        "WHERE dir_id = ? AND source = ?",
+        "WHERE scope_id = ? AND source = ?",
         (scope_dir_id, CHUNK_COOCCUR_SOURCE),
     ).fetchall()
     conn.close()
@@ -564,7 +563,7 @@ def test_legacy_replace_true_maps_to_rebuild_replace(tmp_path, sidecar_env):
     scope = tmp_path / "scope"
     _write_corpus(scope)
     db = tmp_path / "graph.db"
-    s = build_graph_index(scope, db_path=db, replace=True)
+    s = build_graph_index("test-scope", directory=scope, db_path=db, replace=True)
     assert s.mode == "rebuild"
     assert s.refresh_ngram == "replace"
 
@@ -573,6 +572,6 @@ def test_legacy_replace_false_maps_to_rebuild_append(tmp_path, sidecar_env):
     scope = tmp_path / "scope"
     _write_corpus(scope)
     db = tmp_path / "graph.db"
-    s = build_graph_index(scope, db_path=db, replace=False)
+    s = build_graph_index("test-scope", directory=scope, db_path=db, replace=False)
     assert s.mode == "rebuild"
     assert s.refresh_ngram == "append"

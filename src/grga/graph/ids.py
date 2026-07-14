@@ -1,130 +1,261 @@
-"""ID intern helper for the normalized (v5) graph schema.
+"""ID intern helper for the v10 graph schema (scope / directory split).
 
-The v5 layout replaces every occurrence of the ``directory`` / ``keyword`` /
-``doc_path`` TEXT columns in the business tables with integer foreign keys
-into three intern tables (``directories`` / ``keywords`` / ``docs``). All
-consumers must therefore translate:
+Every asset table in the v10 schema references three intern tables by
+integer id:
+
+* ``scopes.id``   — logical domain name (portable across machines)
+* ``keywords.id`` — casefold vocabulary (portable across machines)
+* ``docs.id``     — machine-local file identity (evidence layer)
+
+All consumers translate:
 
 * on the **way in**  — user-supplied strings (a search seed, a scope
-  filter, a doc path) into ids before hitting the business tables;
+  name, a doc path) into ids before hitting the business tables;
 * on the **way out** — ids in a result row back into strings before an
-  external contract (``--json`` output, trace-signals, GUI display).
+  external contract (``--json`` output, GUI display).
 
 :class:`IdInterner` batches both directions and caches lookups for the
-lifetime of one call. It never opens its own transaction; the caller owns
-the connection.
+lifetime of one call. It never opens its own transaction; the caller
+owns the connection.
+
+Design: ``docs/design/plan-2026-07-14-scope-directory-split.md`` §2, §3.
+The pre-v10 ``dir_*`` method surface was renamed to ``scope_*`` because
+the id now refers to a logical scope, not a filesystem directory. The
+``scope_directories`` binding table has its own dedicated helpers below
+(:meth:`bind_directory` / :meth:`list_directories`).
 """
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 class IdInterner:
-    """Get-or-insert + reverse-lookup helper backed by the v5 intern tables.
+    """Get-or-insert + reverse-lookup helper backed by the v10 intern tables.
 
     Instances are cheap: they hold three ``dict`` caches keyed on the
-    intern-table string (``directories.path`` / ``keywords.kw`` /
-    ``(dir_id, docs.doc_path)``). Lookups miss to a single-row SELECT
-    (or ``INSERT OR IGNORE`` + SELECT for get-or-insert variants).
-
-    All methods are safe to call inside an existing caller transaction.
+    intern-table string (``scopes.name`` / ``keywords.kw`` /
+    ``(scope_id, docs.doc_path)``). Cache misses do one SELECT (or
+    ``INSERT OR IGNORE`` + SELECT for get-or-insert variants). All
+    methods are safe to call inside an existing caller transaction.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
-        self._dir_id: Dict[str, int] = {}
-        self._dir_text: Dict[int, str] = {}
+        self._scope_id: Dict[str, int] = {}
+        self._scope_name: Dict[int, str] = {}
         self._kw_id: Dict[str, int] = {}
         self._kw_text: Dict[int, str] = {}
         self._doc_id: Dict[Tuple[int, str], int] = {}
         self._doc_text: Dict[int, Tuple[int, str]] = {}
 
-    # -- directories ----------------------------------------------------
+    # -- scopes ---------------------------------------------------------
 
-    def dir_id(self, path: str) -> int:
-        """Get-or-insert a directory row, return its id.
+    def scope_id(self, name: str, *, kind: Optional[str] = None) -> int:
+        """Get-or-insert a logical scope row, return its id.
 
-        ``path`` is stored verbatim; callers are expected to normalise via
-        :func:`grga.graph.schema.scope_write_key` (which produces ``''``
-        for "unscoped") before calling in.
+        ``name`` is stored verbatim; callers should normalise via
+        :func:`grga.graph.schema.resolve_scope_name` before calling in.
+        ``kind`` is written only on first insert; existing rows keep
+        their stored kind.
         """
-        hit = self._dir_id.get(path)
+        hit = self._scope_id.get(name)
         if hit is not None:
             return hit
+        now = _utc_now_iso()
         self._conn.execute(
-            "INSERT OR IGNORE INTO directories (path) VALUES (?)", (path,)
+            "INSERT OR IGNORE INTO scopes (name, kind, created_at) "
+            "VALUES (?, ?, ?)",
+            (name, kind, now),
         )
         row = self._conn.execute(
-            "SELECT id FROM directories WHERE path = ?", (path,)
+            "SELECT id FROM scopes WHERE name = ?", (name,)
         ).fetchone()
-        did = int(row[0])
-        self._dir_id[path] = did
-        self._dir_text[did] = path
-        return did
+        sid = int(row[0])
+        self._scope_id[name] = sid
+        self._scope_name[sid] = name
+        return sid
 
-    def dir_id_ro(self, path: Optional[str]) -> Optional[int]:
-        """Look up a directory id without inserting; return ``None`` if missing.
+    def scope_id_ro(self, name: Optional[str]) -> Optional[int]:
+        """Look up a scope id without inserting; ``None`` if missing.
 
-        ``path=None`` means "no scope filter" and returns ``None``.
+        ``name=None`` means "no scope filter" and returns ``None``.
         """
-        if path is None:
+        if name is None:
             return None
-        hit = self._dir_id.get(path)
+        hit = self._scope_id.get(name)
         if hit is not None:
             return hit
         row = self._conn.execute(
-            "SELECT id FROM directories WHERE path = ?", (path,)
+            "SELECT id FROM scopes WHERE name = ?", (name,)
         ).fetchone()
         if row is None:
             return None
-        did = int(row[0])
-        self._dir_id[path] = did
-        self._dir_text[did] = path
-        return did
+        sid = int(row[0])
+        self._scope_id[name] = sid
+        self._scope_name[sid] = name
+        return sid
 
-    def dir_text(self, dir_id: int) -> str:
-        """Reverse-lookup: return the ``path`` for a directory id.
+    def scope_ids_ro(self, names: Sequence[str]) -> Dict[str, int]:
+        """Batched read-only scope lookup: ``{name: id}`` for known scopes.
 
-        Raises :class:`KeyError` if the id is not in the DB (this indicates
-        a bug — every id in a query result should be resolvable).
+        Missing scopes are simply absent from the result. Used by
+        ``related --scope a --scope b`` to build a ``scope_id IN (...)``
+        filter in one query.
         """
-        hit = self._dir_text.get(dir_id)
-        if hit is not None:
-            return hit
-        row = self._conn.execute(
-            "SELECT path FROM directories WHERE id = ?", (dir_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"unknown dir_id: {dir_id}")
-        path = str(row[0])
-        self._dir_text[dir_id] = path
-        self._dir_id[path] = dir_id
-        return path
-
-    def dir_texts(self, dir_ids: Iterable[int]) -> Dict[int, str]:
-        """Batched :meth:`dir_text`. One SELECT resolves every missing id."""
-        need: List[int] = []
-        out: Dict[int, str] = {}
-        for did in dir_ids:
-            hit = self._dir_text.get(did)
+        uniq = [n for n in dict.fromkeys(names) if n]
+        if not uniq:
+            return {}
+        out: Dict[str, int] = {}
+        need: List[str] = []
+        for name in uniq:
+            hit = self._scope_id.get(name)
             if hit is not None:
-                out[did] = hit
+                out[name] = hit
             else:
-                need.append(did)
+                need.append(name)
         if need:
             placeholders = ",".join("?" for _ in need)
             rows = self._conn.execute(
-                f"SELECT id, path FROM directories WHERE id IN ({placeholders})",
+                f"SELECT id, name FROM scopes WHERE name IN ({placeholders})",
                 need,
             ).fetchall()
             for row in rows:
-                did = int(row[0])
-                path = str(row[1])
-                self._dir_text[did] = path
-                self._dir_id[path] = did
-                out[did] = path
+                sid = int(row[0])
+                name = str(row[1])
+                self._scope_id[name] = sid
+                self._scope_name[sid] = name
+                out[name] = sid
         return out
+
+    def scope_name(self, scope_id: int) -> str:
+        """Reverse-lookup: return the ``name`` for a scope id.
+
+        Raises :class:`KeyError` if the id is not in the DB (this
+        indicates a bug — every id in a query result should resolve).
+        """
+        hit = self._scope_name.get(scope_id)
+        if hit is not None:
+            return hit
+        row = self._conn.execute(
+            "SELECT name FROM scopes WHERE id = ?", (scope_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown scope_id: {scope_id}")
+        name = str(row[0])
+        self._scope_name[scope_id] = name
+        self._scope_id[name] = scope_id
+        return name
+
+    def scope_names(self, scope_ids: Iterable[int]) -> Dict[int, str]:
+        """Batched :meth:`scope_name`. One SELECT covers every missing id."""
+        need: List[int] = []
+        out: Dict[int, str] = {}
+        for sid in scope_ids:
+            hit = self._scope_name.get(sid)
+            if hit is not None:
+                out[sid] = hit
+            else:
+                need.append(sid)
+        if need:
+            placeholders = ",".join("?" for _ in need)
+            rows = self._conn.execute(
+                f"SELECT id, name FROM scopes WHERE id IN ({placeholders})",
+                need,
+            ).fetchall()
+            for row in rows:
+                sid = int(row[0])
+                name = str(row[1])
+                self._scope_name[sid] = name
+                self._scope_id[name] = sid
+                out[sid] = name
+        return out
+
+    # -- scope_directories (binding metadata, evidence layer) ----------
+    #
+    # These helpers manage the scope -> local-filesystem-path binding.
+    # The table is machine-local: it is NOT included in a knowledge
+    # pack, and the target machine rebuilds bindings via
+    # ``grga scope bind`` after import. A single scope may bind
+    # multiple directories on this machine (e.g. papers + notes both
+    # under ``physics-cn``).
+
+    def bind_directory(
+        self,
+        scope_id: int,
+        directory: str,
+        *,
+        role: Optional[str] = None,
+    ) -> None:
+        """Record (or refresh ``indexed_at`` on) a scope -> directory binding.
+
+        ``directory`` is stored verbatim; the caller is expected to
+        resolve/normalise the path before calling in (typically at CLI
+        parse time). Repeat calls with the same ``(scope_id, directory)``
+        pair are UPSERTs — ``indexed_at`` and ``role`` refresh.
+        """
+        now = _utc_now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO scope_directories (scope_id, directory, role, indexed_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(scope_id, directory) DO UPDATE SET
+                role = COALESCE(excluded.role, role),
+                indexed_at = excluded.indexed_at
+            """,
+            (scope_id, directory, role, now),
+        )
+
+    def list_directories(self, scope_id: int) -> List[Dict[str, object]]:
+        """Return every directory row bound to ``scope_id``.
+
+        Rows are ordered by ``indexed_at`` (most recent first) so
+        callers who want "the primary directory" can just take
+        ``[0]``. Empty list when the scope has no binding — that is a
+        knowledge-only scope (typical after ``grga index import``).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT directory, role, indexed_at
+            FROM scope_directories
+            WHERE scope_id = ?
+            ORDER BY indexed_at DESC NULLS LAST, directory ASC
+            """,
+            (scope_id,),
+        ).fetchall()
+        return [
+            {
+                "directory": str(row["directory"]),
+                "role": row["role"],
+                "indexed_at": row["indexed_at"],
+            }
+            for row in rows
+        ]
+
+    def unbind_directory(
+        self, scope_id: int, directory: Optional[str] = None
+    ) -> int:
+        """Remove a directory binding (or all bindings) for a scope.
+
+        Returns the number of rows deleted. Does not touch knowledge
+        (``keyword_pairs`` etc.). Evidence tables (``docs`` /
+        ``keyword_docs`` / ``heading_docs``) are also left alone —
+        unbind is metadata-only. Use ``grga index forget`` or
+        ``grga scope rm`` for actual data deletion.
+        """
+        if directory is None:
+            cur = self._conn.execute(
+                "DELETE FROM scope_directories WHERE scope_id = ?",
+                (scope_id,),
+            )
+        else:
+            cur = self._conn.execute(
+                "DELETE FROM scope_directories "
+                "WHERE scope_id = ? AND directory = ?",
+                (scope_id, directory),
+            )
+        return int(cur.rowcount or 0)
 
     # -- keywords -------------------------------------------------------
 
@@ -186,12 +317,13 @@ class IdInterner:
     def kw_ids(self, kws: Sequence[str]) -> Dict[str, int]:
         """Batched get-or-insert: return ``{kw: id}`` for every input keyword.
 
-        Hydrates the cache with one ``SELECT ... IN`` for the hits, then does
-        a single ``INSERT OR IGNORE ... VALUES`` for the misses and one more
-        ``SELECT ... IN`` to read their ids back. This replaces N per-keyword
-        ``INSERT + SELECT`` round-trips with 3 statements total, which matters
-        on the write hot path where a corpus can have hundreds of thousands
-        of distinct keywords (``kw`` is already casefolded by the caller).
+        Hydrates the cache with one ``SELECT ... IN`` for the hits, then
+        does a single ``INSERT OR IGNORE ... VALUES`` for the misses and
+        one more ``SELECT ... IN`` to read their ids back. This replaces
+        N per-keyword ``INSERT + SELECT`` round-trips with 3 statements
+        total — matters on the write hot path where a corpus produces
+        hundreds of thousands of distinct keywords (``kw`` is already
+        casefolded by the caller).
         """
         out = self.kw_ids_ro(kws)
         # De-dup misses while preserving determinism.
@@ -255,19 +387,19 @@ class IdInterner:
 
     # -- docs -----------------------------------------------------------
 
-    def doc_id(self, dir_id: int, doc_path: str) -> int:
+    def doc_id(self, scope_id: int, doc_path: str) -> int:
         """Get-or-insert a doc row, return its id."""
-        key = (dir_id, doc_path)
+        key = (scope_id, doc_path)
         hit = self._doc_id.get(key)
         if hit is not None:
             return hit
         self._conn.execute(
-            "INSERT OR IGNORE INTO docs (dir_id, doc_path) VALUES (?, ?)",
-            (dir_id, doc_path),
+            "INSERT OR IGNORE INTO docs (scope_id, doc_path) VALUES (?, ?)",
+            (scope_id, doc_path),
         )
         row = self._conn.execute(
-            "SELECT id FROM docs WHERE dir_id = ? AND doc_path = ?",
-            (dir_id, doc_path),
+            "SELECT id FROM docs WHERE scope_id = ? AND doc_path = ?",
+            (scope_id, doc_path),
         ).fetchone()
         did = int(row[0])
         self._doc_id[key] = did
@@ -275,12 +407,12 @@ class IdInterner:
         return did
 
     def doc_row(self, doc_id: int) -> Tuple[int, str]:
-        """Reverse-lookup doc: return ``(dir_id, doc_path)``."""
+        """Reverse-lookup doc: return ``(scope_id, doc_path)``."""
         hit = self._doc_text.get(doc_id)
         if hit is not None:
             return hit
         row = self._conn.execute(
-            "SELECT dir_id, doc_path FROM docs WHERE id = ?", (doc_id,)
+            "SELECT scope_id, doc_path FROM docs WHERE id = ?", (doc_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"unknown doc_id: {doc_id}")
@@ -290,7 +422,7 @@ class IdInterner:
         return key
 
     def doc_rows(self, doc_ids: Iterable[int]) -> Dict[int, Tuple[int, str]]:
-        """Batched doc reverse-lookup: ``{doc_id: (dir_id, doc_path)}``."""
+        """Batched doc reverse-lookup: ``{doc_id: (scope_id, doc_path)}``."""
         need: List[int] = []
         out: Dict[int, Tuple[int, str]] = {}
         for did in doc_ids:
@@ -302,7 +434,7 @@ class IdInterner:
         if need:
             placeholders = ",".join("?" for _ in need)
             rows = self._conn.execute(
-                f"SELECT id, dir_id, doc_path FROM docs WHERE id IN ({placeholders})",
+                f"SELECT id, scope_id, doc_path FROM docs WHERE id IN ({placeholders})",
                 need,
             ).fetchall()
             for row in rows:
@@ -312,3 +444,8 @@ class IdInterner:
                 self._doc_id[key] = did
                 out[did] = key
         return out
+
+
+def _utc_now_iso() -> str:
+    """UTC timestamp in ``YYYY-MM-DDTHH:MM:SSZ`` form (matches v5+ convention)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

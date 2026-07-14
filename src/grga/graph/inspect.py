@@ -147,6 +147,42 @@ def _inspect(
     # Documents (per scope) that contain the keyword.
     docs_by_scope, _seed_docs_ignored = _seed_docs(conn, folded)
     if not docs_by_scope:
+        # v10 knowledge-only branch (plan-2026-07-14 §9.4): when the seed
+        # exists in ``keyword_stats`` (knowledge layer) but has zero
+        # ``keyword_docs`` rows (evidence layer), this is a scope that
+        # was populated by ``grga index import`` and not yet re-``build``ed
+        # on this machine. Fall back to a cooccurrence-only report so the
+        # caller still gets useful graph expansion, plus a distinct
+        # ``evidence_hint`` explaining why doc counts are 0.
+        knowledge_scopes = _knowledge_only_scopes(conn, folded)
+        if knowledge_scopes:
+            cooccur_weight, cooccur_scopes, _ = _cooccurrences(conn, folded)
+            top_cooccurring = sorted(
+                cooccur_weight.items(), key=lambda item: (-item[1], item[0])
+            )[:limit]
+            top_cooccurring_out: List[dict] = [
+                {
+                    "keyword": kw,
+                    "weight": round(weight, 6),
+                    "shared_scopes": sorted(cooccur_scopes.get(kw, set())),
+                }
+                for kw, weight in top_cooccurring
+            ]
+            return {
+                "keyword": original,
+                "total_docs": 0,
+                "docs_by_scope": {},
+                "knowledge_scopes": sorted(knowledge_scopes),
+                "top_cooccurring_keywords": top_cooccurring_out,
+                "evidence_hint": (
+                    f"'{original}' has knowledge in "
+                    f"{sorted(knowledge_scopes)} but no local corpus "
+                    f"evidence. Run `grga index build --scope <name> "
+                    f"--directory <path>` to attach local documents, or "
+                    f"use `grga related --scope <name>` for pure "
+                    f"knowledge-graph expansion (evidence not required)."
+                ),
+            }
         empty["similar_keywords"] = _similar_keywords(conn, folded, similar_limit)
         return empty
     total_docs = sum(docs_by_scope.values())
@@ -277,13 +313,13 @@ def _cooccurrences_batch(
         # a-side: seed is kw_a_id; other is kw_b_id
         for row in conn.execute(
             f"""
-            SELECT dir.path AS directory,
+            SELECT s.name AS scope,
                    p.kw_a_id AS seed_id,
                    ok.kw     AS other_kw,
                    p.cooccur_count AS cooccur_count
             FROM keyword_pairs p
             JOIN keywords ok ON ok.id = p.kw_b_id
-            JOIN directories dir ON dir.id = p.dir_id
+            JOIN scopes s ON s.id = p.scope_id
             WHERE p.source = 'chunk_cooccur'
               AND p.kw_a_id IN ({ph})
             """,
@@ -293,13 +329,13 @@ def _cooccurrences_batch(
         # b-side: seed is kw_b_id; other is kw_a_id
         for row in conn.execute(
             f"""
-            SELECT dir.path AS directory,
+            SELECT s.name AS scope,
                    p.kw_b_id AS seed_id,
                    ok.kw     AS other_kw,
                    p.cooccur_count AS cooccur_count
             FROM keyword_pairs p
             JOIN keywords ok ON ok.id = p.kw_a_id
-            JOIN directories dir ON dir.id = p.dir_id
+            JOIN scopes s ON s.id = p.scope_id
             WHERE p.source = 'chunk_cooccur'
               AND p.kw_b_id IN ({ph})
             """,
@@ -322,14 +358,13 @@ def _absorb_cooccur_row(row, id_to_folded, out) -> None:
     kw = _fold(row["other_kw"])
     if not kw or kw == folded_seed:
         return
-    directory = row["directory"]
+    scope = row["scope"]
     weight = float(row["cooccur_count"])
     cooccur_weight, cooccur_scopes, per_scope_cooccur = out[folded_seed]
     cooccur_weight[kw] = cooccur_weight.get(kw, 0.0) + weight
-    cooccur_scopes.setdefault(kw, set()).add(directory)
-    scope_map = per_scope_cooccur.setdefault(directory, {})
+    cooccur_scopes.setdefault(kw, set()).add(scope)
+    scope_map = per_scope_cooccur.setdefault(scope, {})
     scope_map[kw] = scope_map.get(kw, 0.0) + weight
-
 
 def _similar_keywords(
     conn: sqlite3.Connection,
@@ -413,6 +448,32 @@ def _similar_keywords(
     return out
 
 
+def _knowledge_only_scopes(
+    conn: sqlite3.Connection,
+    folded: str,
+) -> List[str]:
+    """Return scope names where ``folded`` has knowledge but no evidence.
+
+    v10 (plan-2026-07-14 §9.4): a scope populated by ``grga index import``
+    carries ``keyword_stats`` / ``keyword_pairs`` (knowledge) but no
+    ``keyword_docs`` / ``docs`` (evidence). This helper answers "does the
+    seed exist in the knowledge layer of any scope?" so :func:`_inspect`
+    can distinguish that from a genuinely unknown seed. Reads
+    ``keyword_stats`` (the per-scope knowledge presence signal).
+    """
+    rows = conn.execute(
+        """
+        SELECT s.name AS scope
+        FROM keyword_stats ks
+        JOIN keywords k ON k.id = ks.kw_id
+        JOIN scopes s ON s.id = ks.scope_id
+        WHERE k.kw = ?
+        """,
+        (folded,),
+    ).fetchall()
+    return [str(row["scope"]) for row in rows]
+
+
 def _seed_docs(
     conn: sqlite3.Connection,
     folded: str,
@@ -425,11 +486,11 @@ def _seed_docs(
     """
     seed_rows = conn.execute(
         """
-        SELECT dir.path AS directory, d.doc_path AS doc_path
+        SELECT s.name AS scope, d.doc_path AS doc_path
         FROM keyword_docs kd
         JOIN keywords k ON k.id = kd.kw_id
         JOIN docs d ON d.id = kd.doc_id
-        JOIN directories dir ON dir.id = d.dir_id
+        JOIN scopes s ON s.id = d.scope_id
         WHERE k.kw = ?
         """,
         (folded,),
@@ -437,9 +498,9 @@ def _seed_docs(
     docs_by_scope: Dict[str, int] = {}
     seed_docs_by_scope: Dict[str, set] = {}
     for row in seed_rows:
-        directory = row["directory"]
-        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
-        seed_docs_by_scope.setdefault(directory, set()).add(row["doc_path"])
+        scope = row["scope"]
+        docs_by_scope[scope] = docs_by_scope.get(scope, 0) + 1
+        seed_docs_by_scope.setdefault(scope, set()).add(row["doc_path"])
     return docs_by_scope, seed_docs_by_scope
 
 
@@ -459,11 +520,11 @@ def _seed_docs_batch(
     placeholders = ",".join("?" for _ in uniq)
     rows = conn.execute(
         f"""
-        SELECT k.kw AS kw, dir.path AS directory, d.doc_path AS doc_path
+        SELECT k.kw AS kw, s.name AS scope, d.doc_path AS doc_path
         FROM keyword_docs kd
         JOIN keywords k ON k.id = kd.kw_id
         JOIN docs d ON d.id = kd.doc_id
-        JOIN directories dir ON dir.id = d.dir_id
+        JOIN scopes s ON s.id = d.scope_id
         WHERE k.kw IN ({placeholders})
         """,
         uniq,
@@ -472,8 +533,8 @@ def _seed_docs_batch(
     for row in rows:
         kw = _fold(row["kw"])
         docs_by_scope = out.setdefault(kw, {})
-        directory = row["directory"]
-        docs_by_scope[directory] = docs_by_scope.get(directory, 0) + 1
+        scope = row["scope"]
+        docs_by_scope[scope] = docs_by_scope.get(scope, 0) + 1
     return out
 
 

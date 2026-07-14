@@ -50,8 +50,8 @@ def polysemy_db(monkeypatch, tmp_path):
     )
 
     db = tmp_path / "shared.db"
-    build_graph_index(nlp, db_path=db, min_pair_count=1, min_npmi=0.0)
-    build_graph_index(psych, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("nlp", directory=nlp, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("psych", directory=psych, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"nlp": nlp, "psych": psych, "db": db}
 
 
@@ -169,7 +169,7 @@ def test_similar_keywords_escapes_like_wildcards(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     db = tmp_path / "esc.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     # Seed ``a_b`` is not itself an indexed keyword. Only literal
     # substrings/superstrings of ``a_b`` may appear; ``axb_*`` must not.

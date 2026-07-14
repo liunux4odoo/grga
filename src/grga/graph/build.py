@@ -55,6 +55,7 @@ from grga.graph.schema import (
     CHUNK_COOCCUR_SOURCE,
     connect,
     ensure_schema,
+    resolve_scope_name,
 )
 
 # Hybrid tokeniser (schema v6): ASCII code identifiers keep their original
@@ -984,13 +985,13 @@ def detect_ngram_phrases(
     return results
 
 
-def _load_auto_dict(conn, dir_id: int) -> Dict[str, dict]:
+def _load_auto_dict(conn, scope_id: int) -> Dict[str, dict]:
     """Load a scope's persisted auto n-gram dictionary as ``{phrase: row}``."""
     out: Dict[str, dict] = {}
     for row in conn.execute(
         "SELECT phrase, n, count, npmi, branch_ent FROM auto_ngram_dict "
-        "WHERE dir_id = ?",
-        (dir_id,),
+        "WHERE scope_id = ?",
+        (scope_id,),
     ):
         out[row["phrase"]] = {
             "phrase": row["phrase"], "n": row["n"], "count": row["count"],
@@ -999,10 +1000,10 @@ def _load_auto_dict(conn, dir_id: int) -> Dict[str, dict]:
     return out
 
 
-def _persist_auto_dict(conn, dir_id: int, entries: Iterable[dict], now: str) -> None:
-    """Upsert ``entries`` into ``auto_ngram_dict`` for ``dir_id``."""
+def _persist_auto_dict(conn, scope_id: int, entries: Iterable[dict], now: str) -> None:
+    """Upsert ``entries`` into ``auto_ngram_dict`` for ``scope_id``."""
     rows = [
-        (dir_id, e["phrase"], int(e["n"]), int(e["count"]),
+        (scope_id, e["phrase"], int(e["n"]), int(e["count"]),
          float(e["npmi"]), float(e["branch_ent"]), now)
         for e in entries
     ]
@@ -1011,9 +1012,9 @@ def _persist_auto_dict(conn, dir_id: int, entries: Iterable[dict], now: str) -> 
     conn.executemany(
         """
         INSERT INTO auto_ngram_dict
-            (dir_id, phrase, n, count, npmi, branch_ent, updated_at)
+            (scope_id, phrase, n, count, npmi, branch_ent, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(dir_id, phrase) DO UPDATE SET
+        ON CONFLICT(scope_id, phrase) DO UPDATE SET
             n = excluded.n,
             count = excluded.count,
             npmi = excluded.npmi,
@@ -1149,7 +1150,7 @@ def _classify_doc(
 
 
 def _load_scope_doc_rows(
-    conn, scope_dir_id: int
+    conn, scope_id: int
 ) -> Dict[str, Dict[str, object]]:
     """Load ``{doc_path: {id, size, mtime, content_hash}}`` for a scope.
 
@@ -1159,8 +1160,8 @@ def _load_scope_doc_rows(
     """
     rows = conn.execute(
         "SELECT id, doc_path, size, mtime, content_hash "
-        "FROM docs WHERE dir_id = ?",
-        (scope_dir_id,),
+        "FROM docs WHERE scope_id = ?",
+        (scope_id,),
     ).fetchall()
     out: Dict[str, Dict[str, object]] = {}
     for row in rows:
@@ -1242,7 +1243,7 @@ def _delete_doc_index_rows_keep_docs(
     )
 
 
-def _delete_scope_index_rows(conn, scope_dir_id: int) -> None:
+def _delete_scope_index_rows(conn, scope_id: int) -> None:
     """Wipe every index-layer row for the given scope.
 
     Uses subquery-scoped DELETEs so we do not have to shuttle the full
@@ -1254,19 +1255,19 @@ def _delete_scope_index_rows(conn, scope_dir_id: int) -> None:
     """
     conn.execute(
         "DELETE FROM keyword_docs WHERE doc_id IN "
-        "(SELECT id FROM docs WHERE dir_id = ?)",
-        (scope_dir_id,),
+        "(SELECT id FROM docs WHERE scope_id = ?)",
+        (scope_id,),
     )
     conn.execute(
         "DELETE FROM heading_docs WHERE doc_id IN "
-        "(SELECT id FROM docs WHERE dir_id = ?)",
-        (scope_dir_id,),
+        "(SELECT id FROM docs WHERE scope_id = ?)",
+        (scope_id,),
     )
     # Reset per-doc chunk count too — scope_stats.n_chunks will be
     # repopulated during pass 2.
     conn.execute(
-        "UPDATE docs SET n_chunks_with_kw = 0 WHERE dir_id = ?",
-        (scope_dir_id,),
+        "UPDATE docs SET n_chunks_with_kw = 0 WHERE scope_id = ?",
+        (scope_id,),
     )
 
 
@@ -1275,8 +1276,9 @@ VALID_REFRESH_NGRAM = ("never", "append", "replace")
 
 
 def build_graph_index(
-    scope: Union[str, Path],
+    scope: str,
     *,
+    directory: Union[str, Path],
     db_path: Union[str, Path, None] = None,
     chunk_mode: str = "line",
     chunk_max_chars: int = DEFAULT_CHUNK_MAX_CHARS,
@@ -1295,32 +1297,43 @@ def build_graph_index(
     progress: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[[dict], None]] = None,
 ) -> BuildStats:
-    """Build ``chunks`` / ``keyword_chunks`` / ``keyword_pairs`` for ``scope``.
+    """Build the v10 knowledge asset + evidence layers for ``scope``.
 
-    Two top-level modes (design doc §3):
+    v10 scope / directory split (plan-2026-07-14): the logical scope
+    name (``scope``) and the physical corpus directory (``directory``)
+    are now **independent parameters**. The scope name is the shard key
+    written into every knowledge asset row (portable across machines);
+    the directory is where files are actually enumerated from on this
+    machine, and its binding to the scope is recorded in
+    ``scope_directories`` (evidence layer). A scope may have multiple
+    directory bindings on the same machine — build one at a time; the
+    bindings accumulate.
 
-    * ``mode="build"`` — incremental (schema v7). Uses the
-      ``docs.size/mtime/content_hash`` metadata to skip unchanged files,
-      re-tokenise only content-changed ones, and delete rows for files
-      that disappeared from disk. Vocabulary is monotonic-add.
+    Two top-level modes (design doc plan-2026-07-11-build-vs-rebuild §3):
+
+    * ``mode="build"`` — incremental. Uses ``docs.size/mtime/content_hash``
+      to skip unchanged files, re-tokenise only content-changed ones, and
+      delete rows for files that disappeared. Vocabulary is monotonic-add.
     * ``mode="rebuild"`` (default) — full-scope re-scan. Clears the
       index + derived layers first, then re-indexes every file.
 
     ``refresh_ngram`` controls the ``auto_ngram_dict`` asset layer:
 
-    * ``"never"`` — do not run n-gram detection; use whatever phrases
-      already live in ``auto_ngram_dict``.
-    * ``"append"`` — detect and union new phrases into the existing
-      dictionary. In ``mode="build"`` runs a single detection pass on
-      the changed files' tokens (per-doc local aggregate); in
-      ``mode="rebuild"`` runs the full multi-iter loop.
+    * ``"never"``   — do not run n-gram detection; use existing phrases.
+    * ``"append"``  — detect and union new phrases into the dictionary.
     * ``"replace"`` — clear ``auto_ngram_dict`` for this scope first,
       then run detection from scratch. Only meaningful with
-      ``mode="rebuild"``; combined with ``mode="build"`` this raises
+      ``mode="rebuild"``; combined with ``mode="build"`` raises
       ``ValueError``.
 
     Args:
-        scope: root directory (or single file) to index.
+        scope: logical scope name (e.g. ``physics-cn``). Portable across
+            machines — the same name identifies the same domain
+            regardless of where the corpus lives. Must be non-empty.
+        directory: physical corpus root (or single file) on this
+            machine. Recorded in ``scope_directories`` so caller
+            follow-up (grga related, ripgrep) can locate the source
+            files.
         db_path: SQLite path; defaults to
             ``grga.deep_search.DEFAULT_DB_PATH``.
         chunk_mode / chunk_max_chars / chunk_min_chars / min_pair_count
@@ -1331,14 +1344,11 @@ def build_graph_index(
             maps to ``(mode="rebuild", refresh_ngram="replace")``,
             ``False`` maps to ``(mode="rebuild",
             refresh_ngram="append")``. When set, overrides both new
-            params. New callers should pass ``mode`` / ``refresh_ngram``
-            directly.
+            params.
         ngram_iters / max_ngram_n: detection tuning; ``ngram_iters`` is
-            capped to 1 automatically in ``mode="build"`` (see design
-            §3.1 step 3).
+            capped to 1 automatically in ``mode="build"``.
         progress: optional status callback.
-        on_event: structured progress callback. Same phases as before
-            with two new fields on ``done``: ``mode``, ``refresh_ngram``.
+        on_event: structured progress callback.
     """
     if chunk_mode not in VALID_CHUNK_MODES:
         raise ValueError(
@@ -1372,11 +1382,17 @@ def build_graph_index(
 
     from grga.deep_search import DEFAULT_DB_PATH
 
+    scope_name = resolve_scope_name(scope)
+    if scope_name is None:
+        raise ValueError(
+            "build_graph_index requires a non-empty logical scope name; "
+            "pass e.g. scope='physics-cn'"
+        )
     started = time.perf_counter()
-    scope_path = Path(scope).expanduser().resolve()
-    scope_key = str(scope_path)
+    scope_path = Path(directory).expanduser().resolve()
+    directory_str = str(scope_path)
     stats = BuildStats(
-        scope=scope_key, chunk_mode=chunk_mode,
+        scope=scope_name, chunk_mode=chunk_mode,
         mode=mode, refresh_ngram=refresh_ngram,
     )
 
@@ -1396,29 +1412,33 @@ def build_graph_index(
     try:
         ensure_schema(conn)
         interner = IdInterner(conn)
-        scope_dir_id = interner.dir_id(scope_key)
+        scope_id = interner.scope_id(scope_name)
+        # Record (or refresh) the scope -> directory binding in the
+        # evidence layer so ``grga scope list`` and caller follow-up can
+        # locate the physical corpus on this machine.
+        interner.bind_directory(scope_id, directory_str)
 
         # ------------------------------------------------------------------
         # Setup: load existing docs (build mode) and clear scope (rebuild).
         # ------------------------------------------------------------------
         existing_docs: Dict[str, Dict[str, object]] = {}
         if mode == "build":
-            existing_docs = _load_scope_doc_rows(conn, scope_dir_id)
+            existing_docs = _load_scope_doc_rows(conn, scope_id)
 
         if mode == "rebuild":
             # Full clear of index + derived layers for this scope.
             # ``keyword_chunks`` / ``chunks`` / ``heading_docs`` are keyed
-            # by ``doc_id`` which resolves through ``docs.dir_id``. The
+            # by ``doc_id`` which resolves through ``docs.scope_id``. The
             # shared helper keeps the three-table set in one place.
-            _delete_scope_index_rows(conn, scope_dir_id)
+            _delete_scope_index_rows(conn, scope_id)
             conn.execute(
-                "DELETE FROM keyword_pairs WHERE dir_id = ? AND source = ?",
-                (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+                "DELETE FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+                (scope_id, CHUNK_COOCCUR_SOURCE),
             )
             if refresh_ngram == "replace":
                 conn.execute(
-                    "DELETE FROM auto_ngram_dict WHERE dir_id = ?",
-                    (scope_dir_id,),
+                    "DELETE FROM auto_ngram_dict WHERE scope_id = ?",
+                    (scope_id,),
                 )
             conn.commit()
 
@@ -1470,7 +1490,7 @@ def build_graph_index(
                     st_mtime = path.stat().st_mtime
                 except OSError:
                     continue
-                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_dir_id, rel_path)
+                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_id, rel_path)
                 metadata_only_updates.append(
                     (doc_id, st_size, st_mtime, new_hash)
                 )
@@ -1487,10 +1507,10 @@ def build_graph_index(
                 max_chars=chunk_max_chars, min_chars=chunk_min_chars,
             )
             if kind == DOC_ADDED:
-                doc_id = interner.doc_id(scope_dir_id, rel_path)
+                doc_id = interner.doc_id(scope_id, rel_path)
                 stats.docs_added += 1
             else:  # DOC_UPDATED
-                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_dir_id, rel_path)
+                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_id, rel_path)
                 stats.docs_updated += 1
             try:
                 st_size = path.stat().st_size
@@ -1565,13 +1585,13 @@ def build_graph_index(
         # as any pre-existing iter's residual.
         # ------------------------------------------------------------------
         prior_dict_size = int(conn.execute(
-            "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ?",
-            (scope_dir_id,),
+            "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ?",
+            (scope_id,),
         ).fetchone()[0])
 
         # Seed the working dict. ``refresh_ngram="replace"`` on rebuild
         # already dropped the DB rows above, so this loads empty.
-        auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_dir_id)
+        auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_id)
 
         if mode == "rebuild" and refresh_ngram in ("append", "replace"):
             iters = max(1, int(ngram_iters))
@@ -1743,7 +1763,7 @@ def build_graph_index(
         # Persist dictionary. In ``refresh_ngram="never"`` we still call
         # this: the dict was loaded from DB unchanged and re-persisting
         # is a no-op (INSERT OR REPLACE on the same rows).
-        _persist_auto_dict(conn, scope_dir_id, auto_dict.values(), now)
+        _persist_auto_dict(conn, scope_id, auto_dict.values(), now)
         stats.ngram_phrases_written = len(auto_dict)
         stats.ngram_dict_size = len(auto_dict)
         stats.ngram_dict_added = max(0, len(auto_dict) - prior_dict_size)
@@ -1895,7 +1915,7 @@ def build_graph_index(
 
             for kid, (occ_sum, chunk_cnt) in per_doc_kw_agg.items():
                 kw_docs_rows.append(
-                    (scope_dir_id, kid, doc_id, occ_sum, chunk_cnt)
+                    (scope_id, kid, doc_id, occ_sum, chunk_cnt)
                 )
                 touched_kw_ids.add(kid)
 
@@ -1957,7 +1977,7 @@ def build_graph_index(
             )
 
         # Flush the deferred keyword_docs INSERTs in one batch. UPSERT-shape
-        # so a rebuild path (where DELETE FROM keyword_docs WHERE dir_id=?
+        # so a rebuild path (where DELETE FROM keyword_docs WHERE scope_id=?
         # already ran) or an incremental path (where DELETE for docs list
         # already ran in _delete_doc_index_rows_keep_docs above) both land
         # on clean rows.
@@ -1965,7 +1985,7 @@ def build_graph_index(
             conn.executemany(
                 """
                 INSERT INTO keyword_docs
-                    (dir_id, kw_id, doc_id, occurrence_count, chunk_count)
+                    (scope_id, kw_id, doc_id, occurrence_count, chunk_count)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(kw_id, doc_id) DO UPDATE SET
                     occurrence_count = excluded.occurrence_count,
@@ -2009,38 +2029,38 @@ def build_graph_index(
             #    ``n_chunks_with_kw`` values.
             n_chunks = int(conn.execute(
                 "SELECT COALESCE(SUM(n_chunks_with_kw), 0) FROM docs "
-                "WHERE dir_id = ?",
-                (scope_dir_id,),
+                "WHERE scope_id = ?",
+                (scope_id,),
             ).fetchone()[0])
             n_docs = int(conn.execute(
-                "SELECT COUNT(*) FROM docs WHERE dir_id = ?",
-                (scope_dir_id,),
+                "SELECT COUNT(*) FROM docs WHERE scope_id = ?",
+                (scope_id,),
             ).fetchone()[0])
 
             # 2. Refresh keyword_stats from keyword_docs (idempotent
             #    aggregate; O(rows in keyword_docs for this scope)).
             conn.execute(
-                "DELETE FROM keyword_stats WHERE dir_id = ?", (scope_dir_id,)
+                "DELETE FROM keyword_stats WHERE scope_id = ?", (scope_id,)
             )
             conn.execute(
                 """
                 INSERT INTO keyword_stats
-                    (dir_id, kw_id, chunk_df, doc_df,
+                    (scope_id, kw_id, chunk_df, doc_df,
                      total_occurrences, updated_at)
-                SELECT dir_id, kw_id,
+                SELECT scope_id, kw_id,
                        COALESCE(SUM(chunk_count), 0) AS chunk_df,
                        COUNT(*) AS doc_df,
                        COALESCE(SUM(occurrence_count), 0) AS total_occ,
                        ?
                 FROM keyword_docs
-                WHERE dir_id = ?
-                GROUP BY dir_id, kw_id
+                WHERE scope_id = ?
+                GROUP BY scope_id, kw_id
                 """,
-                (now, scope_dir_id),
+                (now, scope_id),
             )
             vocab_size = int(conn.execute(
-                "SELECT COUNT(*) FROM keyword_stats WHERE dir_id = ?",
-                (scope_dir_id,),
+                "SELECT COUNT(*) FROM keyword_stats WHERE scope_id = ?",
+                (scope_id,),
             ).fetchone()[0])
             stats.keyword_stats_written = vocab_size
 
@@ -2048,15 +2068,15 @@ def build_graph_index(
             conn.execute(
                 """
                 INSERT INTO scope_stats
-                    (dir_id, n_chunks, n_docs, vocab_size, updated_at)
+                    (scope_id, n_chunks, n_docs, vocab_size, updated_at)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(dir_id) DO UPDATE SET
+                ON CONFLICT(scope_id) DO UPDATE SET
                     n_chunks = excluded.n_chunks,
                     n_docs = excluded.n_docs,
                     vocab_size = excluded.vocab_size,
                     updated_at = excluded.updated_at
                 """,
-                (scope_dir_id, n_chunks, n_docs, vocab_size, now),
+                (scope_id, n_chunks, n_docs, vocab_size, now),
             )
 
             # 4. Derive pairs from the TEMP TABLE self-join. In ``rebuild``
@@ -2075,7 +2095,7 @@ def build_graph_index(
             _emit("pairs_start", candidate_pairs=0, surviving_pairs=0)
             surviving = _finalize_pairs_from_temp(
                 conn,
-                scope_dir_id=scope_dir_id,
+                scope_id=scope_id,
                 min_pair_count=effective_min_pair_count,
                 min_npmi=float(min_npmi),
                 n_chunks=n_chunks,
@@ -2088,12 +2108,12 @@ def build_graph_index(
             # from the previous build. Report current counts.
             stats.pairs_written = int(conn.execute(
                 "SELECT COUNT(*) FROM keyword_pairs "
-                "WHERE dir_id = ? AND source = ?",
-                (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+                "WHERE scope_id = ? AND source = ?",
+                (scope_id, CHUNK_COOCCUR_SOURCE),
             ).fetchone()[0])
             stats.keyword_stats_written = int(conn.execute(
-                "SELECT COUNT(*) FROM keyword_stats WHERE dir_id = ?",
-                (scope_dir_id,),
+                "SELECT COUNT(*) FROM keyword_stats WHERE scope_id = ?",
+                (scope_id,),
             ).fetchone()[0])
 
         # Drop the build-local TEMP TABLE regardless of the branch taken so
@@ -2165,7 +2185,7 @@ def build_graph_index(
 def _finalize_pairs_from_temp(
     conn,
     *,
-    scope_dir_id: int,
+    scope_id: int,
     min_pair_count: int,
     min_npmi: float,
     n_chunks: int,
@@ -2206,7 +2226,7 @@ def _finalize_pairs_from_temp(
     conn.execute(
         """
         INSERT INTO keyword_pairs
-            (dir_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
+            (scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
         SELECT ?, a.kw_id, b.kw_id, ?, COUNT(*), NULL, ?
         FROM _build_chunk_kws a
         JOIN _build_chunk_kws b
@@ -2215,12 +2235,12 @@ def _finalize_pairs_from_temp(
          AND a.kw_id < b.kw_id
         GROUP BY a.kw_id, b.kw_id
         HAVING COUNT(*) >= ?
-        ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+        ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
             cooccur_count = cooccur_count + excluded.cooccur_count,
             npmi = NULL,
             updated_at = excluded.updated_at
         """,
-        (scope_dir_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
+        (scope_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
     )
 
     # 3. Re-apply the write-time floor to legacy rows. In incremental mode
@@ -2229,8 +2249,8 @@ def _finalize_pairs_from_temp(
     #    "every row in keyword_pairs has cooccur_count >= min_pair_count".
     conn.execute(
         "DELETE FROM keyword_pairs "
-        "WHERE dir_id = ? AND source = ? AND cooccur_count < ?",
-        (scope_dir_id, CHUNK_COOCCUR_SOURCE, int(min_pair_count)),
+        "WHERE scope_id = ? AND source = ? AND cooccur_count < ?",
+        (scope_id, CHUNK_COOCCUR_SOURCE, int(min_pair_count)),
     )
 
     # 4. Recompute npmi for all surviving pairs in this scope. Bounded by
@@ -2239,15 +2259,15 @@ def _finalize_pairs_from_temp(
     #    keyword_stats table.
     chunk_df: Dict[int, int] = {
         int(r[0]): int(r[1]) for r in conn.execute(
-            "SELECT kw_id, chunk_df FROM keyword_stats WHERE dir_id = ?",
-            (scope_dir_id,),
+            "SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?",
+            (scope_id,),
         )
     }
 
     pair_rows = conn.execute(
         "SELECT kw_a_id, kw_b_id, cooccur_count FROM keyword_pairs "
-        "WHERE dir_id = ? AND source = ?",
-        (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+        "WHERE scope_id = ? AND source = ?",
+        (scope_id, CHUNK_COOCCUR_SOURCE),
     ).fetchall()
 
     updates: List[Tuple[float, int, int, int]] = []
@@ -2275,9 +2295,9 @@ def _finalize_pairs_from_temp(
         # degenerate rows regardless of the floor. Below-floor rows also
         # drop when caller set a positive min_npmi.
         if npmi is None or glued or (min_npmi > 0.0 and npmi < min_npmi):
-            drops.append((scope_dir_id, a, b))
+            drops.append((scope_id, a, b))
         else:
-            updates.append((float(npmi), scope_dir_id, a, b))
+            updates.append((float(npmi), scope_id, a, b))
         if idx == total or idx % step == 0:
             _emit("pairs_advance", current=idx, total=total)
     _emit("pairs_scan_end", surviving=len(updates))
@@ -2285,22 +2305,22 @@ def _finalize_pairs_from_temp(
     if drops:
         conn.executemany(
             "DELETE FROM keyword_pairs "
-            "WHERE dir_id = ? AND kw_a_id = ? AND kw_b_id = ? "
+            "WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ? "
             "AND source = 'chunk_cooccur'",
             drops,
         )
     if updates:
         conn.executemany(
             "UPDATE keyword_pairs SET npmi = ? "
-            "WHERE dir_id = ? AND kw_a_id = ? AND kw_b_id = ? "
+            "WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ? "
             "AND source = 'chunk_cooccur'",
             updates,
         )
 
     return int(conn.execute(
         "SELECT COUNT(*) FROM keyword_pairs "
-        "WHERE dir_id = ? AND source = ?",
-        (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+        "WHERE scope_id = ? AND source = ?",
+        (scope_id, CHUNK_COOCCUR_SOURCE),
     ).fetchone()[0])
 
 
@@ -2337,7 +2357,7 @@ class ForgetStats:
 
 
 def forget_scope_phrases(
-    scope: Union[str, Path],
+    scope: str,
     *,
     db_path: Union[str, Path, None] = None,
     phrases: Optional[Sequence[str]] = None,
@@ -2345,22 +2365,20 @@ def forget_scope_phrases(
 ) -> ForgetStats:
     """Remove entries from the asset layer with cascading cleanup.
 
+    v10: ``scope`` is the logical scope name (not a filesystem path).
+
     Two modes (mutually exclusive):
 
     * ``phrases=[...]`` — remove those specific phrases from
       ``auto_ngram_dict``. For each phrase, delete the matching
       ``keyword_docs`` rows in this scope and the ``keyword_pairs``
       edges with that phrase on either endpoint (``source='chunk_cooccur'``
-      only; ``llm_promoted`` is a separate asset), plus the ``keyword_stats``
-      row. No pair recompute is needed in v9: removing a keyword only
-      deletes its own edges; other pairs' ``cooccur_count`` / ``chunk_df``
-      / npmi are unaffected because no document's chunk inventory changed.
+      only; ``llm_promoted`` is a separate asset), plus the
+      ``keyword_stats`` row.
 
     * ``all_phrases=True`` — nuke every asset row for this scope:
-      the whole ``auto_ngram_dict`` + the index layer three tables +
-      ``chunk_cooccur`` pairs. Equivalent to the legacy
-      ``build --replace`` reset step (does NOT re-run a build). Follow
-      with ``grga index build`` to relearn from scratch.
+      ``auto_ngram_dict`` + the index layer + ``chunk_cooccur`` pairs.
+      Follow with ``grga index build`` to relearn from scratch.
 
     ``phrases`` that do not exist in ``auto_ngram_dict`` for this scope
     are collected into ``ForgetStats.phrases_missing`` and skipped
@@ -2375,9 +2393,12 @@ def forget_scope_phrases(
     from grga.deep_search import DEFAULT_DB_PATH
 
     started = time.perf_counter()
-    scope_path = Path(scope).expanduser().resolve()
-    scope_key = str(scope_path)
-    stats = ForgetStats(scope=scope_key)
+    scope_name = resolve_scope_name(scope)
+    if scope_name is None:
+        raise ValueError(
+            "forget_scope_phrases requires a non-empty logical scope name"
+        )
+    stats = ForgetStats(scope=scope_name)
     if all_phrases:
         stats.all_wiped = True
 
@@ -2386,13 +2407,13 @@ def forget_scope_phrases(
     try:
         ensure_schema(conn)
         interner = IdInterner(conn)
-        scope_dir_id_ro = interner.dir_id_ro(scope_key)
-        if scope_dir_id_ro is None:
+        scope_id_ro = interner.scope_id_ro(scope_name)
+        if scope_id_ro is None:
             # Scope was never indexed; nothing to do. Return empty stats
             # rather than raising so scripts are idempotent.
             stats.elapsed_seconds = time.perf_counter() - started
             return stats
-        scope_dir_id = scope_dir_id_ro
+        scope_id = scope_id_ro
 
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -2400,8 +2421,8 @@ def forget_scope_phrases(
                 # Wipe the whole asset + index + derived for this scope.
                 doc_ids = [
                     int(row[0]) for row in conn.execute(
-                        "SELECT id FROM docs WHERE dir_id = ?",
-                        (scope_dir_id,),
+                        "SELECT id FROM docs WHERE scope_id = ?",
+                        (scope_id,),
                     ).fetchall()
                 ]
                 # Count what we are about to delete for observability.
@@ -2409,33 +2430,33 @@ def forget_scope_phrases(
                 # keyword_docs rows (30× smaller than the pre-v9 count) —
                 # field name kept for JSON contract stability.
                 stats.keyword_chunks_removed = int(conn.execute(
-                    "SELECT COUNT(*) FROM keyword_docs WHERE dir_id = ?",
-                    (scope_dir_id,),
+                    "SELECT COUNT(*) FROM keyword_docs WHERE scope_id = ?",
+                    (scope_id,),
                 ).fetchone()[0])
                 stats.ngram_dict_removed = int(conn.execute(
-                    "SELECT COUNT(*) FROM auto_ngram_dict WHERE dir_id = ?",
-                    (scope_dir_id,),
+                    "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ?",
+                    (scope_id,),
                 ).fetchone()[0])
                 _delete_doc_index_rows(conn, doc_ids)
                 conn.execute(
                     "DELETE FROM keyword_pairs "
-                    "WHERE dir_id = ? AND source = ?",
-                    (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+                    "WHERE scope_id = ? AND source = ?",
+                    (scope_id, CHUNK_COOCCUR_SOURCE),
                 )
                 conn.execute(
-                    "DELETE FROM auto_ngram_dict WHERE dir_id = ?",
-                    (scope_dir_id,),
+                    "DELETE FROM auto_ngram_dict WHERE scope_id = ?",
+                    (scope_id,),
                 )
                 # v8 asset tables must be wiped too — leaving them behind
                 # after a full forget would give a stale doc_df / n_chunks
                 # signal to ``related``.
                 conn.execute(
-                    "DELETE FROM keyword_stats WHERE dir_id = ?",
-                    (scope_dir_id,),
+                    "DELETE FROM keyword_stats WHERE scope_id = ?",
+                    (scope_id,),
                 )
                 conn.execute(
-                    "DELETE FROM scope_stats WHERE dir_id = ?",
-                    (scope_dir_id,),
+                    "DELETE FROM scope_stats WHERE scope_id = ?",
+                    (scope_id,),
                 )
                 stats.pairs_recomputed = 0
             else:
@@ -2460,8 +2481,8 @@ def forget_scope_phrases(
                 placeholders = ",".join("?" for _ in lowered_inputs)
                 dict_present_pairs = conn.execute(
                     f"SELECT phrase FROM auto_ngram_dict "
-                    f"WHERE dir_id = ? AND LOWER(phrase) IN ({placeholders})",
-                    [scope_dir_id, *lowered_inputs],
+                    f"WHERE scope_id = ? AND LOWER(phrase) IN ({placeholders})",
+                    [scope_id, *lowered_inputs],
                 ).fetchall()
                 dict_present = {str(row[0]) for row in dict_present_pairs}
                 dict_present_lowered = {p.casefold() for p in dict_present}
@@ -2479,20 +2500,20 @@ def forget_scope_phrases(
                     kw_placeholders = ",".join("?" for _ in target_kw_ids)
                     stats.keyword_chunks_removed = int(conn.execute(
                         f"SELECT COUNT(*) FROM keyword_docs "
-                        f"WHERE kw_id IN ({kw_placeholders}) AND dir_id = ?",
-                        [*target_kw_ids, scope_dir_id],
+                        f"WHERE kw_id IN ({kw_placeholders}) AND scope_id = ?",
+                        [*target_kw_ids, scope_id],
                     ).fetchone()[0])
                     conn.execute(
                         f"DELETE FROM keyword_docs "
-                        f"WHERE kw_id IN ({kw_placeholders}) AND dir_id = ?",
-                        [*target_kw_ids, scope_dir_id],
+                        f"WHERE kw_id IN ({kw_placeholders}) AND scope_id = ?",
+                        [*target_kw_ids, scope_id],
                     )
                     conn.execute(
                         f"DELETE FROM keyword_pairs "
-                        f"WHERE dir_id = ? AND source = ? "
+                        f"WHERE scope_id = ? AND source = ? "
                         f"AND (kw_a_id IN ({kw_placeholders}) "
                         f"OR kw_b_id IN ({kw_placeholders}))",
-                        [scope_dir_id, CHUNK_COOCCUR_SOURCE,
+                        [scope_id, CHUNK_COOCCUR_SOURCE,
                          *target_kw_ids, *target_kw_ids],
                     )
                     # Also drop the affected keyword_stats rows; the pair
@@ -2502,8 +2523,8 @@ def forget_scope_phrases(
                     # any doc's ``n_chunks_with_kw`` here).
                     conn.execute(
                         f"DELETE FROM keyword_stats "
-                        f"WHERE kw_id IN ({kw_placeholders}) AND dir_id = ?",
-                        [*target_kw_ids, scope_dir_id],
+                        f"WHERE kw_id IN ({kw_placeholders}) AND scope_id = ?",
+                        [*target_kw_ids, scope_id],
                     )
                 # Delete the asset-layer rows.
                 if dict_present:
@@ -2511,8 +2532,8 @@ def forget_scope_phrases(
                     dp = ",".join("?" for _ in dict_list)
                     conn.execute(
                         f"DELETE FROM auto_ngram_dict "
-                        f"WHERE dir_id = ? AND phrase IN ({dp})",
-                        [scope_dir_id, *dict_list],
+                        f"WHERE scope_id = ? AND phrase IN ({dp})",
+                        [scope_id, *dict_list],
                     )
                     stats.ngram_dict_removed = len(dict_list)
                 # Report the surviving pair count as pairs_recomputed
@@ -2523,8 +2544,8 @@ def forget_scope_phrases(
                 # (no docs were touched).
                 stats.pairs_recomputed = int(conn.execute(
                     "SELECT COUNT(*) FROM keyword_pairs "
-                    "WHERE dir_id = ? AND source = ?",
-                    (scope_dir_id, CHUNK_COOCCUR_SOURCE),
+                    "WHERE scope_id = ? AND source = ?",
+                    (scope_id, CHUNK_COOCCUR_SOURCE),
                 ).fetchone()[0])
 
             conn.execute("COMMIT")

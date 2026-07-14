@@ -28,7 +28,7 @@ def sidecar_env(monkeypatch, tmp_path):
 @pytest.fixture
 def graph_db(cross_heading_fixture: Path, tmp_path, sidecar_env) -> Path:
     db = tmp_path / "graph.db"
-    build_graph_index(cross_heading_fixture, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("cross-heading", directory=cross_heading_fixture, db_path=db, min_pair_count=1, min_npmi=0.0)
     return db
 
 
@@ -132,7 +132,9 @@ def test_index_build_json_contract(cross_heading_fixture: Path, tmp_path, sideca
     db = tmp_path / "build.db"
     result = runner.invoke(
         app,
-        ["index", "build", "-s", str(cross_heading_fixture),
+        ["index", "build",
+         "-s", "cross-heading",
+         "-d", str(cross_heading_fixture),
          "--db", str(db), "--json"],
     )
     assert result.exit_code == 0, result.output

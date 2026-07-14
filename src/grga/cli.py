@@ -309,7 +309,8 @@ def search_command(
 @app.command("deep-search")
 def deep_search_command(
     keywords: List[str] = typer.Argument(..., help="Natural language query for LLM-assisted deep search."),
-    directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Directory to search."),
+    scope: str = typer.Option(..., "--scope", "-s", help="Logical scope name (v10). Required — v10 does not auto-derive a scope from the directory. Use the same name you passed to `grga index build`."),
+    directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Directory to search on this machine (physical corpus location)."),
     pattern_mode: Optional[str] = typer.Option(None, "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
     case_sensitive: Optional[bool] = typer.Option(None, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
     max_count: Optional[int] = typer.Option(None, "--max-count", "-n", help="Maximum matches per search iteration."),
@@ -387,6 +388,7 @@ def deep_search_command(
     raw = deep_search_directory(
         str(directory),
         query,
+        scope=scope,
         llm_base_url=options["llm_base_url"],
         llm_api_key=options["llm_api_key"],
         llm_model_name=options["llm_model_name"],
@@ -1104,7 +1106,8 @@ def _make_index_build_progress():
 
 @index_app.command("build")
 def index_build_command(
-    scope: Path = typer.Option(Path("."), "--scope", "-s", "--directory", "-d", exists=True, resolve_path=True, help="Directory (or file) to index. The resolved absolute path becomes the scope key stored in the graph DB and later referenced by read-side commands via --directory."),
+    scope: str = typer.Option(..., "--scope", "-s", help="Logical scope name (v10). Portable across machines: the same name identifies the same knowledge domain regardless of where the corpus lives on this machine. Required — v10 does not auto-derive a name from the directory."),
+    directory: Path = typer.Option(..., "--directory", "-d", exists=True, resolve_path=True, help="Physical directory (or file) to index on this machine. Recorded in `scope_directories` so caller follow-up can locate source files."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     chunk_mode: str = typer.Option("line", "--chunk-mode", help="Chunk granularity: line (1 line = 1 chunk) or chars (multi-line char window)."),
     chunk_max_chars: int = typer.Option(600, "--chunk-max-chars", help="Target upper bound on chars per chunk (chars mode)."),
@@ -1181,6 +1184,7 @@ def index_build_command(
     try:
         stats = _run_index_build(
             scope=scope,
+            directory=directory,
             mode=mode,
             refresh_ngram=refresh_ngram,
             db_path=db_path,
@@ -1206,7 +1210,8 @@ def index_build_command(
 
 @index_app.command("rebuild")
 def index_rebuild_command(
-    scope: Path = typer.Option(Path("."), "--scope", "-s", "--directory", "-d", exists=True, resolve_path=True, help="Directory (or file) to rebuild. Same scope semantics as `grga index build`."),
+    scope: str = typer.Option(..., "--scope", "-s", help="Logical scope name to rebuild (v10). Same semantics as `grga index build`."),
+    directory: Path = typer.Option(..., "--directory", "-d", exists=True, resolve_path=True, help="Physical directory (or file) to rebuild from on this machine."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     chunk_mode: str = typer.Option("line", "--chunk-mode", help="Chunk granularity."),
     chunk_max_chars: int = typer.Option(600, "--chunk-max-chars"),
@@ -1253,6 +1258,7 @@ def index_rebuild_command(
     try:
         stats = _run_index_build(
             scope=scope,
+            directory=directory,
             mode="rebuild",
             refresh_ngram=refresh_ngram,
             db_path=db_path,
@@ -1278,7 +1284,8 @@ def index_rebuild_command(
 
 def _run_index_build(
     *,
-    scope: Path,
+    scope: str,
+    directory: Path,
     mode: str,
     refresh_ngram: str,
     db_path: Optional[Path],
@@ -1296,12 +1303,15 @@ def _run_index_build(
     """Shared runner for `index build` and `index rebuild`.
 
     Owns the single call site into ``build_graph_index`` so both CLI
-    commands stay in sync when its argument surface evolves.
+    commands stay in sync. ``scope`` is the logical scope name (v10),
+    ``directory`` is the physical path to index; ``build_graph_index``
+    records the binding in ``scope_directories``.
     """
     from grga.graph.build import build_graph_index
 
     return build_graph_index(
         scope,
+        directory=directory,
         db_path=str(db_path) if db_path else None,
         chunk_mode=chunk_mode,
         chunk_max_chars=chunk_max_chars,
@@ -1320,7 +1330,7 @@ def _run_index_build(
 
 @index_app.command("forget")
 def index_forget_command(
-    scope: Path = typer.Option(Path("."), "--scope", "-s", "--directory", "-d", exists=True, resolve_path=True, help="Scope whose asset layer to touch. The resolved absolute path must match a previously indexed scope key; missing scopes are a no-op."),
+    scope: str = typer.Option(..., "--scope", "-s", help="Logical scope name (v10) whose asset layer to touch. Missing scopes are a no-op."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     phrase: List[str] = typer.Option([], "--phrase", "-p", help="Phrase to forget from `auto_ngram_dict`. Repeatable. Cascades: removes `keyword_chunks` rows for the matching keyword id in this scope and `keyword_pairs` edges with the phrase on either endpoint, then re-derives `keyword_pairs` (npmi depends on scope-global n_chunks / chunk_df)."),
     all_phrases: bool = typer.Option(False, "--all", help="Wipe the whole scope: `auto_ngram_dict` + index layer three tables + `keyword_pairs.chunk_cooccur`. `llm_promoted` pairs are preserved. Follow with `grga index build` to rebuild from scratch."),
@@ -1465,7 +1475,7 @@ def index_vacuum_command(
 @index_app.command("promote")
 def index_promote_command(
     threshold: float = typer.Option(3, "--threshold", "-t", help="Minimum vote_count for a pair to be promoted."),
-    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Stored scope key from `grga index build --scope` (resolved absolute path). Restrict promotion to votes recorded for this scope. The directory need not still exist on disk."),
+    scope: Optional[str] = typer.Option(None, "--scope", "-s", help="Logical scope name (v10). Restrict promotion to votes recorded for this scope. Omit to promote across every scope."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be promoted without writing."),
     repromote: bool = typer.Option(False, "--repromote", help="Promote qualifying pairs again even if already promoted."),
@@ -1481,7 +1491,7 @@ def index_promote_command(
 
     stats = promote_votes(
         threshold=threshold,
-        directory=str(directory) if directory else None,
+        scope=scope,
         db_path=str(db_path) if db_path else None,
         dry_run=dry_run,
         repromote=repromote,
@@ -1503,7 +1513,7 @@ def index_promote_command(
 def suggest_command(
     query: List[str] = typer.Argument(..., help="Original query (natural language or keyword expression)."),
     intent: str = typer.Option("expand", "--intent", "-i", help="Suggest intent: expand | rerank | reformulate."),
-    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Stored scope key from `grga index build --scope` (resolved absolute path). Used to attribute recorded keyword-pair votes. The directory need not still exist on disk."),
+    scope: Optional[str] = typer.Option(None, "--scope", "-s", help="Logical scope name (v10) to attribute recorded keyword-pair votes to. Omit to skip vote recording."),
     hits_json: Optional[Path] = typer.Option(None, "--hits", exists=True, dir_okay=False, help="JSON file with prior hits (a list, or a search result object with 'matches')."),
     max_hits: int = typer.Option(20, "--max-hits", help="Maximum hits sent to the LLM."),
     no_votes: bool = typer.Option(False, "--no-votes", help="Do not record keyword-pair votes (read-only)."),
@@ -1547,7 +1557,7 @@ def suggest_command(
             text,
             hits,
             intent=intent,
-            directory=str(directory) if directory else None,
+            scope=scope,
             max_hits=max_hits,
             record_votes_enabled=not no_votes,
             db_path=str(db_path) if db_path else None,
@@ -1596,28 +1606,23 @@ def related_command(
     mode: str = typer.Option("graph", "--mode", "-m", help="Relation mode: `graph` (candidate keywords via co-occurrence) or `heading` (docs sharing a Markdown chapter with a seed-containing doc)."),
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of results (per-seed for graph mode)."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
-    directory: Optional[Path] = typer.Option(None, "--directory", "-d", resolve_path=True, help="Restrict graph/heading expansion to a previously indexed scope (resolved absolute path). The directory need not still exist on disk."),
-    same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to --directory (reverts to pre-v2.2 default)."),
+    scopes: List[str] = typer.Option([], "--scope", "-s", help="Logical scope name (v10). Repeatable — pass multiple `--scope` flags to union across scopes. Omit to search across every indexed scope (cross-scope union)."),
+    same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to the given --scope (single scope required)."),
     min_npmi: Optional[float] = typer.Option(None, "--min-npmi", help="mode=graph only: read-side floor on chunk_cooccur pair npmi. Can only tighten the v8 write-time floor (0.2). Default 0.2, or $GRGA_PPR_MIN_NPMI."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
     """List related keywords (graph) or documents (heading) for the seeds.
 
-    v8 keyword-primary (Phase 3b-2):
+    v10 (plan-2026-07-14): the scope filter is a **multi-select**
+    ``--scope <name>`` (repeatable). No filter = cross-scope union.
 
     * ``--mode graph`` returns *candidate keywords* + association evidence
-      (npmi, cooccur_count, chunk_df, via_seed). Caller turns keywords into
-      passages with a follow-up ``grga search`` or ripgrep. No PPR, no full
-      graph load, no adjacency cache — sub-millisecond hot path.
+      (npmi, cooccur_count, chunk_df, via_seed).
     * ``--mode heading`` returns documents that share a Markdown
       ``heading_path`` with any seed-containing document.
-    * ``--mode dir`` was removed; use ``grga search --json`` and aggregate
-      by directory client-side.
     """
     from grga.related import VALID_MODES, related as related_docs
 
-    # graph is not in VALID_MODES (which lists doc-returning modes only);
-    # it dispatches to related_keywords() below. Validate here.
     if mode not in ("graph",) + tuple(VALID_MODES):
         typer.echo(
             f"mode must be one of: graph, {', '.join(VALID_MODES)}",
@@ -1629,8 +1634,12 @@ def related_command(
     if not seeds:
         typer.echo("keywords cannot be empty", err=True)
         raise typer.Exit(2)
+    scope_list = [s for s in scopes if s and s.strip()]
     if same_scope and mode != "heading":
         typer.echo("--same-scope only applies to --mode heading", err=True)
+        raise typer.Exit(2)
+    if same_scope and len(scope_list) != 1:
+        typer.echo("--same-scope requires exactly one --scope", err=True)
         raise typer.Exit(2)
     if min_npmi is not None and mode != "graph":
         typer.echo("--min-npmi only applies to --mode graph", err=True)
@@ -1643,7 +1652,7 @@ def related_command(
             seeds,
             limit_per_seed=limit,
             db_path=str(db_path) if db_path else None,
-            directory=str(directory) if directory else None,
+            scopes=scope_list or None,
             min_npmi=min_npmi,
         )
         kw_results = kw_result.results
@@ -1658,9 +1667,6 @@ def related_command(
                     f"{r.npmi:.4f}  {r.kw}"
                     f"  (via {r.via_seed}, co={int(r.cooccur_count)}, df={r.chunk_df})"
                 )
-        # Surface dead seeds so callers do not need a separate inspect pass:
-        # a seed that is not in_index is unknown; a seed that is in_index but
-        # produced no candidates is isolated / over-filtered.
         produced = {r.via_seed for r in kw_results}
         unknown = [s.seed for s in kw_result.resolved_seeds if not s.in_index]
         isolated = [
@@ -1681,13 +1687,14 @@ def related_command(
         )
         return
 
-    # mode == 'heading' — doc-returning path via related()
+    # mode == 'heading' — doc-returning path via related() (single scope only).
+    heading_scope = scope_list[0] if scope_list else None
     results = related_docs(
         seeds,
         mode=mode,
         limit=limit,
         db_path=str(db_path) if db_path else None,
-        directory=str(directory) if directory else None,
+        scope=heading_scope,
         same_scope=same_scope,
     )
     if json_output:

@@ -68,7 +68,7 @@ def graph_scope(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
     return {"scope": scope, "db": db}
 
 
@@ -84,7 +84,7 @@ def test_related_graph_v3_envelope_shape(graph_scope, schema):
         app,
         ["related", "brew", "--mode", "graph",
          "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json"],
+         "--scope", "test-scope", "--json"],
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -110,7 +110,7 @@ def test_related_graph_v3_related_keyword_fields(graph_scope, schema):
         app,
         ["related", "brew", "--mode", "graph",
          "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json",
+         "--scope", "test-scope", "--json",
          # min_npmi=0 so tiny corpus produces at least one candidate
          "--min-npmi", "0.0"],
     )
@@ -144,7 +144,7 @@ def test_related_graph_v3_multi_seed_no_fusion(graph_scope, schema):
         app,
         ["related", "brew", "ripgrep", "--mode", "graph",
          "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json",
+         "--scope", "test-scope", "--json",
          "--min-npmi", "0.0"],
     )
     assert result.exit_code == 0, result.output
@@ -167,7 +167,7 @@ def test_related_graph_v3_unknown_seed_empty(graph_scope, schema):
         app,
         ["related", "totally_absent_xyz", "--mode", "graph",
          "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json"],
+         "--scope", "test-scope", "--json"],
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -184,7 +184,7 @@ def test_related_graph_v3_resolved_seeds_mixed(graph_scope, schema):
         app,
         ["related", "brew", "totally_absent_xyz", "--mode", "graph",
          "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json",
+         "--scope", "test-scope", "--json",
          "--min-npmi", "0.0"],
     )
     assert result.exit_code == 0, result.output
@@ -206,7 +206,7 @@ def test_related_dir_mode_removed(graph_scope):
         app,
         ["related", "brew", "--mode", "dir",
          "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json"],
+         "--scope", "test-scope", "--json"],
     )
     assert result.exit_code != 0
     # Typer's usage error path lists the valid choices in stderr.
@@ -226,7 +226,7 @@ def test_related_heading_has_no_expansion_or_contributions(graph_scope, schema):
         app,
         ["related", "brew", "--mode", "heading",
          "--db", str(graph_scope["db"]),
-         "-d", str(graph_scope["scope"]), "--json"],
+         "--scope", "test-scope", "--json"],
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)

@@ -246,8 +246,7 @@ def test_build_filters_high_df_char_when_contained(sidecar_env, tmp_path):
     (scope / "santi.txt").write_text(body * 3, encoding="utf-8")
 
     db = tmp_path / "graph.db"
-    stats = build_graph_index(
-        scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=2,
+    stats = build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0, ngram_iters=2,
     )
 
     # 面壁者 should be a discovered phrase.
@@ -308,7 +307,7 @@ def test_build_keeps_low_df_char_pairs(sidecar_env, tmp_path):
     (scope / "chem.txt").write_text(body, encoding="utf-8")
 
     db = tmp_path / "graph.db"
-    build_graph_index(scope, db_path=db, min_pair_count=1, min_npmi=0.0)
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0)
 
     pairs = _read_pair_pairs(db)
     # 氯 not high-df → not a candidate → its pairs (with 钠, 化合物, ...)
@@ -337,8 +336,7 @@ def test_stopword_derived_emit_fires(sidecar_env, tmp_path):
         events.append(payload)
 
     db = tmp_path / "graph.db"
-    build_graph_index(
-        scope, db_path=db, min_pair_count=1, min_npmi=0.0,
+    build_graph_index("test-scope", directory=scope, db_path=db, min_pair_count=1, min_npmi=0.0,
         on_event=on_event,
     )
 

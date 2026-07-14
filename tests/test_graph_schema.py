@@ -1,17 +1,17 @@
-"""Tests for :mod:`grga.graph.schema` (normalized migration, schema v5).
+"""Tests for :mod:`grga.graph.schema` (v10 scope / directory split).
 
-Focus: the current graph tables are created, the schema version is stamped
-at v5, and legacy databases (v1 KeywordLibrary, v2/v3 ``keyword_docs``,
-v4 chunk-level TEXT-keyed) all converge on v5 in one atomic hop:
+Focus:
 
-* Intern tables ``directories`` / ``keywords`` / ``docs`` populated from
-  the pre-existing TEXT columns.
-* Business tables (``keyword_chunks`` / ``chunks`` / ``keyword_pairs`` /
-  ``heading_docs`` / ``llm_extension_votes`` / ``keyword_counts`` /
-  ``keyword_sources``) rewritten to reference the intern tables by id.
-* ``keyword_docs`` dropped (v3 legacy).
-* ``keyword_pairs`` legacy promoted rows salvaged as
-  ``source='llm_promoted'``; every other legacy row cleared.
+* Fresh install creates every v10 table + stamps ``user_version = 10``.
+* Idempotent fast path: second ``ensure_schema`` is a no-op.
+* Caller-owned transaction semantics: fast path never commits, migration
+  path only commits its own txn.
+* Every pre-v10 shape is rejected with an actionable error (see
+  ``docs/design/plan-2026-07-14-scope-directory-split.md`` §7):
+
+  - v5-v9 (``directories`` intern table + ``user_version`` in 1..9)
+  - pre-v5 ``KeywordLibrary`` (``keyword_counts`` / ``keyword_sources``
+    with a TEXT ``directory`` column, no ``directories``, ``user_version=0``)
 """
 from __future__ import annotations
 
@@ -21,100 +21,40 @@ from pathlib import Path
 import pytest
 
 from grga.graph.schema import (
-    GRAPH_TABLES,
-    INTERN_TABLES,
+    CHUNK_COOCCUR_SOURCE,
     LLM_PROMOTED_SOURCE,
     SCHEMA_VERSION,
-    V1_TABLES,
     connect,
     ensure_schema,
     list_tables,
     read_schema_version,
+    resolve_scope_name,
 )
 
 
-def _make_v1_db(path: Path) -> None:
-    """Create a database that looks like a v1 KeywordLibrary artefact.
+# Every table a fresh v10 install must ship. Mirrors the DDL in
+# ``schema.py`` — if you add a table there, list it here so a missing
+# CREATE is caught at test time.
+V10_TABLES = {
+    # Scope layer
+    "scopes", "scope_directories",
+    # Global intern
+    "keywords", "meta",
+    # Business tables
+    "keyword_pairs", "keyword_stats", "scope_stats",
+    "auto_ngram_dict", "llm_extension_votes",
+    # Evidence layer
+    "docs", "keyword_docs", "heading_docs",
+    "keyword_counts", "keyword_sources",
+}
 
-    Includes a legacy ``keyword_pairs`` (old ``scope``/``count`` PK) with
-    one doc-level-derived row and one old promotion row.
-    """
-    conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
-        CREATE TABLE keyword_counts (
-            scope TEXT NOT NULL, directory TEXT NOT NULL, term TEXT NOT NULL,
-            count REAL NOT NULL DEFAULT 0, updated_at TEXT,
-            PRIMARY KEY (scope, directory, term)
-        );
-        CREATE TABLE keyword_pairs (
-            scope TEXT NOT NULL, directory TEXT NOT NULL,
-            keyword_a TEXT NOT NULL, keyword_b TEXT NOT NULL,
-            count REAL NOT NULL DEFAULT 0, updated_at TEXT,
-            PRIMARY KEY (scope, directory, keyword_a, keyword_b)
-        );
-        CREATE TABLE keyword_sources (
-            directory TEXT NOT NULL, keyword TEXT NOT NULL, path TEXT NOT NULL,
-            line_number INTEGER NOT NULL DEFAULT 0, count REAL NOT NULL DEFAULT 0,
-            updated_at TEXT, PRIMARY KEY (directory, keyword, path, line_number)
-        );
-        """
-    )
-    conn.execute(
-        "INSERT INTO keyword_counts (scope, directory, term, count) VALUES ('g', '/d', 'alpha', 5)"
-    )
-    # A doc-level-derived pair (scope != 'llm_promoted') — must be cleared.
-    conn.execute(
-        "INSERT INTO keyword_pairs (scope, directory, keyword_a, keyword_b, count) "
-        "VALUES ('g', '/d', 'alpha', 'beta', 3)"
-    )
-    # An old promotion row — must be salvaged as source='llm_promoted'.
-    conn.execute(
-        "INSERT INTO keyword_pairs (scope, directory, keyword_a, keyword_b, count) "
-        "VALUES ('llm_promoted', '/d', 'gamma', 'delta', 7)"
-    )
-    conn.commit()
-    conn.close()
+# Tables that v10 explicitly does NOT ship (dropped or replaced).
+V10_ABSENT_TABLES = {"directories", "chunks", "keyword_chunks"}
 
 
-def _make_v3_db(path: Path) -> None:
-    """Build a v3 database with ``keyword_docs`` rows (to be dropped)."""
-    conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
-        CREATE TABLE keyword_docs (
-            scope TEXT NOT NULL DEFAULT '',
-            directory TEXT NOT NULL,
-            keyword TEXT NOT NULL,
-            doc_path TEXT NOT NULL,
-            occurrence_count REAL NOT NULL DEFAULT 0,
-            first_line INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT,
-            PRIMARY KEY (directory, keyword, doc_path)
-        );
-        CREATE TABLE keyword_pairs (
-            scope TEXT NOT NULL, directory TEXT NOT NULL,
-            keyword_a TEXT NOT NULL, keyword_b TEXT NOT NULL,
-            count REAL NOT NULL DEFAULT 0, updated_at TEXT,
-            PRIMARY KEY (scope, directory, keyword_a, keyword_b)
-        );
-        """
-    )
-    conn.executemany(
-        "INSERT INTO keyword_docs (directory, keyword, doc_path, occurrence_count, first_line) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [
-            ("/proj_a", "install", "readme.md", 3, 2),
-            ("/proj_a", "config", "readme.md", 2, 10),
-        ],
-    )
-    conn.execute(
-        "INSERT INTO keyword_pairs (scope, directory, keyword_a, keyword_b, count) "
-        "VALUES ('llm_promoted', '/proj_a', 'ka', 'kb', 4)"
-    )
-    conn.execute("PRAGMA user_version = 3")
-    conn.commit()
-    conn.close()
+# ---------------------------------------------------------------------------
+# Fresh install
+# ---------------------------------------------------------------------------
 
 
 def test_ensure_schema_on_empty_db(tmp_path: Path):
@@ -123,375 +63,285 @@ def test_ensure_schema_on_empty_db(tmp_path: Path):
         version = ensure_schema(conn)
         assert version == SCHEMA_VERSION
         tables = set(list_tables(conn))
-        for name in GRAPH_TABLES:
-            assert name in tables, f"missing graph table {name}"
-        for name in INTERN_TABLES:
-            assert name in tables, f"missing intern table {name}"
-        # v9: keyword_docs is now a real asset table; chunks / keyword_chunks
-        # must NOT exist on a fresh v9 DB.
-        assert "keyword_docs" in tables
-        assert "chunks" not in tables
-        assert "keyword_chunks" not in tables
+        missing = V10_TABLES - tables
+        assert not missing, f"missing v10 tables: {missing}"
+        surplus = V10_ABSENT_TABLES & tables
+        assert not surplus, f"v10 must not have: {surplus}"
     finally:
         conn.close()
-
-
-def _insert_normalized_kw_doc(conn: sqlite3.Connection, directory: str,
-                              keyword: str, doc_path: str,
-                              chunk_count: int = 1, occ: int = 1) -> None:
-    """Helper: insert a row into ``keyword_docs`` via the intern tables.
-
-    v9: the doc-level inverted index replaces the pre-v9
-    ``keyword_chunks`` (chunk-level). Kept as a test helper for anything
-    that just wants "a real row exists".
-    """
-    conn.execute("INSERT OR IGNORE INTO directories(path) VALUES (?)", (directory,))
-    conn.execute("INSERT OR IGNORE INTO keywords(kw) VALUES (?)", (keyword,))
-    dir_id = conn.execute("SELECT id FROM directories WHERE path=?", (directory,)).fetchone()[0]
-    kw_id = conn.execute("SELECT id FROM keywords WHERE kw=?", (keyword,)).fetchone()[0]
-    conn.execute(
-        "INSERT OR IGNORE INTO docs(dir_id, doc_path) VALUES (?, ?)",
-        (dir_id, doc_path),
-    )
-    doc_id = conn.execute(
-        "SELECT id FROM docs WHERE dir_id=? AND doc_path=?",
-        (dir_id, doc_path),
-    ).fetchone()[0]
-    conn.execute(
-        "INSERT OR IGNORE INTO keyword_docs(dir_id, kw_id, doc_id, "
-        "occurrence_count, chunk_count) VALUES (?, ?, ?, ?, ?)",
-        (dir_id, kw_id, doc_id, occ, chunk_count),
-    )
 
 
 def test_ensure_schema_is_idempotent(tmp_path: Path):
     conn = connect(tmp_path / "graph.db")
     try:
         ensure_schema(conn)
-        ensure_schema(conn)  # second call must not raise or duplicate rows.
-        _insert_normalized_kw_doc(conn, "/d", "k", "a.md")
-        conn.commit()
-        assert conn.execute("SELECT COUNT(*) FROM keyword_docs").fetchone()[0] == 1
+        ensure_schema(conn)  # second call must be a no-op fast path
         assert read_schema_version(conn) == SCHEMA_VERSION
     finally:
         conn.close()
 
 
-def test_keyword_pairs_has_id_and_source_columns(tmp_path: Path):
+def test_keyword_pairs_has_scope_id_and_source_columns(tmp_path: Path):
+    """Regression: v10 shard key is ``scope_id``, not the pre-v10 ``dir_id``."""
     conn = connect(tmp_path / "graph.db")
     try:
         ensure_schema(conn)
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(keyword_pairs)")}
-        assert "source" in cols
-        assert "cooccur_count" in cols
-        assert "npmi" in cols
-        assert "dir_id" in cols
-        assert "kw_a_id" in cols
-        assert "kw_b_id" in cols
+        assert cols >= {"scope_id", "kw_a_id", "kw_b_id", "source",
+                        "cooccur_count", "npmi"}
+        # The pre-v10 ``dir_id`` must be gone.
+        assert "dir_id" not in cols
     finally:
         conn.close()
 
 
-def test_migrate_v1_preserves_counts_and_salvages_promoted(tmp_path: Path):
-    db = tmp_path / "v1.db"
-    _make_v1_db(db)
-
-    conn = connect(db)
+def test_scope_directories_binding_table_exists(tmp_path: Path):
+    """v10 evidence layer: ``scope_directories`` records local path bindings."""
+    conn = connect(tmp_path / "graph.db")
     try:
-        assert read_schema_version(conn) == 0
         ensure_schema(conn)
-        assert read_schema_version(conn) == SCHEMA_VERSION
-
-        tables = set(list_tables(conn))
-        for name in V1_TABLES:
-            assert name in tables, f"v1 table {name} vanished"
-        for name in GRAPH_TABLES:
-            assert name in tables
-        for name in INTERN_TABLES:
-            assert name in tables
-        # v9: legacy v1 keyword_docs was dropped during v3→v4, and v9's
-        # new keyword_docs is recreated in the current DDL — post-migration
-        # it IS present with the new column shape.
-        assert "keyword_docs" in tables
-
-        # keyword_counts preserved (normalized: SELECT via joins).
-        count = conn.execute(
-            "SELECT c.count, k.kw AS term "
-            "FROM keyword_counts c JOIN keywords k ON k.id = c.kw_id"
-        ).fetchone()
-        assert count["term"] == "alpha" and count["count"] == 5
-
-        # Only llm_promoted rows survive; doc-level ('g') cleared.
-        sources = {
-            row["source"]
-            for row in conn.execute("SELECT DISTINCT source FROM keyword_pairs")
-        }
-        assert sources <= {LLM_PROMOTED_SOURCE}
-        salvaged = conn.execute(
-            "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, "
-            "       p.cooccur_count AS cooccur_count, p.source AS source "
-            "FROM keyword_pairs p "
-            "JOIN keywords ka ON ka.id = p.kw_a_id "
-            "JOIN keywords kb ON kb.id = p.kw_b_id"
-        ).fetchall()
-        assert len(salvaged) == 1
-        assert salvaged[0]["keyword_a"] == "gamma"
-        assert salvaged[0]["keyword_b"] == "delta"
-        assert salvaged[0]["source"] == LLM_PROMOTED_SOURCE
-        # doc-level 'alpha'/'beta' pair is gone.
-        assert conn.execute(
-            "SELECT COUNT(*) FROM keyword_pairs p "
-            "JOIN keywords ka ON ka.id = p.kw_a_id "
-            "WHERE ka.kw='alpha'"
-        ).fetchone()[0] == 0
+        cols = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(scope_directories)"
+        )}
+        assert cols >= {"scope_id", "directory", "indexed_at"}
     finally:
         conn.close()
 
 
-def test_migrate_v3_drops_legacy_keyword_docs(tmp_path: Path):
-    """v3→v4 migration drops the *legacy* keyword_docs table and salvages
-    llm_promoted pairs.
-
-    Note the collision: schema v9 also has a table called ``keyword_docs``
-    (doc-level inverted index, unrelated shape). This test seeds a v3 DB
-    whose ``keyword_docs`` is the legacy shape; after migration the v9
-    table appears with the new shape, so post-migration ``keyword_docs``
-    should still be present (as the v9 asset), just with different columns.
-    The legacy detection gate in ``_needs_v3_to_v4`` uses
-    ``user_version < 4`` to avoid the false positive on already-v9 DBs.
-    """
-    db = tmp_path / "v3.db"
-    _make_v3_db(db)
-
-    conn = connect(db)
+def test_scope_stats_has_scope_id(tmp_path: Path):
+    conn = connect(tmp_path / "graph.db")
     try:
-        assert read_schema_version(conn) == 3
         ensure_schema(conn)
-        assert read_schema_version(conn) == SCHEMA_VERSION
-
-        tables = set(list_tables(conn))
-        # v9 keyword_docs is now a real asset table; the legacy v3 shape
-        # was dropped during v3→v4, and the v9 recreate went through the
-        # normal DDL path. Verify the new v9 columns are present.
-        assert "keyword_docs" in tables
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(keyword_docs)")}
-        assert cols >= {"dir_id", "kw_id", "doc_id", "occurrence_count", "chunk_count"}
-        for name in GRAPH_TABLES:
-            assert name in tables
-
-        # llm_promoted pair salvaged.
-        rows = conn.execute(
-            "SELECT ka.kw AS keyword_a, kb.kw AS keyword_b, p.source AS source "
-            "FROM keyword_pairs p "
-            "JOIN keywords ka ON ka.id = p.kw_a_id "
-            "JOIN keywords kb ON kb.id = p.kw_b_id"
-        ).fetchall()
-        assert len(rows) == 1
-        assert rows[0]["source"] == LLM_PROMOTED_SOURCE
-        assert (rows[0]["keyword_a"], rows[0]["keyword_b"]) == ("ka", "kb")
-    finally:
-        conn.close()
-
-
-def test_migration_is_idempotent_on_current(tmp_path: Path):
-    db = tmp_path / "v3.db"
-    _make_v3_db(db)
-
-    conn = connect(db)
-    try:
-        ensure_schema(conn)  # migrate to v5
-        first = conn.execute(
-            "SELECT ka.kw, kb.kw, p.source FROM keyword_pairs p "
-            "JOIN keywords ka ON ka.id=p.kw_a_id "
-            "JOIN keywords kb ON kb.id=p.kw_b_id "
-            "ORDER BY 1,2,3"
-        ).fetchall()
-        ensure_schema(conn)  # no-op fast path
-        second = conn.execute(
-            "SELECT ka.kw, kb.kw, p.source FROM keyword_pairs p "
-            "JOIN keywords ka ON ka.id=p.kw_a_id "
-            "JOIN keywords kb ON kb.id=p.kw_b_id "
-            "ORDER BY 1,2,3"
-        ).fetchall()
-        assert [tuple(r) for r in first] == [tuple(r) for r in second]
-        assert read_schema_version(conn) == SCHEMA_VERSION
+        cols = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(scope_stats)"
+        )}
+        assert cols >= {"scope_id", "n_chunks", "n_docs", "vocab_size"}
+        assert "dir_id" not in cols
     finally:
         conn.close()
 
 
 def test_graph_tables_writable_after_ensure(tmp_path: Path):
+    """End-to-end sanity: manual INSERTs into every asset table succeed."""
     conn = connect(tmp_path / "graph.db")
     try:
         ensure_schema(conn)
-        conn.execute("INSERT INTO directories(path) VALUES ('/d')")
+        conn.execute(
+            "INSERT INTO scopes(name, kind, created_at) "
+            "VALUES ('domain-x', 'test', datetime('now'))"
+        )
+        scope_id = conn.execute(
+            "SELECT id FROM scopes WHERE name='domain-x'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO scope_directories(scope_id, directory, indexed_at) "
+            "VALUES (?, '/tmp/x', datetime('now'))",
+            (scope_id,),
+        )
         conn.execute("INSERT INTO keywords(kw) VALUES ('alpha')")
         conn.execute("INSERT INTO keywords(kw) VALUES ('beta')")
-        conn.execute(
-            "INSERT INTO docs(dir_id, doc_path) VALUES "
-            "((SELECT id FROM directories WHERE path='/d'), 'a.md')"
-        )
-        dir_id = conn.execute("SELECT id FROM directories WHERE path='/d'").fetchone()[0]
-        doc_id = conn.execute(
-            "SELECT id FROM docs WHERE dir_id=? AND doc_path='a.md'", (dir_id,)
+        alpha_id = conn.execute(
+            "SELECT id FROM keywords WHERE kw='alpha'"
         ).fetchone()[0]
-        alpha_id = conn.execute("SELECT id FROM keywords WHERE kw='alpha'").fetchone()[0]
-        beta_id = conn.execute("SELECT id FROM keywords WHERE kw='beta'").fetchone()[0]
+        beta_id = conn.execute(
+            "SELECT id FROM keywords WHERE kw='beta'"
+        ).fetchone()[0]
         conn.execute(
-            "INSERT INTO keyword_docs (dir_id, kw_id, doc_id, "
+            "INSERT INTO docs(scope_id, doc_path) VALUES (?, 'a.md')",
+            (scope_id,),
+        )
+        doc_id = conn.execute(
+            "SELECT id FROM docs WHERE scope_id=? AND doc_path='a.md'",
+            (scope_id,),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO keyword_docs(scope_id, kw_id, doc_id, "
             "occurrence_count, chunk_count) VALUES (?, ?, ?, 2, 1)",
-            (dir_id, alpha_id, doc_id),
+            (scope_id, alpha_id, doc_id),
         )
         conn.execute(
-            "INSERT INTO keyword_pairs (dir_id, kw_a_id, kw_b_id, source, "
-            "cooccur_count, npmi) VALUES (?, ?, ?, 'chunk_cooccur', 3, 0.5)",
-            (dir_id, alpha_id, beta_id),
+            "INSERT INTO keyword_pairs(scope_id, kw_a_id, kw_b_id, source, "
+            "cooccur_count, npmi) "
+            f"VALUES (?, ?, ?, '{CHUNK_COOCCUR_SOURCE}', 3, 0.5)",
+            (scope_id, alpha_id, beta_id),
         )
         conn.execute(
-            "INSERT INTO heading_docs (doc_id, heading_path, chapter_id, start_line, end_line) "
+            "INSERT INTO heading_docs(doc_id, heading_path, chapter_id, "
+            "start_line, end_line) "
             "VALUES (?, 'Install > macOS', 'install/macos', 10, 20)",
             (doc_id,),
         )
         conn.commit()
-        # v9: chunks / keyword_chunks are dropped; keyword_docs replaces them.
         assert conn.execute("SELECT COUNT(*) FROM keyword_docs").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM keyword_pairs").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM heading_docs").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM scope_directories").fetchone()[0] == 1
     finally:
         conn.close()
 
 
-def test_ensure_schema_participates_in_caller_transaction(tmp_path: Path):
-    """Regression: ensure_schema must NOT commit the caller's in-flight txn.
+# ---------------------------------------------------------------------------
+# Transaction semantics
+# ---------------------------------------------------------------------------
 
-    Prior to the review-followup fix, ``ensure_schema``'s fast path called
-    ``conn.commit()`` unconditionally, silently splitting a caller's atomic
-    batch (e.g. ``KeywordLibrary.add_keywords`` INSERT followed by a
-    vote-recording helper that itself calls ensure_schema). A crash between
-    the two would leave partial state on disk.
+
+def test_ensure_schema_fast_path_does_not_commit_caller_txn(tmp_path: Path):
+    """Regression: v10 fast path must not commit a caller's in-flight txn.
+
+    A caller-owned transaction wrapping a write followed by a second
+    ensure_schema call (typical for ``KeywordLibrary.add_keywords`` +
+    ``record_votes_from_keywords``) must remain atomic — a crash before
+    the caller commits must roll back everything.
     """
     db = tmp_path / "graph.db"
     conn = connect(db)
     try:
-        ensure_schema(conn)  # migrate to current
-        _insert_normalized_kw_doc(conn, "/d", "kw1", "a.md")
+        ensure_schema(conn)  # first: creates schema, commits its own txn
+        conn.execute(
+            "INSERT INTO scopes(name) VALUES ('domain-x')"
+        )
         assert conn.in_transaction is True
-
-        # Second ensure_schema (fast path) MUST NOT commit the pending INSERT.
+        # Second call is the fast-path branch — it must NOT commit.
         ensure_schema(conn)
         assert conn.in_transaction is True, (
-            "ensure_schema fast path must not commit the caller's transaction"
+            "fast-path ensure_schema silently committed caller's txn"
         )
-
         # Simulate caller crashing without committing.
     finally:
         conn.close()
 
-    # Reopen: the row should NOT be visible because the caller never committed.
+    # Reopen: the INSERT must not be visible.
     conn = connect(db)
     try:
-        rows = conn.execute("SELECT COUNT(*) FROM keyword_docs").fetchone()[0]
-        assert rows == 0, (
-            f"ensure_schema silently committed caller's INSERT (got {rows} rows, expected 0)"
-        )
+        n = conn.execute("SELECT COUNT(*) FROM scopes").fetchone()[0]
+        assert n == 0, f"fast-path ensure_schema leaked {n} row(s)"
     finally:
         conn.close()
 
 
-def test_migration_within_caller_transaction_succeeds(tmp_path: Path):
-    """Regression: migration must not fail when caller already has a txn.
+# ---------------------------------------------------------------------------
+# Legacy DB rejection (plan-2026-07-14 §7)
+# ---------------------------------------------------------------------------
 
-    Same scenario as the v4 test but converging on v5.
-    """
-    db = tmp_path / "legacy.db"
-    # Seed a v3-shaped legacy DB.
+
+def _seed_v5_v9_shape(db: Path, version: int) -> None:
+    """Create a minimal v5-v9-shaped DB: has ``directories``, stamped."""
     raw = sqlite3.connect(str(db))
-    raw.executescript(
-        """
-        CREATE TABLE keyword_docs (directory TEXT, keyword TEXT, doc_path TEXT,
-            occurrence_count REAL, first_line INTEGER, updated_at TEXT,
-            scope TEXT DEFAULT '',
-            PRIMARY KEY (directory, keyword, doc_path));
-        CREATE TABLE keyword_pairs (scope TEXT NOT NULL, directory TEXT NOT NULL,
-            keyword_a TEXT NOT NULL, keyword_b TEXT NOT NULL,
-            count REAL NOT NULL DEFAULT 0, updated_at TEXT,
-            PRIMARY KEY (scope, directory, keyword_a, keyword_b));
-        CREATE TABLE keyword_counts (scope TEXT NOT NULL, directory TEXT NOT NULL,
-            term TEXT NOT NULL, count REAL NOT NULL DEFAULT 0, updated_at TEXT,
-            PRIMARY KEY (scope, directory, term));
-        """
-    )
     raw.execute(
-        "INSERT INTO keyword_pairs VALUES ('llm_promoted', '/d', 'alpha', 'beta', 3, NULL)"
+        "CREATE TABLE directories (id INTEGER PRIMARY KEY, path TEXT)"
     )
-    raw.execute("INSERT INTO keyword_counts VALUES ('g', '/d', 'seed', 2, NULL)")
-    raw.execute("PRAGMA user_version = 3")
+    raw.execute(f"PRAGMA user_version = {int(version)}")
     raw.commit()
     raw.close()
 
+
+def _seed_prev5_shape(db: Path) -> None:
+    """Create a pre-v5 ``KeywordLibrary`` shape: TEXT ``directory`` columns,
+    no ``directories`` intern table, ``user_version = 0``."""
+    raw = sqlite3.connect(str(db))
+    raw.executescript(
+        """
+        CREATE TABLE keyword_counts (
+            scope TEXT NOT NULL, directory TEXT NOT NULL,
+            term TEXT NOT NULL, count REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (scope, directory, term)
+        );
+        CREATE TABLE keyword_sources (
+            directory TEXT NOT NULL, keyword TEXT NOT NULL,
+            path TEXT NOT NULL, line_number INTEGER,
+            count REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (directory, keyword, path, line_number)
+        );
+        """
+    )
+    raw.commit()
+    raw.close()
+
+
+@pytest.mark.parametrize("version", [1, 3, 5, 7, 8, 9])
+def test_reject_v5_to_v9_legacy_db(tmp_path: Path, version: int):
+    """Every pre-v10 user_version stamp with the ``directories`` marker
+    triggers the actionable rejection message, mentioning the DB file and
+    the ``SELECT path FROM directories`` inspect hint."""
+    db = tmp_path / f"legacy_v{version}.db"
+    _seed_v5_v9_shape(db, version)
     conn = connect(db)
     try:
-        # Caller starts a write transaction (mimics some ad-hoc INSERT). The
-        # legacy v3 keyword_counts still has TEXT columns pre-migration, so
-        # we open the txn with a harmless SELECT that autobegins nothing;
-        # instead we hold a savepoint-style lock via a real INSERT into a
-        # column-compatible legacy table.
-        conn.execute(
-            "INSERT INTO keyword_counts VALUES ('g', '/d', 'kw', 1, NULL)"
-        )
-        assert conn.in_transaction is True
-
-        # This used to raise "cannot start a transaction within a transaction".
-        version = ensure_schema(conn)
-        assert version == SCHEMA_VERSION
-
-        # v9 tables exist and legacy llm_promoted salvaged.
-        tables = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )}
-        # v9: chunks / keyword_chunks are dropped; keyword_docs is the
-        # doc-level replacement and IS present.
-        assert "chunks" not in tables and "keyword_chunks" not in tables
-        assert "keyword_docs" in tables
-        assert "directories" in tables and "keywords" in tables and "docs" in tables
-        pair = conn.execute(
-            "SELECT p.source FROM keyword_pairs p "
-            "JOIN keywords ka ON ka.id = p.kw_a_id WHERE ka.kw = 'alpha'"
-        ).fetchone()
-        assert pair is not None and pair["source"] == LLM_PROMOTED_SOURCE
-
-        conn.commit()
+        with pytest.raises(RuntimeError) as exc_info:
+            ensure_schema(conn)
+        message = str(exc_info.value)
+        assert "scope / directory split" in message
+        assert "SELECT path FROM directories" in message
+        assert str(db) in message
     finally:
         conn.close()
 
 
-def test_concurrent_migration_second_process_survives(tmp_path: Path):
-    """Regression: TOCTOU-safe migration re-checks version inside the txn."""
-    db = tmp_path / "legacy.db"
+def test_reject_prev5_keyword_library_shape(tmp_path: Path):
+    """Pre-v5 ``KeywordLibrary`` DBs have no ``directories`` table and
+    ``user_version = 0`` — they must still be caught, with a hint that
+    doesn't dangle at a nonexistent ``directories`` table."""
+    db = tmp_path / "prev5.db"
+    _seed_prev5_shape(db)
+    conn = connect(db)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            ensure_schema(conn)
+        message = str(exc_info.value)
+        assert "scope / directory split" in message
+        # The v5-v9 hint that references a non-existent table must NOT
+        # be present here — the pre-v5 branch uses the `.tables` /
+        # `PRAGMA user_version` hint instead.
+        assert "SELECT path FROM directories" not in message
+        assert ".tables" in message or "PRAGMA user_version" in message
+    finally:
+        conn.close()
+
+
+def test_reject_future_version_db(tmp_path: Path):
+    """A DB stamped with a version higher than ``SCHEMA_VERSION`` must not
+    be silently rewritten. ``ensure_schema`` rejects it via the legacy
+    path (the check-and-reject is on "user_version not in (0, current)")."""
+    db = tmp_path / "future.db"
     raw = sqlite3.connect(str(db))
-    raw.executescript(
-        """
-        CREATE TABLE keyword_pairs (scope TEXT NOT NULL, directory TEXT NOT NULL,
-            keyword_a TEXT NOT NULL, keyword_b TEXT NOT NULL,
-            count REAL NOT NULL DEFAULT 0, updated_at TEXT,
-            PRIMARY KEY (scope, directory, keyword_a, keyword_b));
-        """
-    )
-    raw.execute("PRAGMA user_version = 3")
+    raw.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION) + 1}")
     raw.commit()
     raw.close()
-
-    # "Winner" migrates first.
-    winner = connect(db)
+    conn = connect(db)
     try:
-        ensure_schema(winner)
+        with pytest.raises(RuntimeError):
+            ensure_schema(conn)
     finally:
-        winner.close()
+        conn.close()
 
-    # "Loser" opens after winner committed. Version is now current; ensure_schema
-    # must NOT try to migrate again.
-    loser = connect(db)
-    try:
-        version = ensure_schema(loser)
-        assert version == SCHEMA_VERSION
-    finally:
-        loser.close()
+
+# ---------------------------------------------------------------------------
+# resolve_scope_name (pure-string, no filesystem touch)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_scope_name_none_passes_through():
+    assert resolve_scope_name(None) is None
+
+
+def test_resolve_scope_name_strips_whitespace():
+    assert resolve_scope_name("  physics-cn  ") == "physics-cn"
+
+
+def test_resolve_scope_name_empty_raises():
+    with pytest.raises(ValueError):
+        resolve_scope_name("")
+
+
+def test_resolve_scope_name_whitespace_only_raises():
+    with pytest.raises(ValueError):
+        resolve_scope_name("   \t\n")
+
+
+def test_resolve_scope_name_does_not_resolve_paths(tmp_path: Path):
+    """v10 invariant: scope names are opaque handles. ``resolve_scope_name``
+    does not call ``Path.resolve`` / ``expanduser``, so a name that happens
+    to look like a path is stored verbatim (this is a design choice, not a
+    footgun — ``KeywordLibrary`` has a separate path-shaped guard)."""
+    tricky = str(tmp_path / "not-a-real-scope")
+    assert resolve_scope_name(tricky) == tricky

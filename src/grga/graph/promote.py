@@ -33,11 +33,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Union
 
+from grga.graph.ids import IdInterner
 from grga.graph.schema import (
     LLM_PROMOTED_SOURCE,
     connect,
     ensure_schema,
-    resolve_scope_key,
+    resolve_scope_name,
 )
 
 DEFAULT_THRESHOLD = 3
@@ -49,7 +50,7 @@ PROMOTE_SCOPE = LLM_PROMOTED_SOURCE
 class PromotedPair:
     """One keyword pair that crossed the promotion threshold."""
 
-    directory: str
+    scope: str
     keyword_a: str
     keyword_b: str
     vote_count: float
@@ -57,7 +58,7 @@ class PromotedPair:
 
     def to_dict(self) -> dict:
         return {
-            "directory": self.directory,
+            "scope": self.scope,
             "keyword_a": self.keyword_a,
             "keyword_b": self.keyword_b,
             "vote_count": round(self.vote_count, 4),
@@ -91,7 +92,7 @@ def _run_promote(
     conn: sqlite3.Connection,
     *,
     threshold: float,
-    scope_key: Optional[str],
+    scope_name: Optional[str],
     dry_run: bool,
     repromote: bool,
 ) -> "PromoteStats":
@@ -101,28 +102,26 @@ def _run_promote(
 
     where = "v.vote_count >= ?"
     params: List = [float(threshold)]
-    if scope_key is not None:
-        # Resolve the scope to a dir_id up front; if the scope has never
+    if scope_name is not None:
+        # Resolve the scope to an id up front; if the scope has never
         # been seen there are no candidate votes.
-        row = conn.execute(
-            "SELECT id FROM directories WHERE path = ?", (scope_key,)
-        ).fetchone()
-        if row is None:
+        scope_id = IdInterner(conn).scope_id_ro(scope_name)
+        if scope_id is None:
             return stats
-        where += " AND v.dir_id = ?"
-        params.append(int(row[0]))
+        where += " AND v.scope_id = ?"
+        params.append(int(scope_id))
     rows = conn.execute(
         f"""
-        SELECT v.dir_id AS dir_id,
+        SELECT v.scope_id AS scope_id,
                v.kw_a_id AS kw_a_id,
                v.kw_b_id AS kw_b_id,
-               dir.path AS directory,
+               s.name AS scope,
                ka.kw AS keyword_a,
                kb.kw AS keyword_b,
                v.vote_count AS vote_count,
                v.promoted_at AS promoted_at
         FROM llm_extension_votes v
-        JOIN directories dir ON dir.id = v.dir_id
+        JOIN scopes s ON s.id = v.scope_id
         JOIN keywords ka ON ka.id = v.kw_a_id
         JOIN keywords kb ON kb.id = v.kw_b_id
         WHERE {where}
@@ -136,7 +135,7 @@ def _run_promote(
         stats.candidates += 1
         already = bool(row["promoted_at"])
         pair = PromotedPair(
-            directory=row["directory"],
+            scope=row["scope"],
             keyword_a=row["keyword_a"],
             keyword_b=row["keyword_b"],
             vote_count=float(row["vote_count"]),
@@ -150,23 +149,23 @@ def _run_promote(
         if dry_run:
             stats.promoted += 1
             continue
-        # v5 keyword_pairs: PK is (dir_id, kw_a_id, kw_b_id, source). We
-        # write source='llm_promoted' with a NULL npmi (chunk-level build
-        # owns the npmi channel; vote-derived pairs do not have an npmi
-        # to report). ``cooccur_count`` here reuses the vote count as an
+        # v10 keyword_pairs: PK is (scope_id, kw_a_id, kw_b_id, source).
+        # We write source='llm_promoted' with a NULL npmi (chunk-level
+        # build owns the npmi channel; vote-derived pairs have no npmi
+        # to report). ``cooccur_count`` reuses the vote count as a
         # "how strong is the LLM signal" number.
         conn.execute(
             """
             INSERT INTO keyword_pairs
-                (dir_id, kw_a_id, kw_b_id, source,
+                (scope_id, kw_a_id, kw_b_id, source,
                  cooccur_count, npmi, updated_at)
             VALUES (?, ?, ?, ?, ?, NULL, ?)
-            ON CONFLICT(dir_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+            ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
                 cooccur_count = cooccur_count + excluded.cooccur_count,
                 updated_at = excluded.updated_at
             """,
             (
-                row["dir_id"],
+                row["scope_id"],
                 row["kw_a_id"],
                 row["kw_b_id"],
                 LLM_PROMOTED_SOURCE,
@@ -177,9 +176,9 @@ def _run_promote(
         conn.execute(
             """
             UPDATE llm_extension_votes SET promoted_at = ?
-            WHERE dir_id = ? AND kw_a_id = ? AND kw_b_id = ?
+            WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ?
             """,
-            (now, row["dir_id"], row["kw_a_id"], row["kw_b_id"]),
+            (now, row["scope_id"], row["kw_a_id"], row["kw_b_id"]),
         )
         stats.promoted += 1
 
@@ -191,7 +190,7 @@ def _run_promote(
 def promote_votes(
     *,
     threshold: float = DEFAULT_THRESHOLD,
-    directory: Optional[Union[str, Path]] = None,
+    scope: Optional[str] = None,
     db_path: Union[str, Path, None] = None,
     dry_run: bool = False,
     repromote: bool = False,
@@ -201,31 +200,29 @@ def promote_votes(
 
     Args:
         threshold: minimum ``vote_count`` for a pair to be promoted.
-        directory: scope filter following the shared convention
-            (:func:`grga.graph.schema.resolve_scope_key`):
+        scope: logical scope name (v10). Follows the shared convention:
 
-            * ``None`` (default) - promote across every scope in the votes
-              table.
-            * ``""`` (or whitespace) - promote only *unscoped* votes.
-            * a path - promote only votes recorded for that resolved
-              directory.
+            * ``None`` (default) - promote across every scope in the
+              votes table.
+            * a name - promote only votes recorded for that scope.
 
-            The resulting ``keyword_pairs`` rows keep the same directory
-            value as the source vote row, so per-scope semantics survive.
+            The resulting ``keyword_pairs`` rows keep the same scope as
+            the source vote row, so per-scope semantics survive.
         db_path: SQLite path; defaults to the shared deep-search DB.
         dry_run: when ``True``, compute candidates but write nothing.
-        repromote: when ``True``, promote qualifying pairs again even if they
-            already carry a ``promoted_at`` marker (they still merge
-            additively into ``keyword_pairs``). Default ``False`` skips them.
+        repromote: when ``True``, promote qualifying pairs again even if
+            they already carry a ``promoted_at`` marker (they still merge
+            additively into ``keyword_pairs``). Default ``False`` skips
+            them.
         conn: reuse an existing connection instead of opening one.
 
     Returns:
         A :class:`PromoteStats` describing candidates and what was written.
     """
-    scope_key = resolve_scope_key(directory)
+    scope_name = resolve_scope_name(scope)
     if conn is not None:
         return _run_promote(
-            conn, threshold=threshold, scope_key=scope_key,
+            conn, threshold=threshold, scope_name=scope_name,
             dry_run=dry_run, repromote=repromote,
         )
 
@@ -235,7 +232,7 @@ def promote_votes(
     owned = connect(target_db)
     try:
         return _run_promote(
-            owned, threshold=threshold, scope_key=scope_key,
+            owned, threshold=threshold, scope_name=scope_name,
             dry_run=dry_run, repromote=repromote,
         )
     finally:

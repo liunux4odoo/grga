@@ -25,12 +25,12 @@ def _rows(db: Path) -> list[dict]:
         return [
             dict(row)
             for row in conn.execute(
-                "SELECT dir.path AS directory, "
+                "SELECT s.name AS scope, "
                 "       ka.kw AS keyword_a, "
                 "       kb.kw AS keyword_b, "
                 "       v.vote_count AS vote_count "
                 "FROM llm_extension_votes v "
-                "JOIN directories dir ON dir.id = v.dir_id "
+                "JOIN scopes s ON s.id = v.scope_id "
                 "JOIN keywords ka ON ka.id = v.kw_a_id "
                 "JOIN keywords kb ON kb.id = v.kw_b_id"
             ).fetchall()
@@ -84,7 +84,7 @@ def test_expand_intent_returns_keywords_and_votes(tmp_path):
         "neural network training",
         hits,
         intent="expand",
-        directory=tmp_path,
+        scope="test-scope",
         db_path=db,
         llm_callable=llm,
     )

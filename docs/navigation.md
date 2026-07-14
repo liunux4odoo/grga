@@ -70,26 +70,30 @@ grga v2 的检索原语，按 caller agent 的推理层级由轻到重排列。�
 
 ## 图子系统 `graph/`
 
-离线预建 + 在线读取的关键字共现图。SQLite 存储，与 v1 `KeywordLibrary` 共库。
-v9 keyword-primary（schema v8）起 pair 是**核心知识资产**（累积、grow-and-
-refine），不再有 chunk 级 doc 映射；graph 查询走亚毫秒的 index-only 早停，
-不再需要 PPR / adjacency cache。
+离线预建 + 在线读取的关键字共现图。SQLite 存储。**v10 scope / directory 分野**
+（schema v10，plan-2026-07-14）：知识资产（`keyword_pairs` / `keyword_stats` /
+`scope_stats` / `auto_ngram_dict` / `llm_extension_votes`）按**逻辑 scope 名**
+shard（`scopes` 表），跨机器可迁移；证据层（`scope_directories` / `docs` /
+`keyword_docs` / `heading_docs` / `keyword_sources`）机器本地，迁移时清空/重建。
+pair 是核心知识资产，累积增长；graph 查询走亚毫秒 index-only 早停。
 
 | 模块 | 职责 |
 |---|---|
-| `schema.py` | schema 建表 + 链式迁移（v1/v3→v4→v5→v8→v9）：intern 表 (`directories` / `keywords` / `docs`) + 资产表 (`keyword_pairs`(带 `source` + `npmi`) / `keyword_stats` / `scope_stats` / `keyword_docs`) + `heading_docs` + `llm_extension_votes` + `keyword_counts` + `keyword_sources`；v8 迁移**有损**（DROP `chunks` / `keyword_chunks`，回填 `keyword_stats` 后删表），v9 加 `keyword_docs`（doc 级倒排替代已删的 chunk 级表）。原子 BEGIN IMMEDIATE，caller-owned txn 兼容 |
-| `ids.py` | `IdInterner`：get-or-insert 三张 intern 表 + 反查文本；每个查询/写入路径通过它把用户串换成 id、把结果 id 换回串（守 --json 契约） |
-| `build.py` | 段级离线索引构建入口 `build_graph_index`；对应 CLI `grga index build`。切分 chunk（RAM only，不落表），通过 `IdInterner` 累加进 `keyword_pairs`（`chunk_cooccur`，UPSERT 增量）+ `keyword_stats`（chunk_df/doc_df/occurrences）+ `keyword_docs`（doc 级倒排）+ `scope_stats`（n_chunks/n_docs/vocab_size）。写入期三门槛：**Gate 1 独立性** `df_a == df_b == co`（无参恒开、严格三元相等，挡 npmi=1.0 绑定 artefact 且容忍 `mode='build'` 增量累积）+ **Gate 2** `min_pair_count`（`resolve_min_pair_count(n_chunks)` scope 自适应阶梯，`None`=自适应）+ **Gate 3** `BUILD_MIN_NPMI`（默认 0.2）|
-| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图（反污染门）；通过 `IdInterner` 写 id，`get_votes` JOIN 回文本 |
-| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`（`source='llm_promoted'`，`npmi` NULL）；`promoted_at` 列 |
-| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_stats` + `keyword_pairs` 回文本；not-indexed 分支额外附 `similar_keywords`（vocab 子串/超串探针，seed 未入图时给 caller 换词线索）|
+| `schema.py` | v10 建表（`scopes` / `scope_directories` intern + 资产表 / 证据表）+ `resolve_scope_name`（纯字符串归一化，**不 resolve 路径**）+ `SCHEMA_VERSION = 10`。`ensure_schema` 检测 v10 之前的库（`user_version < 10` 或 `directories` 表存在）**直接报错**给出重建指引，不做数据保迁移（用户空、无历史包袱） |
+| `ids.py` | `IdInterner`：`scope_id` / `scope_name` 系列（v10 取代 v9 `dir_id` 系列）+ keywords / docs intern。新增 `bind_directory(scope_id, directory)` / `list_directories(scope_id)` / `unbind_directory` 管理 `scope_directories` 旁路表 |
+| `build.py` | 段级离线索引构建入口 `build_graph_index(scope, *, directory, ...)`；`scope` 是**逻辑名**、`directory` 是**物理路径**，两者独立参数。build 时把 `scope_directories` 绑定 UPSERT 上去；`keyword_pairs`（chunk_cooccur，UPSERT 增量）+ `keyword_stats`（chunk_df/doc_df/occurrences）+ `keyword_docs`（doc 级倒排）+ `scope_stats`（n_chunks/n_docs/vocab_size）全部按 scope_id shard。写入期三门槛：Gate 1 独立性 + Gate 2 `min_pair_count` + Gate 3 `BUILD_MIN_NPMI` |
+| `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图（反污染门）。v10 API：`scope: Optional[str]` 参数，`None` 时静默跳过写入（知识必须有名）。`get_votes` JOIN `scopes.name` 回文本 |
+| `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`（`source='llm_promoted'`，`npmi` NULL）；`promoted_at` 列做幂等标记，防止同一投票被二次升级 |
+| `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_stats` + `keyword_pairs` 回文本；`docs_by_scope` 现在按逻辑 scope 名分组。**v10 新增 knowledge-only 分支**：当 seed 在 `keyword_stats` 有条目但 `docs` 为空（`grga index import` 后典型），返回 `evidence_hint` 说明需要在本机 build 才能获得 doc 分布 |
 
 **反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 →
 进入 `keyword_pairs`(`source='llm_promoted'`) → `related --mode graph` 免费拿到。
 
-> v9 已删除：`graph/ppr.py`、`graph/adjacency_cache.py`；对应 `chunks` /
-> `keyword_chunks` 两张表在 schema v8 也被 DROP。历史设计见
-> `docs/design/plan-2026-07-12-keyword-primary.md`。
+**scope 多选**（v10）：`related --scope a --scope b` 走 `WHERE scope_id IN (?, ?)`；
+不加 `--scope` = 跨全部 scope union。见 `docs/design/plan-2026-07-14-scope-directory-split.md` §4。
+
+> v10 已删除：pre-v10 `directories` intern 表（绝对路径 shard）、`resolve_scope_key`、
+> `scope_write_key`。历史设计见 `docs/design/plan-2026-07-12-keyword-primary.md`。
 
 ---
 
@@ -176,7 +180,8 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/v2-design.md` | 五动词、三层扩展模型、设计哲学（**首读**） |
 | `docs/design/v2-plan.md` | v2 落地阶段拆分 |
 | `docs/design/decisions.md` | 关键决策留痕 |
-| `docs/design/plan-2026-07-12-keyword-primary.md` | **v9 架构**：pair 字典化 + 删 keyword_chunks（schema v8 落地文档） |
+| `docs/design/plan-2026-07-14-scope-directory-split.md` | **v10 架构**：scope（逻辑名，可迁移）/ directory（物理路径，机器本地）分野；schema v10 + `resolve_scope_name`（不 resolve 路径）+ `scope_directories` 旁路表 + `related --scope` 多选 |
+| `docs/design/plan-2026-07-12-keyword-primary.md` | v9 架构：pair 字典化 + 删 keyword_chunks（schema v8 落地文档） |
 | `docs/design/db-memory-optimization-lessons.md` | **DB/内存优化方法学**：TEMP TABLE + SQL self-join 替代 Python 大 Counter；改任何"Python 聚合→落 SQLite"模块前必读 |
 | `docs/design/related-signals-v3.md` | `related --json` 当前契约（graph 返候选关键字） |
 | `docs/design/deprecated/related-signals-v2.md` | **已归档** · v2 契约（PPR + expansion + keyword_contributions） |

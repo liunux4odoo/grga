@@ -738,6 +738,19 @@ class GrgaSearchApp(tk.Tk):
             self.status_var.set("Ready")
             return
 
+        # v10: deep-search requires a logical scope name. Guard here so the
+        # user gets an actionable message instead of a silent backend error
+        # ({"ok": false, "error": "requires --scope"}).
+        if self.deep_search_var.get() and self.deep_search_available:
+            if not self._first_text(self.deep_search_config.get("scope")):
+                messagebox.showwarning(
+                    "深度搜索",
+                    "深度搜索需要一个逻辑 scope 名称（v10）。请在设置文件的 "
+                    "deep_search.scope 中填写与 `grga index build --scope` 一致的名称。",
+                )
+                self.status_var.set("Ready")
+                return
+
         max_count = self._parse_optional_int(self.max_count_var.get(), "最大匹配")
         if max_count is False:
             return
@@ -794,6 +807,7 @@ class GrgaSearchApp(tk.Tk):
                 raw = deep_search_directory(
                     directory,
                     keywords,
+                    scope=self.deep_search_config.get("scope") or None,
                     llm_base_url=self.deep_search_config.get("llm_base_url"),
                     llm_api_key=self.deep_search_config.get("llm_api_key"),
                     llm_model_name=self.deep_search_config.get("llm_model_name"),
