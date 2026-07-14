@@ -1109,7 +1109,7 @@ def _make_index_build_progress():
 @index_app.command("build")
 def index_build_command(
     scope: str = typer.Option(..., "--scope", "-s", help="Logical scope name (v10). Portable across machines: the same name identifies the same knowledge domain regardless of where the corpus lives on this machine. Required — v10 does not auto-derive a name from the directory."),
-    directory: Path = typer.Option(..., "--directory", "-d", exists=True, resolve_path=True, help="Physical directory (or file) to index on this machine. Recorded in `scope_directories` so caller follow-up can locate source files."),
+    directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, resolve_path=True, help="Physical directory (or file) to index on this machine (defaults to the current directory). Recorded in `scope_directories` so caller follow-up can locate source files."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     chunk_mode: str = typer.Option("line", "--chunk-mode", help="Chunk granularity: line (1 line = 1 chunk) or chars (multi-line char window)."),
     chunk_max_chars: int = typer.Option(600, "--chunk-max-chars", help="Target upper bound on chars per chunk (chars mode)."),
@@ -1215,7 +1215,7 @@ def index_build_command(
 @index_app.command("rebuild")
 def index_rebuild_command(
     scope: str = typer.Option(..., "--scope", "-s", help="Logical scope name to rebuild (v10). Same semantics as `grga index build`."),
-    directory: Path = typer.Option(..., "--directory", "-d", exists=True, resolve_path=True, help="Physical directory (or file) to rebuild from on this machine."),
+    directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, resolve_path=True, help="Physical directory (or file) to rebuild from on this machine (defaults to the current directory)."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     chunk_mode: str = typer.Option("line", "--chunk-mode", help="Chunk granularity."),
     chunk_max_chars: int = typer.Option(600, "--chunk-max-chars"),
