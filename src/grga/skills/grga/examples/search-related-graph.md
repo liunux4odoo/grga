@@ -1,13 +1,10 @@
 # Pattern: search → related graph（候选关键字）→ ripgrep
 
 **When to use.** 用户有一个主题关键字，想找到**语料里还有哪些相关概念**，
-而不仅仅是它字面出现的位置。v3 起 `related --mode graph` 返回的是**候选
-关键字 + 关联证据**（不是文档）——它基于离线 L2 共现资产（`keyword_pairs`
-带 `npmi`）计算，**不调用 LLM**。拿到候选关键字后，用 `rga` / `grga
-search` 找原文片段是 caller 的职责。
-
-> v3 破变：graph 模式过去返回"相关文档 + PPR 元数据"，现在返回候选关键字。
-> 从关键字到片段用 ripgrep。见 `docs/design/related-signals-v3.md`。
+而不仅仅是它字面出现的位置。`related --mode graph` 返回的是**候选关键字
++ 关联证据**（不是文档）——它基于离线共现图谱（关键字 pair 带 `npmi`）
+计算，**不调用 LLM**。拿到候选关键字后，用 `rga` / `grga search` 找原文
+片段是 caller 的职责。
 
 ## Storyboard
 
@@ -57,7 +54,7 @@ grga related "macOS" \
     --json
 ```
 
-## Expected shape of `related --mode graph`（v3）
+## Expected shape of `related --mode graph`
 
 ```json
 {
@@ -79,13 +76,13 @@ Interpretation:
 
 - `results[]` 是**候选关键字**，每条带 `npmi`（关联强度）、`cooccur_count`
   （原始共现次数）、`via_seed`（从哪个 seed 扩展来）、`chunk_df`（该候选
-  词自身的 chunk 频次，hub 词判别信号）、`source`、`scopes`（v3.1：该候选
-  落在哪几个 scope 里）。
+  词自身的 chunk 频次，hub 词判别信号）、`source`、`scopes`（该候选落在
+  哪几个 scope 里）。
 - 排序为 `(via_seed, -npmi, kw)`。取前几个高 `npmi` 候选拼进 ripgrep。
 - 想剔除 hub 词：过滤掉 `chunk_df` 过高的候选（阈值由 caller 定）。
-- `resolved_seeds[]`（v3.1）：每个去重 seed 一条 `{seed, in_index}`。多
-  seed 时用它区分空结果：`in_index=false` = 未知词（换词）；`in_index=true`
-  但 seed 缺席于 `{results[].via_seed}` = 已知但孤立（换更具体 seed / 松
+- `resolved_seeds[]`：每个去重 seed 一条 `{seed, in_index}`。多 seed 时用
+  它区分空结果：`in_index=false` = 未知词（换词）；`in_index=true` 但
+  seed 缺席于 `{results[].via_seed}` = 已知但孤立（换更具体 seed / 松
   `--min-npmi`）。免去逐 seed 调 `graph inspect`。
 - 空 `{"results": []}` 意味着离线索引未覆盖此 seed（例如 hub seed 的所有
   pair 在写入期被 npmi 门槛过滤）。**在本 skill 内直接跳过**——改用
@@ -99,14 +96,13 @@ Interpretation:
   keywords, then use those with `related`.
 - **The offline index does not cover this scope.** `related --mode
   graph` returns `{"results": []}` — fall back to `--mode heading`
-  （走 `heading_docs`，仍返回文档）or drop the T2 step entirely for
-  this task.
+  （返回文档）or drop the T2 step entirely for this task.
 - **You want a specific *chapter* across files** — that is
   `--mode heading` (see the `heading` example in the sidebar file
   `../SKILL.md`).
-- **You want the list of directories a seed hits** — `--mode dir` 已在
-  v3 移除。改用 `grga search "<seed>" --json`，caller 侧按目录聚合命中
-  路径（Unix pipeline）。
+- **You want the list of directories a seed hits** — 用
+  `grga search "<seed>" --json`，caller 侧按目录聚合命中路径
+  （Unix pipeline）。
 
 ## Tuning the read-side npmi floor（defaults are usually right）
 

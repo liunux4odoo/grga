@@ -1324,6 +1324,7 @@ def build_graph_index(
     ngram_iters: int = DEFAULT_NGRAM_ITERS,
     max_ngram_n: int = DEFAULT_MAX_NGRAM_N,
     seed_ngram_from: Optional[str] = None,
+    tags: Sequence[str] = (),
     progress: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[[dict], None]] = None,
 ) -> BuildStats:
@@ -1377,6 +1378,11 @@ def build_graph_index(
             params.
         ngram_iters / max_ngram_n: detection tuning; ``ngram_iters`` is
             capped to 1 automatically in ``mode="build"``.
+        tags: optional multi-value scope labels (schema v11). UPSERTed
+            (``INSERT OR IGNORE``, accumulate-only) onto ``scope_tags``
+            so query-side ``--tag`` filters can resolve this scope. Empty
+            / whitespace items are skipped. Existing tags survive a
+            rebuild — use ``grga scope tag rm`` to remove them.
         progress: optional status callback.
         on_event: structured progress callback.
     """
@@ -1447,6 +1453,11 @@ def build_graph_index(
         # evidence layer so ``grga scope list`` and caller follow-up can
         # locate the physical corpus on this machine.
         interner.bind_directory(scope_id, directory_str)
+        # Attach multi-value tag labels (schema v11). Accumulate-only:
+        # a rebuild never clears existing tags — ``grga scope tag rm``
+        # is the removal path. Empty items are dropped inside bind_tags.
+        if tags:
+            interner.bind_tags(scope_id, tags)
 
         # ------------------------------------------------------------------
         # Setup: load existing docs (build mode) and clear scope (rebuild).

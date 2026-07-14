@@ -257,6 +257,117 @@ class IdInterner:
             )
         return int(cur.rowcount or 0)
 
+    # -- scope_tags (multi-value scope labels, schema v11) -------------
+    #
+    # Tags describe *what a scope is* (e.g. ``科幻`` / ``小说``); they are
+    # part of the knowledge layer (portable across machines, included in a
+    # knowledge pack). The build write path uses :meth:`bind_tags`;
+    # query-side ``--tag`` resolution goes through
+    # ``grga.graph.scope.resolve_scope_ids_by_tags`` which JOINs the
+    # ``scope_tags`` table directly.
+    #
+    # Tag strings are stored verbatim after a light strip; the caller is
+    # responsible for consistent casing / normalisation across build and
+    # query (same contract as ``scopes.name``).
+
+    def bind_tags(self, scope_id: int, tags: Sequence[str]) -> int:
+        """UPSERT one or more tag labels onto a scope.
+
+        Idempotent: ``INSERT OR IGNORE`` means repeated calls with the
+        same ``(scope_id, tag)`` are a no-op. Empty / whitespace tags
+        are silently skipped (matches CLI cleanup) so callers can
+        forward user input directly. Returns the number of rows actually
+        inserted (existing labels count as 0). Duplicate entries within
+        one call are de-duped before writing.
+        """
+        cleaned: List[str] = []
+        seen: set = set()
+        for raw in tags:
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            cleaned.append(text)
+        if not cleaned:
+            return 0
+        before = self._conn.total_changes
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO scope_tags (scope_id, tag) VALUES (?, ?)",
+            [(scope_id, tag) for tag in cleaned],
+        )
+        return int(self._conn.total_changes - before)
+
+    def list_tags(self, scope_id: int) -> List[str]:
+        """Return every tag attached to ``scope_id`` in ascending order."""
+        rows = self._conn.execute(
+            "SELECT tag FROM scope_tags WHERE scope_id = ? ORDER BY tag ASC",
+            (scope_id,),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def unbind_tags(
+        self, scope_id: int, tags: Optional[Sequence[str]] = None
+    ) -> int:
+        """Remove tag labels from a scope.
+
+        ``tags=None`` (or empty) removes **every** tag for the scope
+        (mirrors :meth:`unbind_directory`). Returns the number of rows
+        deleted. Does not touch knowledge assets.
+        """
+        if not tags:
+            cur = self._conn.execute(
+                "DELETE FROM scope_tags WHERE scope_id = ?",
+                (scope_id,),
+            )
+            return int(cur.rowcount or 0)
+        cleaned = [str(t).strip() for t in tags if t and str(t).strip()]
+        if not cleaned:
+            return 0
+        placeholders = ",".join("?" for _ in cleaned)
+        cur = self._conn.execute(
+            f"DELETE FROM scope_tags WHERE scope_id = ? AND tag IN ({placeholders})",
+            (scope_id, *cleaned),
+        )
+        return int(cur.rowcount or 0)
+
+    def rename_tag(
+        self, scope_id: int, old_tag: str, new_tag: str,
+    ) -> None:
+        """Rename a single ``(scope_id, old_tag)`` row to ``new_tag``.
+
+        Strict semantics (mirrors :func:`grga.graph.scope.rename_scope`):
+
+        * :class:`LookupError` if ``(scope_id, old_tag)`` does not exist.
+        * :class:`FileExistsError` if ``(scope_id, new_tag)`` already exists.
+
+        A single-row UPDATE on the ``scope_tags`` PK. Both strings are
+        stored verbatim after :meth:`str.strip`; the caller is expected
+        to have validated non-emptiness and that ``old != new``.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM scope_tags WHERE scope_id = ? AND tag = ?",
+            (scope_id, old_tag),
+        ).fetchone()
+        if row is None:
+            raise LookupError(
+                f"tag not found on scope: {old_tag!r}"
+            )
+        clash = self._conn.execute(
+            "SELECT 1 FROM scope_tags WHERE scope_id = ? AND tag = ?",
+            (scope_id, new_tag),
+        ).fetchone()
+        if clash is not None:
+            raise FileExistsError(
+                f"target tag already attached to this scope: {new_tag!r}. "
+                "Use `grga scope tag rm <scope> <old>` if you want to merge."
+            )
+        self._conn.execute(
+            "UPDATE scope_tags SET tag = ? WHERE scope_id = ? AND tag = ?",
+            (new_tag, scope_id, old_tag),
+        )
+
     # -- keywords -------------------------------------------------------
 
     def kw_id(self, kw: str) -> int:

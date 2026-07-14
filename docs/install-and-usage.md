@@ -29,8 +29,11 @@ grga gui
 
 # 5. 想用共现关系图？先建立索引（增量，首次跑全量，之后只处理变化的文件）
 #    --scope 是逻辑域名（跨机器可迁移，与本机目录解耦）；--directory 省略则默认当前目录
+#    可选 --tag 给 scope 附加多值标签（v11，随 knowledge pack 迁移）
 grga index build --scope my-notes --directory ./my-notes
+grga index build --scope sci-fi --directory ./novels --tag 科幻 --tag 小说
 grga related 面壁计划 --scope my-notes
+grga related 面壁计划 --tag 科幻 --tag 小说 --tag-logic and   # 按标签选 scope（顺序无关）
 ```
 
 ---

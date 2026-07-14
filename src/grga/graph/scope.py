@@ -45,6 +45,9 @@ class ScopeInfo:
 
     ``directories``: local path bindings (evidence — may be empty on a
     scope that was just ``grga index import``-ed and not yet re-bound).
+    ``tags``: multi-value labels attached to this scope (schema v11 /
+    plan-2026-07-14-scope-tags). Knowledge layer — travels with the
+    scope in a knowledge pack.
     ``n_pairs`` / ``n_keywords`` / ``n_docs``: quick sizing signals.
     """
 
@@ -52,6 +55,7 @@ class ScopeInfo:
     kind: Optional[str] = None
     created_at: Optional[str] = None
     directories: List[DirectoryBinding] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
     n_pairs: int = 0
     n_keywords: int = 0
     n_docs: int = 0
@@ -62,6 +66,7 @@ class ScopeInfo:
             "kind": self.kind,
             "created_at": self.created_at,
             "directories": [d.to_dict() for d in self.directories],
+            "tags": list(self.tags),
             "n_pairs": int(self.n_pairs),
             "n_keywords": int(self.n_keywords),
             "n_docs": int(self.n_docs),
@@ -82,6 +87,7 @@ class RemoveStats:
     stats_rows_removed: int = 0
     votes_removed: int = 0
     ngram_rows_removed: int = 0
+    tags_removed: int = 0
     scope_row_removed: bool = False
 
     def to_dict(self) -> dict:
@@ -96,6 +102,7 @@ class RemoveStats:
             "stats_rows_removed": self.stats_rows_removed,
             "votes_removed": self.votes_removed,
             "ngram_rows_removed": self.ngram_rows_removed,
+            "tags_removed": self.tags_removed,
             "scope_row_removed": self.scope_row_removed,
         }
 
@@ -139,6 +146,12 @@ def list_scopes(
                     role=b["role"],
                     indexed_at=b["indexed_at"],
                 ))
+            for t in c.execute(
+                "SELECT tag FROM scope_tags WHERE scope_id = ? "
+                "ORDER BY tag ASC",
+                (scope_id,),
+            ):
+                info.tags.append(str(t["tag"]))
             info.n_pairs = int(c.execute(
                 "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ?",
                 (scope_id,),
@@ -253,6 +266,237 @@ def unbind_directory(
         return n
     finally:
         owned.close()
+
+
+# ---------------------------------------------------------------------------
+# Tags: multi-value scope labels (schema v11 — knowledge layer)
+# ---------------------------------------------------------------------------
+
+
+def add_tags(
+    scope: str,
+    tags: Sequence[str],
+    *,
+    db_path: Union[str, Path, None] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Attach one or more tag labels to a scope.
+
+    Idempotent accumulate-only write (``INSERT OR IGNORE``). Empty /
+    whitespace tags are skipped. Returns the number of tag rows actually
+    inserted (existing labels count as 0). Creates the scope on demand
+    if it does not exist yet — matches ``grga index build`` /
+    ``grga scope bind`` semantics.
+    """
+    scope_name = resolve_scope_name(scope)
+    if scope_name is None:
+        raise ValueError("scope must be a non-empty name")
+
+    def _do(c: sqlite3.Connection) -> int:
+        ensure_schema(c)
+        interner = IdInterner(c)
+        scope_id = interner.scope_id(scope_name)
+        return interner.bind_tags(scope_id, tags)
+
+    if conn is not None:
+        n = _do(conn)
+        conn.commit()
+        return n
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    owned = connect(target_db)
+    try:
+        n = _do(owned)
+        owned.commit()
+        return n
+    finally:
+        owned.close()
+
+
+def remove_tags(
+    scope: str,
+    tags: Optional[Sequence[str]] = None,
+    *,
+    db_path: Union[str, Path, None] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    """Remove tag labels from a scope.
+
+    ``tags=None`` (or empty) removes **every** tag for the scope. Returns
+    the number of rows deleted. Does not touch knowledge assets. Missing
+    scope is a no-op (returns 0).
+    """
+    scope_name = resolve_scope_name(scope)
+    if scope_name is None:
+        raise ValueError("scope must be a non-empty name")
+
+    def _do(c: sqlite3.Connection) -> int:
+        ensure_schema(c)
+        interner = IdInterner(c)
+        scope_id = interner.scope_id_ro(scope_name)
+        if scope_id is None:
+            return 0
+        return interner.unbind_tags(scope_id, tags)
+
+    if conn is not None:
+        n = _do(conn)
+        conn.commit()
+        return n
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    owned = connect(target_db)
+    try:
+        n = _do(owned)
+        owned.commit()
+        return n
+    finally:
+        owned.close()
+
+
+def list_tags(
+    scope: str,
+    *,
+    db_path: Union[str, Path, None] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> List[str]:
+    """Return every tag attached to a scope (ascending). Empty if missing."""
+    scope_name = resolve_scope_name(scope)
+    if scope_name is None:
+        raise ValueError("scope must be a non-empty name")
+
+    def _do(c: sqlite3.Connection) -> List[str]:
+        ensure_schema(c)
+        interner = IdInterner(c)
+        scope_id = interner.scope_id_ro(scope_name)
+        if scope_id is None:
+            return []
+        return interner.list_tags(scope_id)
+
+    if conn is not None:
+        return _do(conn)
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    owned = connect(target_db)
+    try:
+        return _do(owned)
+    finally:
+        owned.close()
+
+
+def rename_tag(
+    scope: str,
+    old_tag: str,
+    new_tag: str,
+    *,
+    db_path: Union[str, Path, None] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Rename a single tag on a scope (``old_tag`` -> ``new_tag``).
+
+    Strict semantics matching :func:`rename_scope`:
+
+    * :class:`ValueError` — any of ``scope`` / ``old_tag`` / ``new_tag``
+      is empty / whitespace, or old and new tags are identical.
+    * :class:`LookupError` — the scope does not exist, or the scope has
+      no tag matching ``old_tag``.
+    * :class:`FileExistsError` — ``new_tag`` is already attached to this
+      scope (would be a duplicate row). The message points at
+      ``grga scope tag rm`` for the merge-into-existing case.
+
+    Does NOT touch knowledge assets — it is a single-row UPDATE on
+    ``scope_tags``. Tag semantics stay per-scope: renaming ``科幻`` to
+    ``sci-fi`` on scope ``three-body`` does not touch the same tag on
+    other scopes.
+    """
+    scope_name = resolve_scope_name(scope)
+    if scope_name is None:
+        raise ValueError("scope must be a non-empty name")
+    old_clean = str(old_tag).strip() if old_tag is not None else ""
+    new_clean = str(new_tag).strip() if new_tag is not None else ""
+    if not old_clean or not new_clean:
+        raise ValueError("tag names must be non-empty")
+    if old_clean == new_clean:
+        raise ValueError(
+            f"old and new tag names are identical: {old_clean!r}"
+        )
+
+    def _do(c: sqlite3.Connection) -> None:
+        ensure_schema(c)
+        interner = IdInterner(c)
+        scope_id = interner.scope_id_ro(scope_name)
+        if scope_id is None:
+            raise LookupError(f"scope not found: {scope_name!r}")
+        interner.rename_tag(scope_id, old_clean, new_clean)
+
+    if conn is not None:
+        _do(conn)
+        conn.commit()
+        return
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    owned = connect(target_db)
+    try:
+        _do(owned)
+        owned.commit()
+    finally:
+        owned.close()
+
+
+def resolve_scope_ids_by_tags(
+    conn: sqlite3.Connection,
+    tags: Sequence[str],
+    *,
+    logic: str = "or",
+) -> List[int]:
+    """Resolve a tag filter to the matching ``scope_id`` set.
+
+    This is the query-side counterpart of :func:`add_tags`. It never
+    touches the knowledge tables — it only maps ``--tag`` labels to the
+    scope ids that carry them, so the caller can feed the result into the
+    existing ``keyword_pairs.scope_id IN (...)`` filter.
+
+    Args:
+        conn: an open connection (caller owns it; schema assumed ensured).
+        tags: tag labels to match. Empty / whitespace items are dropped.
+            An empty (or all-blank) input is a documented no-op — the
+            function returns ``[]`` rather than raising, so any caller
+            can pass forward-normalised tag lists without a pre-check.
+        logic: ``"or"`` (default) → scopes carrying **any** listed tag;
+            ``"and"`` → scopes carrying **every** listed tag. Duplicate
+            tags in the input are de-duped so ``and`` counts distinct tags.
+
+    Returns:
+        Sorted list of matching scope ids. Empty list when no scope
+        matches OR when ``tags`` resolves to zero non-empty labels.
+
+    Raises:
+        ValueError: ``logic`` is neither ``"and"`` nor ``"or"``.
+    """
+    if logic not in ("and", "or"):
+        raise ValueError(f"tag logic must be 'and' or 'or', got {logic!r}")
+    cleaned = list(dict.fromkeys(
+        t.strip() for t in tags if t and str(t).strip()
+    ))
+    if not cleaned:
+        return []
+    placeholders = ",".join("?" for _ in cleaned)
+    if logic == "and":
+        rows = conn.execute(
+            f"SELECT scope_id FROM scope_tags WHERE tag IN ({placeholders}) "
+            f"GROUP BY scope_id HAVING COUNT(*) = ?",
+            (*cleaned, len(cleaned)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT DISTINCT scope_id FROM scope_tags "
+            f"WHERE tag IN ({placeholders})",
+            cleaned,
+        ).fetchall()
+    return sorted(int(r[0]) for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +652,13 @@ def remove_scope(
                 "DELETE FROM auto_ngram_dict WHERE scope_id = ?", (scope_id,)
             )
             stats.ngram_rows_removed = int(cur.rowcount or 0)
+            # scope_tags is knowledge-layer (travels in a knowledge pack)
+            # — wipe alongside the other knowledge assets when the scope
+            # row itself is going away.
+            cur = c.execute(
+                "DELETE FROM scope_tags WHERE scope_id = ?", (scope_id,)
+            )
+            stats.tags_removed = int(cur.rowcount or 0)
             c.execute("DELETE FROM scopes WHERE id = ?", (scope_id,))
             stats.scope_row_removed = True
         return stats

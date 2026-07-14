@@ -43,6 +43,13 @@ DEFAULT_LIMIT = 20
 # ``--min-npmi`` or env ``GRGA_PPR_MIN_NPMI``.
 DEFAULT_MIN_NPMI = 0.2
 
+# Query-side ``--tag`` combining logic. ``or`` is the default: two ``--tag``
+# flags typically read as "either counts", matching how ``--scope`` already
+# treats multiple values as a union. ``and`` requires every listed tag on
+# the same scope.
+VALID_TAG_LOGIC = ("and", "or")
+DEFAULT_TAG_LOGIC = "or"
+
 
 def _default_min_npmi() -> float:
     """Resolve the effective default ``min_npmi`` (env can override)."""
@@ -126,6 +133,37 @@ def _normalise_scopes(
             continue
         seen.add(resolved)
         out.append(resolved)
+    return out or None
+
+
+def _normalise_tags(
+    tags: Optional[Sequence[str]],
+) -> Optional[List[str]]:
+    """Normalise a user-supplied tag list to unique, non-empty labels.
+
+    Mirrors :func:`_normalise_scopes`:
+
+    * ``None`` -> ``None`` (no tag filter).
+    * empty sequence / only-blank items -> ``None`` (treat as "no filter",
+      so a forwarded unset field never raises).
+    * one or more real labels -> stripped + deduped list, order preserved.
+
+    Tags are stripped but NOT casefolded — they are opaque labels whose
+    casing must match what was written at build time (same contract as
+    ``scopes.name``).
+    """
+    if tags is None:
+        return None
+    seen: set = set()
+    out: List[str] = []
+    for tag in tags:
+        if tag is None:
+            continue
+        text = str(tag).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
     return out or None
 
 
@@ -261,6 +299,8 @@ def related_keywords(
     min_npmi: Optional[float] = None,
     db_path: Union[str, Path, None] = None,
     scopes: Optional[Sequence[str]] = None,
+    tags: Optional[Sequence[str]] = None,
+    tag_logic: str = DEFAULT_TAG_LOGIC,
 ) -> RelatedKeywordsResult:
     """Graph-expansion primitive: seeds → candidate keywords + evidence.
 
@@ -275,9 +315,14 @@ def related_keywords(
     * ``min_npmi`` may only *tighten* the write-time floor
       (:data:`BUILD_MIN_NPMI` = 0.2). Passing a lower value has no effect.
     * Multi-seed queries return per-seed rows without fusion.
-    * ``scopes`` is a **multi-select** per-scope filter (v10): only pairs
-      whose ``scope_id`` is in the resolved set are returned. ``None`` (or
-      empty) = no filter (cross-scope union). See plan-2026-07-14 §4.
+    * ``scopes`` is a **multi-select** per-scope-name filter (v10): only
+      pairs whose ``scope_id`` is in the resolved set are returned.
+      ``None`` (or empty) = no name filter.
+    * ``tags`` is a **multi-select** tag filter (v11): scope ids are
+      resolved from ``scope_tags`` under ``tag_logic`` (``or`` = any tag,
+      ``and`` = every tag), then intersected with the ``scopes`` filter
+      (if any). Both empty = cross-scope union. See
+      plan-2026-07-14-scope-tags.
     * ``resolved_seeds`` reports, for each distinct queried seed, whether
       it exists in the vocabulary (``in_index``).
 
@@ -289,6 +334,9 @@ def related_keywords(
                         ``GRGA_PPR_MIN_NPMI``.
         db_path:        SQLite path (defaults to shared deep-search DB).
         scopes:         optional multi-select scope-name filter.
+        tags:           optional multi-select scope-tag filter.
+        tag_logic:      ``"or"`` (default) or ``"and"`` — how multiple
+                        ``tags`` combine.
 
     Returns:
         A :class:`RelatedKeywordsResult` whose ``results`` is the flat list
@@ -296,6 +344,10 @@ def related_keywords(
         whose ``resolved_seeds`` reports per-seed vocabulary membership in
         first-seen input order.
     """
+    if tag_logic not in VALID_TAG_LOGIC:
+        raise ValueError(
+            f"tag_logic must be one of {VALID_TAG_LOGIC}, got {tag_logic!r}"
+        )
     seed_folded: List[str] = []
     seen_seeds: set = set()
     for s in (_fold(k) for k in seeds):
@@ -309,6 +361,7 @@ def related_keywords(
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     scope_names = _normalise_scopes(scopes)
+    tag_names = _normalise_tags(tags)
     effective_min_npmi = (
         _default_min_npmi() if min_npmi is None else float(min_npmi)
     )
@@ -321,6 +374,8 @@ def related_keywords(
             limit_per_seed=limit_per_seed,
             min_npmi=effective_min_npmi,
             scope_names=scope_names,
+            tag_names=tag_names,
+            tag_logic=tag_logic,
         )
     finally:
         conn.close()
@@ -422,13 +477,18 @@ def _related_keywords_impl(
     limit_per_seed: int,
     min_npmi: float,
     scope_names: Optional[Sequence[str]],
+    tag_names: Optional[Sequence[str]] = None,
+    tag_logic: str = DEFAULT_TAG_LOGIC,
 ) -> RelatedKeywordsResult:
     """Core query path for :func:`related_keywords`.
 
     Split out so tests can hand-inject a connection. ``seeds`` is
     expected casefold-normalised and de-duplicated (order preserved).
     ``scope_names`` is a validated list of logical scope names or
-    ``None`` (cross-scope).
+    ``None`` (no name filter). ``tag_names`` is a validated list of
+    scope-tag labels or ``None`` (no tag filter). When both are set,
+    their resolved ``scope_id`` sets are **intersected** (design:
+    plan-2026-07-14-scope-tags §4).
     """
     # Resolve seeds → kw_ids first (scope-independent) so the per-seed
     # ``resolved_seeds`` probe is populated even when the scope is unknown.
@@ -444,18 +504,54 @@ def _related_keywords_impl(
         SeedResolution(seed=s, in_index=s in text_to_id) for s in seeds
     ]
 
-    # Resolve scope_id filter (if any). Unknown scopes are dropped; if a
-    # non-empty scope list resolves to zero known scopes, no candidate
-    # can match — return early (the vocabulary probe above still stands).
+    # Resolve scope_id filter from --scope names and/or --tag labels.
+    # * name-only → SELECT id FROM scopes WHERE name IN (...)
+    # * tag-only  → scope_tags lookup under tag_logic (and/or)
+    # * both      → intersection (a scope must satisfy BOTH)
+    # * neither   → cross-scope union (empty scope_ids ⇒ no filter clause)
+    #
+    # When either filter is present but resolves empty, the intersection
+    # is empty by construction — return early with an empty result set
+    # rather than falling through to cross-scope (which would violate the
+    # user's explicit "narrow down" intent).
     scope_ids: List[int] = []
-    if scope_names is not None:
+    have_scope_filter = scope_names is not None and len(scope_names) > 0
+    have_tag_filter = tag_names is not None and len(tag_names) > 0
+    name_scope_ids: Optional[set] = None
+    tag_scope_ids: Optional[set] = None
+
+    if have_scope_filter:
         s_placeholders = ",".join("?" for _ in scope_names)
         rows = conn.execute(
             f"SELECT id FROM scopes WHERE name IN ({s_placeholders})",
             list(scope_names),
         ).fetchall()
-        scope_ids = [int(r[0]) for r in rows]
+        name_scope_ids = {int(r[0]) for r in rows}
+
+    if have_tag_filter:
+        # Delegate to graph.scope so the SQL shape (and its and/or
+        # semantics) live in one place. The helper returns [] on empty
+        # input; ``have_tag_filter`` already guaranteed at least one
+        # non-empty label, so a [] here means "no scope carries the tag".
+        from grga.graph.scope import resolve_scope_ids_by_tags
+        tag_scope_ids = set(resolve_scope_ids_by_tags(
+            conn, tag_names, logic=tag_logic,
+        ))
+
+    if name_scope_ids is not None and tag_scope_ids is not None:
+        merged = name_scope_ids & tag_scope_ids
+    elif name_scope_ids is not None:
+        merged = name_scope_ids
+    elif tag_scope_ids is not None:
+        merged = tag_scope_ids
+    else:
+        merged = None  # cross-scope
+
+    if merged is not None:
+        scope_ids = sorted(merged)
         if not scope_ids:
+            # An explicit filter was requested but nothing matched. Bail
+            # out rather than degrading to the cross-scope path.
             return RelatedKeywordsResult(
                 results=[], resolved_seeds=resolved_seeds
             )

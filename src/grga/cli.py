@@ -53,6 +53,8 @@ graph_app = typer.Typer(no_args_is_help=True, help="Inspect the shared user-scop
 app.add_typer(graph_app, name="graph")
 scope_app = typer.Typer(no_args_is_help=True, help="Manage logical scope names + local directory bindings (v10).")
 app.add_typer(scope_app, name="scope")
+scope_tag_app = typer.Typer(no_args_is_help=True, help="Manage multi-value scope tags (v11).")
+scope_app.add_typer(scope_tag_app, name="tag")
 
 CONFIG_PATH = Path.home() / ".config" / "grga" / "settings.json"
 
@@ -1121,6 +1123,7 @@ def index_build_command(
     max_ngram_n: int = typer.Option(4, "--max-ngram-n", help="Longest n-gram considered by auto-phrase detection (default 4, covers e.g. 联合国行星防御理事会 / 赫尔辛根默斯肯 / PDC常任理事国)."),
     refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy for build: `append` runs single-iter detection on changed files and unions new phrases into the dict; `never` skips detection and reuses the existing dict as-is."),
     seed_ngram_from: Optional[str] = typer.Option(None, "--seed-ngram-from", help="Cold-start the tokeniser with another scope's auto n-gram dictionary (v10). Useful after `grga index import` when the target scope has knowledge but no local phrases yet. The seed is layered UNDER the target's own entries (target wins on collision). No-op if the seed scope is missing or equals the target."),
+    tags: List[str] = typer.Option([], "--tag", "-t", help="Attach a multi-value scope tag (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Written to `scope_tags` (knowledge layer, portable across machines). Accumulate-only: existing tags survive; remove with `grga scope tag rm`."),
     append: bool = typer.Option(False, "--append", help="[deprecated] Same effect as the new default (`build` is incremental and never clears the vocabulary). Prints a deprecation warning."),
     replace: bool = typer.Option(False, "--replace", help="[deprecated] Wipe the scope's asset + index + derived layers and rebuild from scratch. Use `grga index forget --all` followed by `grga index build`, or `grga index rebuild --refresh-ngram=replace` instead."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
@@ -1200,6 +1203,7 @@ def index_build_command(
             ngram_iters=ngram_iters,
             max_ngram_n=max_ngram_n,
             seed_ngram_from=seed_ngram_from,
+            tags=tags,
             text_progress=text_progress,
             rich_on_event=rich_on_event,
         )
@@ -1227,6 +1231,7 @@ def index_rebuild_command(
     max_ngram_n: int = typer.Option(4, "--max-ngram-n"),
     refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy: `append` keeps the existing dict and adds newly detected phrases (default); `never` skips detection and uses the current dict as-is; `replace` clears the dict first, then relearns from the full scope."),
     seed_ngram_from: Optional[str] = typer.Option(None, "--seed-ngram-from", help="Cold-start the tokeniser with another scope's auto n-gram dictionary (v10). Useful after `grga index import`. Target-scope entries take precedence on collision."),
+    tags: List[str] = typer.Option([], "--tag", help="Attach a multi-value scope tag (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Accumulate-only (existing tags survive a rebuild); remove with `grga scope tag rm`."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Full-scope re-scan: clear the index + derived layers, then rebuild.
@@ -1276,6 +1281,7 @@ def index_rebuild_command(
             ngram_iters=ngram_iters,
             max_ngram_n=max_ngram_n,
             seed_ngram_from=seed_ngram_from,
+            tags=tags,
             text_progress=text_progress,
             rich_on_event=rich_on_event,
         )
@@ -1304,6 +1310,7 @@ def _run_index_build(
     ngram_iters: int,
     max_ngram_n: int,
     seed_ngram_from: Optional[str] = None,
+    tags: Optional[List[str]] = None,
     text_progress,
     rich_on_event,
 ):
@@ -1312,7 +1319,8 @@ def _run_index_build(
     Owns the single call site into ``build_graph_index`` so both CLI
     commands stay in sync. ``scope`` is the logical scope name (v10),
     ``directory`` is the physical path to index; ``build_graph_index``
-    records the binding in ``scope_directories``.
+    records the binding in ``scope_directories``. ``tags`` (v11) are
+    accumulate-only labels UPSERTed into ``scope_tags``.
     """
     from grga.graph.build import build_graph_index
 
@@ -1329,6 +1337,7 @@ def _run_index_build(
         ngram_iters=ngram_iters,
         max_ngram_n=max_ngram_n,
         seed_ngram_from=seed_ngram_from,
+        tags=tuple(tags or ()),
         mode=mode,
         refresh_ngram=refresh_ngram,
         progress=text_progress,
@@ -1737,7 +1746,9 @@ def related_command(
     mode: str = typer.Option("graph", "--mode", "-m", help="Relation mode: `graph` (candidate keywords via co-occurrence) or `heading` (docs sharing a Markdown chapter with a seed-containing doc)."),
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of results (per-seed for graph mode)."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
-    scopes: List[str] = typer.Option([], "--scope", "-s", help="Logical scope name (v10). Repeatable — pass multiple `--scope` flags to union across scopes. Omit to search across every indexed scope (cross-scope union)."),
+    scopes: List[str] = typer.Option([], "--scope", "-s", help="Logical scope name (v10). Repeatable — pass multiple `--scope` flags to union across scopes. Omit to search across every indexed scope (cross-scope union). When combined with `--tag`, the two filters are intersected: only scopes matching BOTH the name list and the tag filter contribute pairs."),
+    tags: List[str] = typer.Option([], "--tag", "-t", help="Scope tag label (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Resolves to the set of scopes whose `scope_tags` match under `--tag-logic`, then feeds the resulting scope_id set into the same `keyword_pairs.scope_id IN (...)` filter as `--scope`. Combine with `--scope` for name ∩ tag."),
+    tag_logic: str = typer.Option("or", "--tag-logic", help="How multiple `--tag` values combine: `or` (default; scopes with any listed tag) or `and` (scopes carrying every listed tag)."),
     same_scope: bool = typer.Option(False, "--same-scope", help="mode=heading only: restrict heading matches to the given --scope (single scope required)."),
     min_npmi: Optional[float] = typer.Option(None, "--min-npmi", help="mode=graph only: read-side floor on chunk_cooccur pair npmi. Can only tighten the v8 write-time floor (0.2). Default 0.2, or $GRGA_PPR_MIN_NPMI."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
@@ -1752,7 +1763,7 @@ def related_command(
     * ``--mode heading`` returns documents that share a Markdown
       ``heading_path`` with any seed-containing document.
     """
-    from grga.related import VALID_MODES, related as related_docs
+    from grga.related import VALID_MODES, VALID_TAG_LOGIC, related as related_docs
 
     if mode not in ("graph",) + tuple(VALID_MODES):
         typer.echo(
@@ -1766,6 +1777,16 @@ def related_command(
         typer.echo("keywords cannot be empty", err=True)
         raise typer.Exit(2)
     scope_list = [s for s in scopes if s and s.strip()]
+    tag_list = [t for t in tags if t and t.strip()]
+    if tag_logic not in VALID_TAG_LOGIC:
+        typer.echo(
+            f"--tag-logic must be one of: {', '.join(VALID_TAG_LOGIC)}",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if tag_list and mode != "graph":
+        typer.echo("--tag only applies to --mode graph", err=True)
+        raise typer.Exit(2)
     if same_scope and mode != "heading":
         typer.echo("--same-scope only applies to --mode heading", err=True)
         raise typer.Exit(2)
@@ -1784,6 +1805,8 @@ def related_command(
             limit_per_seed=limit,
             db_path=str(db_path) if db_path else None,
             scopes=scope_list or None,
+            tags=tag_list or None,
+            tag_logic=tag_logic,
             min_npmi=min_npmi,
         )
         kw_results = kw_result.results
@@ -1918,8 +1941,9 @@ def scope_list_command(
         return
     for s in scopes:
         dirs = ", ".join(d.directory for d in s.directories) or "(no local bindings)"
+        tag_suffix = f"  tags=[{', '.join(s.tags)}]" if s.tags else ""
         typer.echo(
-            f"{s.name}  pairs={s.n_pairs}  keywords={s.n_keywords}  docs={s.n_docs}\n"
+            f"{s.name}  pairs={s.n_pairs}  keywords={s.n_keywords}  docs={s.n_docs}{tag_suffix}\n"
             f"  {dirs}"
         )
 
@@ -2062,6 +2086,108 @@ def scope_rm_command(
             f"keyword_docs={stats.keyword_docs_removed} "
             f"heading_docs={stats.heading_docs_removed}"
         )
+
+
+@scope_tag_app.command("add")
+def scope_tag_add_command(
+    scope: str = typer.Argument(..., help="Logical scope name."),
+    tags: List[str] = typer.Argument(..., help="One or more tag labels to attach."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+):
+    """Attach multi-value tag labels to a scope (creates the scope on demand).
+
+    Accumulate-only (``INSERT OR IGNORE``): re-adding an existing tag is a
+    no-op. Tags are knowledge-layer metadata (they travel in a knowledge
+    pack). Use them to filter `grga related --tag ... --tag-logic and|or`.
+    """
+    from grga.graph.scope import add_tags
+
+    clean = [t for t in tags if t and t.strip()]
+    if not clean:
+        typer.echo("scope tag add: at least one non-empty tag is required", err=True)
+        raise typer.Exit(2)
+    n = add_tags(scope, clean, db_path=str(db_path) if db_path else None)
+    typer.echo(f"added {n} new tag(s) to scope {scope!r} ({len(clean)} requested)")
+
+
+@scope_tag_app.command("rm")
+def scope_tag_rm_command(
+    scope: str = typer.Argument(..., help="Logical scope name."),
+    tags: Optional[List[str]] = typer.Argument(None, help="Tag labels to remove (omit to remove EVERY tag on the scope)."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+):
+    """Remove tag labels from a scope (or all of them when none are given).
+
+    Metadata-only — does not touch the scope's knowledge assets or
+    evidence. Missing scope / tags is a no-op.
+    """
+    from grga.graph.scope import remove_tags
+
+    clean = [t for t in (tags or []) if t and t.strip()]
+    n = remove_tags(
+        scope,
+        clean or None,
+        db_path=str(db_path) if db_path else None,
+    )
+    if n == 0:
+        typer.echo(f"no matching tag(s) for scope {scope!r}", err=True)
+        raise typer.Exit(0)
+    typer.echo(f"removed {n} tag(s) from scope {scope!r}")
+
+
+@scope_tag_app.command("list")
+def scope_tag_list_command(
+    scope: str = typer.Argument(..., help="Logical scope name."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON."),
+):
+    """List every tag attached to a scope."""
+    from grga.graph.scope import list_tags
+
+    tags = list_tags(scope, db_path=str(db_path) if db_path else None)
+    if json_output:
+        typer.echo(json.dumps({"scope": scope, "tags": tags}, ensure_ascii=False))
+        return
+    if not tags:
+        typer.echo(f"scope {scope!r} has no tags", err=True)
+        return
+    for tag in tags:
+        typer.echo(tag)
+
+
+@scope_tag_app.command("mv")
+def scope_tag_mv_command(
+    scope: str = typer.Argument(..., help="Logical scope name."),
+    old_tag: str = typer.Argument(..., help="Current tag label."),
+    new_tag: str = typer.Argument(..., help="New tag label."),
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path."),
+):
+    """Rename a tag on a scope (single-row UPDATE — knowledge intact).
+
+    Strict: refuses to overwrite an existing tag on the same scope. If
+    the target label already exists there, drop the old one first with
+    `grga scope tag rm <scope> <old>`. Only affects this scope — other
+    scopes' identically-named tags are left alone.
+    """
+    from grga.graph.scope import rename_tag
+
+    try:
+        rename_tag(
+            scope, old_tag, new_tag,
+            db_path=str(db_path) if db_path else None,
+        )
+    except LookupError as exc:
+        typer.echo(f"scope tag mv: {exc}", err=True)
+        raise typer.Exit(1)
+    except FileExistsError as exc:
+        typer.echo(f"scope tag mv: {exc}", err=True)
+        raise typer.Exit(1)
+    except ValueError as exc:
+        typer.echo(f"scope tag mv: {exc}", err=True)
+        raise typer.Exit(2)
+    typer.echo(
+        f"renamed tag on scope {scope!r}: {old_tag!r} -> {new_tag!r}"
+    )
 
 
 def main():

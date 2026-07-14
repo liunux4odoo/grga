@@ -37,7 +37,7 @@ from grga.graph.schema import (
 # CREATE is caught at test time.
 V10_TABLES = {
     # Scope layer
-    "scopes", "scope_directories",
+    "scopes", "scope_directories", "scope_tags",
     # Global intern
     "keywords", "meta",
     # Business tables

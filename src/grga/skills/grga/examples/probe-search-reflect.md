@@ -34,7 +34,7 @@ an explicit caller-owned evaluation checkpoint after every tier.
 
 ```bash
 DIR=./src                              # 物理目录：给 probe / search / expand 用
-SCOPE=my-app                           # v10 逻辑 scope 名：给 related / suggest 用
+SCOPE=my-app                           # 逻辑 scope 名：给 related / suggest 用
 DB=~/.config/grga/deep_keywords.db
 
 # ---- T2-bookend (session open, MANDATORY): expand the raw seed --------
@@ -78,12 +78,12 @@ grga related "鉴权 token session" --mode graph --scope "$SCOPE" --db "$DB" --j
 
 | Tier | Read from JSON | Decide |
 |---|---|---|
-| T2-bookend (open) | `results[]`, `expansion.expanded_keywords[].npmi`, `expansion.seeds[].chunk_df` | harvest low-DF neighbours into the working seed set before T0 |
+| T2-bookend (open) | `results[]` (each `{kw, npmi, chunk_df, via_seed, scopes}`), `resolved_seeds[]` | harvest low-DF neighbours into the working seed set before T0 |
 | T0 probe | `total_lines`, `file_count`, `per_file`, `sample.est_total_bytes` | 0 → loosen / reformulate; huge → tighten; band → proceed |
 | T1 search | `matches` length, `truncated`, `heading_path`, `nearby_hits` | empty → T0/T3; truncated → cap/tighten; thin → T2-escalate/T3; good → toward answer |
 | T2-escalate expand/related | returned `text` / neighbour `doc_path`s | sufficient → toward answer; corpus lacks material → T3 |
 | T3 suggest | `queries[]`, `keywords[]`, `ranking[]` | feed back to T0/T1, or reorder with `ranking[]` |
-| T2-bookend (pre-answer) | `results[]`, `expansion.expanded_keywords[]` | new doc/alias → fold in or dismiss; only then commit answer |
+| T2-bookend (pre-answer) | `results[]`, `resolved_seeds[]` | new doc/alias → fold in or dismiss; only then commit answer |
 
 ## Why probe first (and not just search)
 

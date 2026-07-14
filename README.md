@@ -94,7 +94,9 @@ grga expand ...   # 按行 / 段落 / 章节逐级扩展
 ```bash
 cd /path/to/your/documents
 grga index build --scope my-notes             # --directory 省略时默认当前目录
+grga index build --scope sci-fi --tag 科幻 --tag 小说   # 可给 scope 附加多值标签
 grga related 面壁计划 --scope my-notes         # 不加 --scope 则跨全部 scope 联查
+grga related 面壁计划 --tag 科幻 --tag 小说 --tag-logic and   # 按标签选 scope（顺序无关，and/or）
 grga graph inspect 面壁计划
 ```
 

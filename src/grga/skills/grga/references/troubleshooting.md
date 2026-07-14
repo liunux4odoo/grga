@@ -24,14 +24,14 @@ only — none of these prescribe a build action inside the skill):
   Prefer a low-DF specific noun as seed.
 - Stopwords or 1-character terms never enter the index. Use a
   longer/more concrete term, or run `grga search --json` and aggregate
-  hits by directory in the caller (`--mode dir` was removed in v3).
-- On small / synthetic corpora the build-time `npmi >= 0.2` gate may
-  have filtered every bridge edge. That is an offline-build choice,
-  outside the scope of this skill.
+  hits by directory in the caller.
+- On small / synthetic corpora the build-time `npmi` gate may have
+  filtered every bridge edge. That is an offline-build choice, outside
+  the scope of this skill.
 - To turn candidate keywords into passages: `grga related <seed> --mode
   graph --json` → take `results[].kw` → `rga -e kw1 -e kw2 ...`.
 - To broaden scope, see `references/storage-model.md` for the `-d` /
-  cross-scope 求和 / `--mode heading` decision.
+  cross-scope union / `--mode heading` decision.
 
 ## `grga expand` returned `level="lines"` even though I asked for `chapter`
 
@@ -52,6 +52,5 @@ Only `suggest` calls an LLM; every other verb is offline.
 
 ## Deeper internals
 
-For the three-layer expansion model and graph schema, read
-`docs/design/v2-design.md` in the grga repo. For every JSON field, read
-`docs/api.md`.
+For the full JSON schema of every command, read `docs/api.md` in the
+grga repo.

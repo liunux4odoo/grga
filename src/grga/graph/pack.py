@@ -17,7 +17,8 @@ Layer boundary is enforced strictly (plan-2026-07-14 §1.1):
 
 * **Knowledge (in the pack)**: ``scopes`` (selected) + referenced
   ``keywords`` + ``keyword_pairs`` + ``keyword_stats`` + ``scope_stats``
-  + ``auto_ngram_dict`` + ``llm_extension_votes`` + ``meta``.
+  + ``auto_ngram_dict`` + ``llm_extension_votes`` + ``scope_tags`` +
+  ``meta``.
 * **Evidence (never in the pack)**: ``scope_directories`` / ``docs`` /
   ``keyword_docs`` / ``heading_docs`` / ``keyword_sources`` /
   ``keyword_counts``.
@@ -71,6 +72,7 @@ class ExportStats:
     n_scope_stats: int = 0
     n_auto_ngram: int = 0
     n_votes: int = 0
+    n_tags: int = 0
     elapsed_seconds: float = 0.0
 
     def to_dict(self) -> dict:
@@ -83,6 +85,7 @@ class ExportStats:
             "n_scope_stats": int(self.n_scope_stats),
             "n_auto_ngram": int(self.n_auto_ngram),
             "n_votes": int(self.n_votes),
+            "n_tags": int(self.n_tags),
             "elapsed_seconds": round(self.elapsed_seconds, 3),
         }
 
@@ -98,6 +101,7 @@ class ImportStats:
     n_stats: int = 0
     n_auto_ngram: int = 0
     n_votes: int = 0
+    n_tags: int = 0
     scope_stats_written: bool = False
     elapsed_seconds: float = 0.0
 
@@ -110,6 +114,7 @@ class ImportStats:
             "n_stats": int(self.n_stats),
             "n_auto_ngram": int(self.n_auto_ngram),
             "n_votes": int(self.n_votes),
+            "n_tags": int(self.n_tags),
             "scope_stats_written": self.scope_stats_written,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
         }
@@ -310,6 +315,10 @@ _ATTACH_COPY_TABLES = {
     "scope_stats":   "scope_id, n_chunks, n_docs, vocab_size, updated_at",
     "auto_ngram_dict": "scope_id, phrase, n, count, npmi, branch_ent, updated_at",
     "llm_extension_votes": "scope_id, kw_a_id, kw_b_id, vote_count, last_voted, promoted_at",
+    # scope_tags is knowledge-layer (v11): a tag describes what the scope
+    # IS, so it travels with the pack. Only ``scope_id`` + ``tag``; no
+    # kw_id remap needed on either export or import.
+    "scope_tags": "scope_id, tag",
 }
 
 
@@ -382,6 +391,8 @@ def _fill_pack_via_attach(
                     stats.n_auto_ngram = n
                 elif table == "llm_extension_votes":
                     stats.n_votes = n
+                elif table == "scope_tags":
+                    stats.n_tags = n
             _write_pack_meta(src_conn, dst, scope_names)
     finally:
         # DETACH is a no-op if the ATTACH failed; wrap defensively so a
@@ -557,6 +568,9 @@ def import_knowledge_pack(
                 )
                 stats.n_votes = _import_votes(
                     pack, dst, pack_scope_id, new_scope_id, kw_remap
+                )
+                stats.n_tags = _import_tags(
+                    pack, dst, pack_scope_id, new_scope_id
                 )
                 dst.execute("COMMIT")
             except Exception:
@@ -773,3 +787,29 @@ def _import_votes(
         remapped,
     )
     return len(remapped)
+
+
+def _import_tags(
+    pack: sqlite3.Connection,
+    dst: sqlite3.Connection,
+    pack_scope_id: int,
+    new_scope_id: int,
+) -> int:
+    """Copy the scope's tag labels into the destination under the new id.
+
+    Knowledge-layer (v11): only ``scope_id`` is rewritten — ``tag`` is a
+    plain string with no id-space to remap. ``INSERT OR IGNORE`` guards
+    against a rare tag collision if the destination scope already carried
+    the label (fresh ``--as`` import never has, but stay defensive).
+    """
+    rows = pack.execute(
+        "SELECT tag FROM scope_tags WHERE scope_id = ?",
+        (pack_scope_id,),
+    ).fetchall()
+    if not rows:
+        return 0
+    dst.executemany(
+        "INSERT OR IGNORE INTO scope_tags (scope_id, tag) VALUES (?, ?)",
+        [(new_scope_id, str(r["tag"])) for r in rows],
+    )
+    return len(rows)

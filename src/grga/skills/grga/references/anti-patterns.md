@@ -55,21 +55,20 @@ Rule of thumb: **`grep` for a one-shot recon known not to iterate.
 
 `~/.config/grga/deep_keywords.db` is grga's **internal storage**, not a
 caller-facing interface. Reaching for `sqlite3 <db>` — even for a
-harmless-looking `.tables` or `SELECT DISTINCT directory FROM
-keyword_pairs` — couples the workflow to a schema free to change
-between grga releases (columns renamed, tables split, indices replaced；
-v8 就直接删了 `keyword_chunks` / `chunks`).
+harmless-looking `.tables` or a peek at the co-occurrence rows — couples
+the workflow to internal storage that is free to change between grga
+releases (columns renamed, tables split, indices replaced).
 
 Two failure modes hidden by this habit:
 
-- **Wrong verb was chosen.** If the task does not use `related`, the L2
-  graph is irrelevant; peeking at the DB is pure ceremony. Ask *"does
-  this task actually need the co-occurrence graph?"* first. If no, the
-  DB never needed to be inspected at all.
+- **Wrong verb was chosen.** If the task does not use `related`, the
+  co-occurrence graph is irrelevant; peeking at the DB is pure ceremony.
+  Ask *"does this task actually need the co-occurrence graph?"* first.
+  If no, the DB never needed to be inspected at all.
 - **Right question, wrong tool.** For a keyword's scope distribution,
   top co-occurring keywords, or polysemy signal, the stable public verb
   is `grga graph inspect <keyword> --db <path> --json`. Its output is
-  contract; the underlying SQL is not.
+  contract; the underlying storage is not.
 
 Legitimate exceptions (few and explicit): actively developing grga
 itself, or debugging a suspected corruption / migration bug after `grga
@@ -87,16 +86,15 @@ looks harmless but has three real costs:
 - **Disk redundancy** — two copies of the same content to maintain.
 - **Silent staleness** — the copy diverges when the original is edited,
   with no warning.
-- **Broken scope bindings for the shared graph.** In v10 the knowledge
-  assets (`keyword_pairs` / `keyword_stats` / `scope_stats`) are sharded
-  by a **logical scope name**, and the physical path lives in the
-  machine-local `scope_directories` binding + `docs.doc_path`. If the
-  user's offline index was built against the real path, `related`
-  candidates resolve their `scopes[]` back to that binding — a `/tmp`
-  copy is not bound to any scope, so `--mode heading` and doc-locating
-  ripgrep miss it; if the user later re-indexes a `/tmp` copy, the
-  `docs.doc_path` rows bind to a path that vanishes on the next `/tmp`
-  sweep, silently staling the evidence layer.
+- **Broken scope bindings for the shared graph.** The knowledge graph
+  is keyed by a **logical scope name**, and the physical path lives in
+  a machine-local scope→directory binding (queryable via
+  `grga scope list`). If the user's offline index was built against
+  the real path, `related` candidates resolve their `scopes[]` back to
+  that binding — a `/tmp` copy is not bound to any scope, so
+  `--mode heading` and doc-locating ripgrep miss it. If the user later
+  re-indexes the `/tmp` copy, the evidence layer will point at a path
+  that vanishes on the next `/tmp` sweep, silently staling everything.
 
 If a directory contains noise that must be excluded, do it at query
 time: `-g '*needle*'` (glob filter passed through to rga), `--type

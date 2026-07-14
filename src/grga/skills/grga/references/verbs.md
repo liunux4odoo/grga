@@ -1,9 +1,9 @@
-# Verb signatures and field reference
+# Verb reference (CLI usage and JSON fields)
 
 Referenced from "The five verbs" section of `SKILL.md`. The SKILL.md body
 keeps each verb's one-line purpose and "Use when"; this file holds the
-conceptual signatures and per-field semantics. Authoritative JSON schemas
-for every command live in `docs/api.md` in the grga repo.
+full CLI usage and the JSON fields the caller reads. Authoritative JSON
+schemas live in `docs/api.md`.
 
 All verbs are **idempotent** and **read-only**, except `suggest` (which
 calls an LLM). This skill does not include the offline write-side
@@ -13,12 +13,19 @@ DB is assumed to have been built by the user beforehand.
 ## 0. `probe`
 
 ```
-probe(query: str, scope: dir, *, mode=auto|regex|glob, case_sensitive=False,
-      multiline=False, iglob=[], path_only=False, implicit_operator=and|or,
-      sample=0, per_file=False, timeout=60) ->
-  {ok, directory, patterns, terms, pcre2, implicit_operator, implicit_notice,
-   total_lines, file_count, truncated, warning, skipped_files, elapsed_ms,
-   per_file?[{path, matches}], sample?{sampled_lines, avg_line_bytes, est_total_bytes}}
+grga probe <query> -d <dir> [--mode auto|regex|glob] [--case-sensitive]
+                            [--multiline] [--iglob GLOB]... [--path-only]
+                            [--implicit-and | --implicit-or]
+                            [--sample N] [--per-file] [--timeout SEC]
+                            [--json]
+```
+
+Envelope fields (`--json`):
+
+```
+{ok, directory, patterns, terms, pcre2, implicit_operator, implicit_notice,
+ total_lines, file_count, truncated, warning, skipped_files, elapsed_ms,
+ per_file?[{path, matches}], sample?{sampled_lines, avg_line_bytes, est_total_bytes}}
 ```
 
 - `total_lines` — total matching lines across the corpus (the real hit count `search` would return, **before** context expansion and **ignoring** `--max-count` / `--max-total`).
@@ -33,17 +40,21 @@ probe(query: str, scope: dir, *, mode=auto|regex|glob, case_sensitive=False,
 ## 1. `search`
 
 ```
-search(query: str, scope: dir, *, mode=auto|regex|glob, case_sensitive=False,
-       before_context=3, after_context=3, iglob=[], path_only=False,
-       max_total=1000, strict_cap=False, implicit_operator=and|or,
-       metadata=True) -> {ok, patterns, directory, truncated, matches[]}
+grga search <query> -d <dir> [--mode auto|regex|glob] [--case-sensitive]
+                             [-B N] [-A N] [--iglob GLOB]... [--path-only]
+                             [--max-total N] [--strict-cap]
+                             [--implicit-and | --implicit-or]
+                             [--json]
 ```
 
-**Multi-term semantics (v2, breaking change):** space-separated terms are an
-**implicit AND** — `search("韩立 师傅")` returns only lines containing *both*
-terms (Google / ripgrep intuition). Use explicit `||` / `OR` for OR, `&&` /
-`AND` for AND. Pass `--implicit-or` to restore the old OR-on-space behaviour.
-When implicit AND fires, grga prints a one-line notice to stderr.
+Envelope: `{ok, patterns, directory, truncated, matches[]}`.
+
+**Multi-term semantics:** space-separated terms are an **implicit AND** —
+`grga search "韩立 师傅"` returns only lines containing *both* terms
+(Google / ripgrep intuition). Use explicit `||` / `OR` for OR, `&&` /
+`AND` for AND. Pass `--implicit-or` to restore OR-on-space behaviour.
+When implicit AND fires, grga prints a one-line notice to stderr and
+sets `implicit_notice` in the envelope.
 
 **Global cap:** `--max-total N` (default `1000`) bounds the *total* number of
 real hits returned, streaming and killing rga once the cap is hit; the result
@@ -68,105 +79,99 @@ as implicit AND, `implicit_notice` (string).
 ## 2. `expand`
 
 ```
-expand(hit: {path, line_number}, level, size=3, *, base_dir) ->
-  {hit, text, level, range: [start,end], truncated}
+grga expand <path>:<line> -d <base_dir>
+                          --level lines|paragraph|chapter|document
+                          [--size N]
+                          [--json]
 ```
 
-Levels degrade predictably: `chapter → paragraph → lines(±3) → lines(±0)`.
+Envelope: `{hit, text, level, range: [start, end], truncated}`.
+
+Levels degrade predictably: `chapter → paragraph → lines(±size) → lines(±0)`.
 The returned `level` field reflects what was **actually** achieved (may be
 smaller than requested). Never invokes an LLM. Never modifies anything.
 
 ## 3. `related`
 
 ```
-related(keywords: list[str], *, mode="graph"|"heading",
-        limit=20, db_path, scopes=None,  # v10: 多选 scope 名列表（不传 = 跨全部 scope）
-        same_scope=False,    # heading only: 限制到 --scope（要求恰好一个）
-        min_npmi=None,       # graph only: 读侧 npmi 地板；默认沿用写入期 0.2，
-                             # 可传更严值（如 0.3），不能低于写入期门槛
-) ->
-  # graph（v3 起返回候选关键字，不再是文档）：
-  {results: [
-     # v3.1（plan-2026-07-14 §5.3）: 加 scopes[] 字段
-     {kw, npmi, cooccur_count, via_seed, chunk_df, source, scopes}
-   ],
-   resolved_seeds: [          # v3.1 探针：每个去重 seed 一个 bit
-     {seed, in_index}
-   ]}
-  # heading（返回文档）：
-  {results: [
-     # v10: scope 取代 directory+qualified_path
-     {doc_path, score, mode, reason, keywords[], scope}
-  ]}
+grga related <kw>... --mode graph|heading
+                     [--scope NAME]...      # 多选：重复即并集；不传 = 跨全部 scope
+                     [--tag  LABEL]...      # 按标签选 scope（graph only）
+                     [--tag-logic and|or]   # 多个 --tag 的组合（默认 or）
+                     [--same-scope]         # heading only；要求恰好一个 --scope
+                     [--min-npmi FLOAT]     # graph only；读侧地板（只能收紧）
+                     [--limit N]
+                     [--db <path>]          # 默认共享 DB
+                     [--json]
 ```
 
-`--mode dir` **已在 v3 移除**。CLI 与 Python API 均会抛错，指向
-`grga search "<seed>" --json` 后 caller 侧按 `matches[].path` 分组聚合
-（Unix pipeline）。
+`--mode graph` envelope:
+
+```
+{results: [{kw, npmi, cooccur_count, via_seed, chunk_df, source, scopes}],
+ resolved_seeds: [{seed, in_index}]}
+```
+
+`--mode heading` envelope:
+
+```
+{results: [{doc_path, score, mode, reason, keywords[], scope}]}
+```
 
 Modes:
 
-- `graph` — 查 `keyword_pairs`（`source='chunk_cooccur'` 或
-  `'llm_promoted'`），对每个 seed 独立展开 top-M 邻居，返回**候选关键字
-  + 关联证据**。多 seed 不融合（每个候选带 `via_seed`；同一 kw 若被多
-  个 seed 命中会出现多行）。caller 拿到候选后自行 ripgrep 找原文。
-  `RelatedKeyword` 字段：
+- `graph` — 对每个 seed 独立展开 top-M 邻居，返回**候选关键字 + 关联证据**。
+  多 seed 不融合（每个候选带 `via_seed`；同一 kw 若被多个 seed 命中会
+  出现多行）。caller 拿到候选后自行 ripgrep 找原文。`RelatedKeyword`
+  字段：
   - `kw`：候选关键字（casefold）。
-  - `npmi`：与 `via_seed` 的关联强度（存储值，或读侧过滤后）。`llm_promoted`
-    的 pair 在 DB 中 `npmi IS NULL`，JSON 里规范化为 `0.0`。多 scope 命中
-    时取 max。
+  - `npmi`：与 `via_seed` 的关联强度（存储值，或读侧过滤后）。
+    LLM 提升的 pair `npmi` 在 JSON 里规范化为 `0.0`。多 scope 命中时取 max。
   - `cooccur_count`：原始共现次数（多 scope 时同上，与 npmi 同行的那份）。
-  - `via_seed`：这个候选是从哪个 seed 扩展来的（design D4：不融合）。
-  - `chunk_df`：候选词自身的 chunk_df（hub 词判别信号；有 `--scope` 时
-    `SUM(chunk_df) WHERE scope_id IN (...)`，无 `--scope` 时跨全部 scope
-    求和）。
+  - `via_seed`：这个候选是从哪个 seed 扩展来的（多 seed 不融合）。
+  - `chunk_df`：候选词自身的 chunk 频次（hub 词判别信号；有 `--scope`
+    时限定这些 scope 内求和，无 `--scope` 时跨全部 scope 求和）。
   - `source`：`chunk_cooccur` | `llm_promoted`。
-  - `scopes`（**v3.1，plan-2026-07-14 §5.3**）：该候选在本次查询范围内命中
-    的**逻辑 scope 名**列表。单 scope 查询是 singleton；多 scope IN 是命中
-    子集；跨 scope（不传 `--scope`）是全库里所有承载该 pair 的 scope。永远
-    非空，字典序稳定。**用途**：让 caller 免于额外的 `graph inspect` 反查
-    就能把候选路由到正确的 `scope_directories` 绑定目录，再 ripgrep 找片段。
+  - `scopes`：该候选在本次查询范围内命中的**逻辑 scope 名**列表。单
+    scope 查询是 singleton；多 scope 是命中子集；跨 scope（不传
+    `--scope`）是全库里所有承载该 pair 的 scope。永远非空，字典序稳定。
+    **用途**：让 caller 免于额外的 `graph inspect` 反查就能把候选路由
+    到正确的目录（`grga scope list` 查 scope→目录绑定），再 ripgrep 找片段。
+  
   排序 `(via_seed, -npmi, kw)`。稳定，同参数字节一致。
-  **`resolved_seeds` 探针**（v3.1）：每个去重后的输入 seed 一条
-  `{seed, in_index}`。`in_index=false` = 词表里没有（拼错 / 未 index）；
-  `in_index=true` 但 seed 不出现在任何 `results[].via_seed` 里 = 已知但
-  孤立（hub / `--min-npmi` 过紧 / scope 未 index）。前者换词 / suggest
-  reformulate，后者换更具体 seed 或松开 `--min-npmi`。**避免 caller 为
-  每个 seed 额外调一次 `grga graph inspect` 探路。**
-  完整契约见 `docs/design/related-signals-v3.md` +
-  `schemas/related-signals-v3.json`。
+  
+  **`resolved_seeds` 探针**：每个去重后的输入 seed 一条 `{seed, in_index}`。
+  `in_index=false` = 词表里没有（拼错 / 未 index）；`in_index=true` 但
+  seed 不出现在任何 `results[].via_seed` 里 = 已知但孤立（hub /
+  `--min-npmi` 过紧 / scope 未 index）。前者换词 / `suggest reformulate`，
+  后者换更具体 seed 或松开 `--min-npmi`。**避免 caller 为每个 seed 额外
+  调一次 `grga graph inspect` 探路。**
+
 - `heading` — documents that share a full or leaf **Markdown heading path**
   with a seed-carrying document. Cross-scope by default (heading paths
   are structural filters that resist same-name-different-meaning noise).
   Add `--same-scope` (要求恰好一个 `--scope`) to keep matches inside that
-  scope. `Related` 里 pre-v10 的 `directory` / `qualified_path` 已改成
-  `scope`（逻辑名）；pre-v3 的 `keyword_contributions` 字段整体删除。
+  scope. 每条结果的 `scope` 字段是它所在的逻辑 scope 名。
 
 Edge filter (`--mode graph` only):
 
 - `--min-npmi FLOAT` — **读侧地板**。写入期资产已固化下界（build 默认
-  `--min-npmi-build 0.2`，低于此的 pair 根本没被记入 `keyword_pairs`）。
-  `--min-npmi` 只能**收紧**到 ≥ 写入期门槛；不能放松。若召回不足，属
-  离线索引构建选择，不在本 skill 内解决。
+  `--min-npmi-build 0.2`，低于此的 pair 根本没进图谱）。`--min-npmi`
+  只能**收紧**到 ≥ 写入期门槛；不能放松。若召回不足，属离线索引构建
+  选择，不在本 skill 内解决。
 
-**v3 破变清单**（对齐 `docs/design/decisions.md` §"2026-07-13"）：
-- `--mode dir` 移除；`--alpha` / `--iters` / `--cross-scope` / `--preview`
-  / `--edge-quantile` CLI flag 全部移除。
-- PPR 全图算法及 `ppr_score` / `hops_from_seed` / `expansion` /
-  `keyword_contributions` / `graph_signals` 字段整体移除。
-- `keyword_chunks` 表在 schema v8 已删除，`related --mode graph` 不再
-  经 doc 聚合；文档级证据由 caller 用返回的关键字走 ripgrep 自取。
+Scope filter (`--scope` + `--tag`，`--mode graph`)：
 
-**v10 破变清单**（对齐 `docs/design/plan-2026-07-14-scope-directory-split.md`）：
-- `related --directory` 移除；改为 `--scope <name>`（**多选**：可重复；
-  不传则跨全部 scope 联查）。Python API `related(directory=)` → `related(scopes=[...])`
-  / `related(scope=)` (heading mode)。
-- `related --mode heading` 返回的每个 doc：`directory` + `qualified_path`
-  → 单个 `scope`（逻辑名，v10）。
-- `related --mode graph` 每个候选新增 `scopes: List[str]` 字段（v3.1，
-  MINOR bump，caller 忽略安全）。
-- `suggest(directory=)` → `suggest(scope=)`。`scope=None` 时静默跳过
-  vote 记录（知识必须有名）。
+- `--scope NAME`（可多选）— 精确逻辑 scope 名匹配；多个即并集。
+- `--tag LABEL`（可多选）— 按 scope 标签选 scope 集合。
+  `--tag-logic or`（默认）= 命中任一标签的 scope；`--tag-logic and` =
+  同时带全部标签的 scope。标签在 `grga index build --tag ...` 或
+  `grga scope tag add` 时写入。
+- **`--scope` 与 `--tag` 同时给 = 取交集**（scope 必须既在 name 列表里
+  又满足 tag 条件）。任一 filter 非空但解析为空集 → 返回空结果（不
+  退化成跨全部 scope）。两者都不给 = cross-scope union。
+- `--tag` 仅作用于 `--mode graph`；heading 模式传 `--tag` 会报错。热路径
+  动词（`probe` / `search` / `expand`）不接受 `--tag`。
 
 **Precondition**: the offline graph index must already exist for the
 target scope. If it does not, `related` returns `{"results": []}` —
@@ -176,15 +181,26 @@ offline task, not a skill action.
 ## 4. `suggest`
 
 ```
-suggest(query, hits, *, intent, scope=None, max_hits=20,
-        llm_base_url, llm_api_key, llm_model, db_path) ->
-  {intent, keywords[], queries[], keyword_pairs[[a,b],...],
-   ranking[], scores{}, reason, llm_generated: true,
-   tokens_used, prompt_tokens, completion_tokens, model}
+grga suggest <query> --intent expand|rerank|reformulate
+                     [--hits <hits.json>]   # 可选：给 rerank / 提供上下文时用
+                     [--scope NAME]         # 可选：记账进 vote 表；不传静默跳过
+                     [--no-votes]           # 只读：完全不写 vote
+                     [--max-hits N]
+                     [--llm-base-url URL] [--llm-api-key KEY] [--llm-model M]
+                     [--db <path>]          # 默认共享 DB
+                     [--json]
+```
+
+Envelope:
+
+```
+{intent, keywords[], queries[], keyword_pairs[[a,b],...],
+ ranking[], scores{}, reason, llm_generated: true,
+ tokens_used, prompt_tokens, completion_tokens, model}
 ```
 
 The **only** verb that calls an LLM. It never runs autonomously; the caller
-decides when L1/L2 evidence is insufficient.
+decides when evidence from cheaper tiers is insufficient.
 
 Intents:
 
@@ -199,4 +215,11 @@ skill.
 
 ## Supporting command (read-side diagnostic)
 
-- `grga graph inspect <keyword> --db <path> --json` — report a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`, and a `suspected_polysemy` warning. Run it on a bridge keyword before扩大 seed 集或跨 scope 查询。Empty (`total_docs == 0`) means the keyword is not in the offline index — treat as "no signal" and skip.
+```
+grga graph inspect <keyword> [--db <path>] [--json]
+```
+
+Reports a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`,
+and a `suspected_polysemy` warning. Run it on a bridge keyword before
+扩大 seed 集或跨 scope 查询。Empty (`total_docs == 0`) means the keyword
+is not in the offline index — treat as "no signal" and skip.

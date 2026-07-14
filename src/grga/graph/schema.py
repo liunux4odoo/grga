@@ -56,7 +56,15 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Union
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
+
+# Oldest schema version that can be brought forward to :data:`SCHEMA_VERSION`
+# by a purely *additive* upgrade (``CREATE TABLE IF NOT EXISTS`` for the new
+# tables, no data rewrite). v10 → v11 only adds ``scope_tags`` (multi-value
+# scope labels), so a v10 database is upgraded in place rather than rejected.
+# Anything below this is a non-backward-compatible pre-v10 shape and is
+# rejected by :func:`_reject_legacy_db`.
+MIN_UPGRADABLE_VERSION = 10
 
 # Allowed ``keyword_pairs.source`` values (exhaustive; anything else is
 # a bug). Enforced at write time by build / promote.
@@ -154,6 +162,17 @@ CREATE TABLE IF NOT EXISTS scope_directories (
     indexed_at TEXT,
     PRIMARY KEY (scope_id, directory)
 );
+
+-- scope -> multi-value tag labels (schema v11, plan-2026-07-14-scope-tags).
+-- Knowledge layer: portable across machines (a tag describes what a scope
+-- IS, not where its files live). Enters the knowledge pack. Query-side
+-- ``--tag`` filters resolve tag names to scope_id sets here, then feed the
+-- resulting set into the existing ``keyword_pairs.scope_id IN (...)`` path.
+CREATE TABLE IF NOT EXISTS scope_tags (
+    scope_id INTEGER NOT NULL REFERENCES scopes(id),
+    tag      TEXT NOT NULL,
+    PRIMARY KEY (scope_id, tag)
+) WITHOUT ROWID;
 """
 
 _CREATE_META_TABLE = """
@@ -315,6 +334,11 @@ CREATE INDEX IF NOT EXISTS idx_keyword_docs_scope
     ON keyword_docs (scope_id, kw_id);
 CREATE INDEX IF NOT EXISTS idx_keyword_docs_reverse
     ON keyword_docs (scope_id, doc_id);
+-- Forward tag lookup: ``--tag`` query resolves tag -> scope_id set. The
+-- ``scope_tags(scope_id, tag)`` PK already covers the reverse (scope ->
+-- tags) direction.
+CREATE INDEX IF NOT EXISTS idx_scope_tags_tag
+    ON scope_tags (tag, scope_id);
 """
 
 
@@ -396,20 +420,35 @@ _LEGACY_COEXISTING_TABLES = (
 
 
 def _looks_legacy(conn: sqlite3.Connection) -> bool:
-    """True when the DB shows any pre-v10 marker.
+    """True when the DB shows any pre-v10 marker or a future version.
 
     Detects:
 
-    * ``user_version`` stamps of 1..9 (v1-v9 explicit).
+    * ``user_version`` stamps of 1..(MIN_UPGRADABLE_VERSION - 1)
+      — explicit pre-v10 shapes.
     * ``user_version > SCHEMA_VERSION`` (future DB — don't rewrite either).
     * Any of :data:`_LEGACY_MARKER_TABLES` present (v5-v9 or v3-era).
     * Any of :data:`_LEGACY_COEXISTING_TABLES` present without the v10
       anchor ``scopes`` — this catches pre-v5 ``KeywordLibrary`` DBs
       whose ``user_version`` was never stamped and whose tables have a
       TEXT ``directory`` column instead of ``scope_id``.
+
+    A DB stamped somewhere in ``[MIN_UPGRADABLE_VERSION, SCHEMA_VERSION]``
+    (currently v10 or v11) is NOT legacy — the additive upgrade path in
+    :func:`ensure_schema` brings it forward with ``CREATE TABLE IF NOT
+    EXISTS`` + a version restamp.
     """
     version = read_schema_version(conn)
-    if version not in (0, SCHEMA_VERSION):
+    if version == 0:
+        # Fresh DB. Legacy markers can still catch pre-v5 shapes below.
+        pass
+    elif MIN_UPGRADABLE_VERSION <= version <= SCHEMA_VERSION:
+        # In the additive upgrade window — not legacy. Legacy marker
+        # tables (``directories`` etc.) don't coexist with a stamped
+        # v10+ DB, so falling through to the marker check is safe.
+        pass
+    else:
+        # Below MIN_UPGRADABLE_VERSION (1..9) or above SCHEMA_VERSION.
         return True
     for name in _LEGACY_MARKER_TABLES:
         if _table_exists(conn, name):
@@ -424,16 +463,36 @@ def _looks_legacy(conn: sqlite3.Connection) -> bool:
 
 
 def _reject_legacy_db(conn: sqlite3.Connection) -> None:
-    """Raise with the plan-2026-07-14 §7 recovery message.
+    """Raise with an actionable recovery message.
 
-    Names the offending DB file so the user can act on it, and tailors
-    the "inspect old scopes" hint to the shape actually present
-    (``SELECT path FROM directories`` only makes sense when the v5-v9
-    ``directories`` table exists; pre-v5 DBs get a different hint).
+    Two rejection classes, dispatched on ``user_version``:
+
+    * ``prev_version > SCHEMA_VERSION`` — the DB was written by a **newer**
+      grga than this client (typical after mixing versions across
+      machines). The file is NOT corrupt; the user should upgrade grga
+      rather than delete data. Emitting the pre-v10 ``rm <db>`` script
+      here would cost users their portable knowledge.
+    * everything else (pre-v10 or the legacy-marker tables) — the DB was
+      written by grga v1..v9. It cannot be auto-migrated (plan-2026-07-14
+      §7): mapping absolute directory paths to logical scope names has
+      no clean auto-inference. The recovery is delete + re-build.
+
+    The inspect hint in the pre-v10 branch is further tailored to the
+    shape actually present (``SELECT path FROM directories`` only makes
+    sense when the v5-v9 ``directories`` intern table exists; pre-v5 DBs
+    get a different hint).
     """
     row = conn.execute("PRAGMA database_list").fetchone()
     db_file = row[2] if row is not None and len(row) >= 3 else "<memory>"
     prev_version = read_schema_version(conn)
+    if prev_version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"grga index: DB at {db_file!r} is schema v{prev_version}, "
+            f"which is newer than this grga's v{SCHEMA_VERSION}. The file "
+            "is NOT corrupt — a newer grga wrote it. DO NOT delete the "
+            "database. Upgrade grga to a version that supports schema "
+            f"v{prev_version} (or higher), then retry."
+        )
     if _table_exists(conn, "directories"):
         inspect_hint = (
             "  1. (optional) inspect the old scopes:  sqlite3 <db> "
@@ -462,14 +521,19 @@ def _reject_legacy_db(conn: sqlite3.Connection) -> None:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Idempotently bring ``conn`` to schema v10.
+    """Idempotently bring ``conn`` to schema v11.
 
     * Fresh database (no legacy marker, ``user_version == 0``): create
-      every v10 table + index, stamp ``user_version = 10``.
-    * Already at v10 (``user_version == 10``): fast no-op path.
+      every current table + index, stamp ``user_version = SCHEMA_VERSION``.
+    * Already at ``SCHEMA_VERSION``: fast no-op path.
+    * In the additive upgrade window (``user_version`` in
+      ``[MIN_UPGRADABLE_VERSION, SCHEMA_VERSION)``, currently just v10):
+      run the idempotent ``CREATE TABLE IF NOT EXISTS`` DDL to add the
+      new tables (e.g. ``scope_tags``), then restamp ``user_version``.
+      No data is rewritten — existing rows are untouched.
     * Any pre-v10 shape (legacy tables present, or ``user_version`` in
-      ``1..9``): raise with an actionable recovery message
-      (:func:`_reject_legacy_db`).
+      ``1..(MIN_UPGRADABLE_VERSION - 1)``) or a future version: raise
+      with an actionable recovery message (:func:`_reject_legacy_db`).
 
     Returns the final ``user_version`` (always ``SCHEMA_VERSION`` on
     success).
@@ -478,13 +542,17 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
     if current == SCHEMA_VERSION and not any(
         _table_exists(conn, t) for t in _LEGACY_MARKER_TABLES
     ):
-        # Fast path: DB is at v10 and free of any legacy remnant.
+        # Fast path: DB is at the current version and free of any legacy
+        # remnant.
         return current
 
     if _looks_legacy(conn):
         _reject_legacy_db(conn)
 
-    # Fresh DB: create + stamp under a caller-owned transaction if one
+    # Fresh DB *or* an additive upgrade from an older-but-compatible
+    # version (v10 → v11). Both run the same idempotent DDL — new tables
+    # are created, existing tables are left intact by ``IF NOT EXISTS`` —
+    # then restamp the version. Wrap in a caller-owned transaction if one
     # is open, otherwise open our own.
     owned_txn = not conn.in_transaction
     if owned_txn:

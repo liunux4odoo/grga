@@ -79,10 +79,9 @@ Two independent capabilities, choose based on what is missing:
   `level` field — it reflects what was actually achieved.
 - **Need other documents / concepts on the same topic** → `grga related`。
   `mode=graph`（需事先由用户离线构建索引）返回**候选关键字 + `npmi`**
-  （v3 起不再返回文档；caller 拿候选关键字后走 ripgrep 找片段）；
-  `mode=heading` 走 `heading_docs`，返回共享 Markdown 章节的文档。v3 起
-  `--mode dir` 已移除，改用 `grga search --json` 后按目录聚合。若索引
-  未覆盖 seed，`{"results": []}` 视为"无信号，跳过"。
+  （不返回文档；caller 拿候选关键字后走 ripgrep 找片段）；
+  `mode=heading` 返回共享 Markdown 章节的文档。若索引未覆盖 seed，
+  `{"results": []}` 视为"无信号，跳过"。
 
 Compose both: after `expand --level chapter`, feed the chapter's
 headings back into `related --mode heading` to find sibling chapters.
@@ -149,13 +148,12 @@ decides whether to keep the seed or swap.
 
 ### Seed-quality decision table for `related --mode graph`
 
-v3 起 `related --mode graph` 的返回不再有 `expansion` 顶层块——所有
-信号扁平到每条 `results[]` 上（`{kw, npmi, cooccur_count, via_seed,
-chunk_df, source}`），外加 v3.1 的 envelope 级 `resolved_seeds`
-（`[{seed, in_index}]`）。种子自身的 `chunk_df` 需要用 `grga graph
-inspect <seed>` 单独查——但**判断 seed 是死是活先看 `resolved_seeds`**，
-不必每个 seed 都 inspect：`in_index=false` 即未知词，`in_index=true`
-但缺席于 `{results[].via_seed}` 即已知但孤立。
+`related --mode graph` 的所有信号扁平在每条 `results[]` 上（`{kw, npmi,
+cooccur_count, via_seed, chunk_df, source, scopes}`），外加 envelope
+级 `resolved_seeds`（`[{seed, in_index}]`）。种子自身的 `chunk_df`
+需要用 `grga graph inspect <seed>` 单独查——但**判断 seed 是死是活先
+看 `resolved_seeds`**，不必每个 seed 都 inspect：`in_index=false` 即
+未知词，`in_index=true` 但缺席于 `{results[].via_seed}` 即已知但孤立。
 
 | Signal | Reading | Action |
 |---|---|---|
@@ -168,7 +166,7 @@ inspect <seed>` 单独查——但**判断 seed 是死是活先看 `resolved_see
 | `{"results": []}` on indexed seed（`in_index=true`） | Seed 已被索引但孤立（所有边被写入期 npmi 门槛过滤） | 换 seed 或用多 seed；改 `--mode heading` 找结构邻居 |
 | `results[].npmi > 0.5` | Strong semantic link | Trust；考虑把该候选作为下一轮 seed |
 | `results[].npmi` 0.2-0.5 | Weak-to-moderate | Cross-check with T1 `search` before trusting |
-| `results[].npmi < 0.2` | 写入期门槛已过滤——不会出现，除非 build 用了更低的 `--min-npmi-build` | 若真出现视作 noise-adjacent |
+| `results[].npmi < 0.2` | 写入期门槛已过滤——不会出现，除非 build 用了更低的写入期门槛 | 若真出现视作 noise-adjacent |
 | 候选被 stopword / 冗余变体主导 | Seed is hub even if DF looks modest | Swap seed；multi-seed passes help |
 
 **Multi-seed rule of thumb**: 2–4 diverse specifics fused into one call

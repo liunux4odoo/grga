@@ -79,13 +79,13 @@ pair 是核心知识资产，累积增长；graph 查询走亚毫秒 index-only 
 
 | 模块 | 职责 |
 |---|---|
-| `schema.py` | v10 建表（`scopes` / `scope_directories` intern + 资产表 / 证据表）+ `resolve_scope_name`（纯字符串归一化，**不 resolve 路径**）+ `SCHEMA_VERSION = 10`。`ensure_schema` 检测 v10 之前的库（`user_version < 10` 或 `directories` 表存在）**直接报错**给出重建指引，不做数据保迁移（用户空、无历史包袱） |
+| `schema.py` | v10 建表（`scopes` / `scope_directories` intern + 资产表 / 证据表）+ `scope_tags`（v11 多值标签） + `resolve_scope_name`（纯字符串归一化，**不 resolve 路径**）+ `SCHEMA_VERSION = 11`。`ensure_schema` 对 `user_version < MIN_UPGRADABLE_VERSION`（=10）的老库**直接报错**给出重建指引；`user_version` 在 `[MIN_UPGRADABLE_VERSION, SCHEMA_VERSION]` 之间走**加表无损升级**（v10 → v11 仅 `CREATE TABLE IF NOT EXISTS scope_tags` + 重打版本戳） |
 | `ids.py` | `IdInterner`：`scope_id` / `scope_name` 系列（v10 取代 v9 `dir_id` 系列）+ keywords / docs intern。新增 `bind_directory(scope_id, directory)` / `list_directories(scope_id)` / `unbind_directory` 管理 `scope_directories` 旁路表 |
 | `build.py` | 段级离线索引构建入口 `build_graph_index(scope, *, directory, ...)`；`scope` 是**逻辑名**、`directory` 是**物理路径**，两者独立参数。build 时把 `scope_directories` 绑定 UPSERT 上去；`keyword_pairs`（chunk_cooccur，UPSERT 增量）+ `keyword_stats`（chunk_df/doc_df/occurrences）+ `keyword_docs`（doc 级倒排）+ `scope_stats`（n_chunks/n_docs/vocab_size）全部按 scope_id shard。写入期三门槛：Gate 1 独立性 + Gate 2 `min_pair_count` + Gate 3 `BUILD_MIN_NPMI` |
 | `votes.py` | LLM 提出的关键字对**先写投票表**，不直接进图（反污染门）。v10 API：`scope: Optional[str]` 参数，`None` 时静默跳过写入（知识必须有名）。`get_votes` JOIN `scopes.name` 回文本 |
 | `promote.py` | `grga index promote` 的实现：投票达阈值才升级到 `keyword_pairs`（`source='llm_promoted'`，`npmi` NULL）；`promoted_at` 列做幂等标记，防止同一投票被二次升级 |
 | `inspect.py` | `inspect_keyword`：种子多义性/分布探针，读 `keyword_stats` + `keyword_pairs` 回文本；`docs_by_scope` 现在按逻辑 scope 名分组。**v10 新增 knowledge-only 分支**：当 seed 在 `keyword_stats` 有条目但 `docs` 为空（`grga index import` 后典型），返回 `evidence_hint` 说明需要在本机 build 才能获得 doc 分布 |
-| `scope.py` | **v10 scope 管理**：`list_scopes` / `bind_directory` / `unbind_directory` / `rename_scope` / `remove_scope`。`remove_scope` 默认只删证据层（`scope_directories` + `docs` + `keyword_docs` + `heading_docs`），知识保留；`purge_knowledge=True` 才连 `keyword_pairs` / `keyword_stats` / `scope_stats` / `auto_ngram_dict` / `llm_extension_votes` + `scopes` 行一起清（design D6 grow-and-refine 例外闸门）。对应 CLI `grga scope list/bind/unbind/rename/rm` |
+| `scope.py` | **v10 scope 管理**：`list_scopes` / `bind_directory` / `unbind_directory` / `rename_scope` / `remove_scope`。**v11 tag 管理**：`add_tags` / `remove_tags` / `list_tags` / `rename_tag`（单 scope 内改名，严格拒绝碰撞）/ `resolve_scope_ids_by_tags`（tag → scope_id 集合，`logic='and'|'or'`）。`remove_scope` 默认只删证据层（`scope_directories` + `docs` + `keyword_docs` + `heading_docs`），知识保留；`purge_knowledge=True` 才连 `keyword_pairs` / `keyword_stats` / `scope_stats` / `auto_ngram_dict` / `llm_extension_votes` / `scope_tags` + `scopes` 行一起清（design D6 grow-and-refine 例外闸门）。对应 CLI `grga scope list/bind/unbind/rename/rm` + `grga scope tag add/rm/list/mv` |
 | `pack.py` | **知识包 export / import**（plan-2026-07-14 §5）：SQLite `.grgapkg` 文件，只含知识层（scopes + keywords + keyword_pairs + keyword_stats + scope_stats + auto_ngram_dict + llm_extension_votes + meta），证据层剥离。`export_knowledge_pack(scope=..., out_path=...)` 支持单 scope 与 `scope=None` 全量；`import_knowledge_pack(pack, as_scope=...)` 只允许 `--as`，`merge_into` 显式 NotImplementedError（D9）。`meta.grga_pack.*` 命名空间做格式/版本校验；kw_id 通过 get-or-insert 全量 remap，pack 内不同机器切换零冲突。对应 CLI `grga index export/import` |
 
 **反污染流程**（design §4.4）：LLM 提议 → `votes` 表暂存 → `promote` 达阈值 →
@@ -98,6 +98,14 @@ pair 是核心知识资产，累积增长；graph 查询走亚毫秒 index-only 
 List[str]` 附在每条候选上，告知它在本次查询范围内命中的 scope 名子集——`--json`
 消费者可以据此路由后续 ripgrep 到正确的 `scope_directories` 绑定，不需要再跑
 `graph inspect` 反查。
+
+**scope tag 过滤**（v11，plan-2026-07-14-scope-tags）：`grga index build --tag <t> --tag <t>`
+把多值标签写入 `scope_tags`（知识层，随 knowledge pack 迁移）；`grga related --tag <t>
+--tag-logic and|or` 先查 `scope_tags` 得到 scope_id 集合，再喂给现有
+`keyword_pairs.scope_id IN (...)` 过滤链路。`--scope` 语义**不变**（仍是精确
+name 匹配），同时给 `--scope` + `--tag` 时两者**取交集**；两者都为空 = cross-scope
+union。热路径动词（`search` / `probe` / `expand`）**不**接受 `--tag`——caller 想
+按 tag 缩范围时先跑 `grga related` 或 `grga scope list --json` 拿 scope name。
 
 **知识可迁移工作流**：`grga index export --scope <name> --out X.grgapkg` →
 拷贝到另一台机器 → `grga index import X.grgapkg --as <local-name>` → 可选
@@ -194,6 +202,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/v2-plan.md` | v2 落地阶段拆分 |
 | `docs/design/decisions.md` | 关键决策留痕 |
 | `docs/design/plan-2026-07-14-scope-directory-split.md` | **v10 架构**：scope（逻辑名，可迁移）/ directory（物理路径，机器本地）分野；schema v10 + `resolve_scope_name`（不 resolve 路径）+ `scope_directories` 旁路表 + `related --scope` 多选 |
+| `docs/design/plan-2026-07-14-scope-tags.md` | **v11 scope tag**：多值标签叠加在 scope 上（知识层），build 期 `--tag` UPSERT `scope_tags`，query 期 `--tag` + `--tag-logic and|or` 先解析成 scope_id 集合再走现有 `IN (...)` 过滤；`--scope` 语义不变、和 `--tag` 同时给时取交集 |
 | `docs/design/plan-2026-07-12-keyword-primary.md` | v9 架构：pair 字典化 + 删 keyword_chunks（schema v8 落地文档） |
 | `docs/design/db-memory-optimization-lessons.md` | **DB/内存优化方法学**：TEMP TABLE + SQL self-join 替代 Python 大 Counter；改任何"Python 聚合→落 SQLite"模块前必读 |
 | `docs/design/related-signals-v3.md` | `related --json` 当前契约（graph 返候选关键字） |

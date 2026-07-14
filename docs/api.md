@@ -222,9 +222,24 @@ for s in payload["resolved_seeds"]:
 JSON 里规范化为 `0.0`）。
 
 **`chunk_df` 语义**：
-- 有 `--scope`（单选/多选）：`SUM(keyword_stats.chunk_df) WHERE scope_id IN (...)`。
-- 无 `--scope`：`SUM(chunk_df)` 跨所有 scope。
+- 有 `--scope` / `--tag`（单选/多选）：`SUM(keyword_stats.chunk_df) WHERE scope_id IN (...)`，
+  其中 scope_id 集合是 `--scope` name 解析 ∩ `--tag` 标签解析。
+- 无 `--scope` 且无 `--tag`：`SUM(chunk_df)` 跨所有 scope。
 - caller 用它做 hub 词剪枝：`if r["chunk_df"] > threshold: drop`。
+
+**scope 过滤（`--mode graph`）**：
+
+- `--scope <name>`（可多选）— 精确逻辑 scope 名匹配；多个 = 并集。
+- `--tag <label>`（可多选，v11）— 按 scope 标签选 scope 集合。
+  `--tag-logic or`（默认）= 命中任一标签；`--tag-logic and` = 同时带
+  全部标签。标签在 `grga index build --tag ...` 或 `grga scope tag add`
+  时写入 `scope_tags` 表（知识层，随 knowledge pack 迁移）。
+- `--scope` 与 `--tag` 同时给 = **取交集**。任一 filter 非空但解析为
+  空集 → 返回空结果（不退化成跨 scope）。两者都不给 = cross-scope。
+- `--tag` 只作用于 `--mode graph`；heading 模式传 `--tag` 会报错。
+- 热路径动词 `search` / `probe` / `expand` 不接 `--tag`；用户想按 tag
+  缩范围时先跑一次 `grga related --tag ...` 拿到候选 scope names，再
+  喂给 `search --scope <name>`。
 
 **caller 用法**：拿到候选关键字后走 ripgrep 找原文片段。
 
@@ -454,6 +469,12 @@ Scope 参数（v10 破变，plan-2026-07-14）：
   scope 的 `auto_ngram_dict` 作种子（典型场景：`grga index import` 后本
   机 build 时省去重新检测短语）；目标 scope 自身条目在冲突时优先，
   seed scope 不存在或等于目标时静默 no-op。
+- `--tag <label>`（v11，可多次）— 给该 scope 附加多值标签（如
+  `--tag 科幻 --tag 小说`），UPSERT 进 `scope_tags`（`INSERT OR IGNORE`，
+  累积不删）。标签是知识层元数据，随 `grga index export/import` 迁移；
+  想删标签用 `grga scope tag rm`；想改名用 `grga scope tag mv`。
+  Rebuild 也接受 `--tag`（同样累积语义）。查询侧对应 `grga related
+  --tag <label> [--tag-logic and|or]`。
 
 CLI flag（其余，与 v10 无关）：
 
@@ -507,9 +528,9 @@ Non-destructive: `llm_extension_votes` rows are never deleted; a
 
 v10 支持把一个 scope 的**知识层**（`scopes` + 引用到的 `keywords` +
 `keyword_pairs` + `keyword_stats` + `scope_stats` + `auto_ngram_dict`
-+ `llm_extension_votes` + `meta`）打包成便携的 `.grgapkg`（本身是一个
-只装了知识、evidence 表为空的 v10 SQLite 库），拷到另一台机器 import
-后即可复用 —— 见 plan-2026-07-14 §5。
++ `llm_extension_votes` + `scope_tags`(v11) + `meta`）打包成便携的
+`.grgapkg`（本身是一个只装了知识、evidence 表为空的 SQLite 库），拷到
+另一台机器 import 后即可复用 —— 见 plan-2026-07-14 §5。
 
 ### `grga index export`
 
@@ -521,6 +542,7 @@ v10 支持把一个 scope 的**知识层**（`scopes` + 引用到的 `keywords` 
   "n_keywords": 42, "n_pairs": 130,
   "n_stats": 42, "n_scope_stats": 1,
   "n_auto_ngram": 0, "n_votes": 3,
+  "n_tags": 2,                             // v11：随包迁移的标签条数
   "elapsed_seconds": 0.021
 }
 
@@ -544,6 +566,7 @@ v10 支持把一个 scope 的**知识层**（`scopes` + 引用到的 `keywords` 
   "n_keywords_new": 12,                   // 新插入 keywords（其余复用现有词表）
   "n_pairs": 130, "n_stats": 42,
   "n_auto_ngram": 0, "n_votes": 3,
+  "n_tags": 2,                            // v11：随包导入的标签条数
   "scope_stats_written": true,
   "elapsed_seconds": 0.018
 }
@@ -562,15 +585,21 @@ v10 支持把一个 scope 的**知识层**（`scopes` + 引用到的 `keywords` 
 
 ---
 
-## `grga scope`（v10 scope 管理）
+## `grga scope`（v10 scope 管理 + v11 tag 管理）
 
 ```
-grga scope list                          # 列出所有 scope + 绑定目录 + 规模
+grga scope list                          # 列出所有 scope + 绑定目录 + 标签 + 规模
 grga scope bind <name> <directory>       # 绑 scope → 本机目录（可多次绑多目录）
 grga scope unbind <name> [<directory>]   # 解绑一个或全部目录（不动 evidence 数据）
 grga scope rename <old> <new>            # 单行 UPDATE，知识资产透明保留
 grga scope rm <name> --yes               # 默认只删 evidence（D6：知识永不因证据丢失而销毁）
 grga scope rm <name> --knowledge --yes   # 连知识资产 + scopes 行一起清
+
+# tag 管理（v11 — scope 的多值标签，写入 knowledge-layer scope_tags）
+grga scope tag add  <scope> <tag>...       # 累积附加（INSERT OR IGNORE），创建 scope on demand
+grga scope tag rm   <scope> [<tag>...]     # 删标签；省略 tag = 清该 scope 全部标签
+grga scope tag list <scope>                # 列该 scope 全部标签（升序）
+grga scope tag mv   <scope> <old> <new>    # 单 scope 内改名（单行 UPDATE，不动其它 scope）
 ```
 
 `list --json` 返回：
@@ -584,6 +613,7 @@ grga scope rm <name> --knowledge --yes   # 连知识资产 + scopes 行一起清
     "directories": [
       {"directory": "/abs/corpus", "role": null, "indexed_at": "2026-07-14T05:28:49Z"}
     ],
+    "tags": ["物理", "中文"],            // v11：该 scope 的多值标签（升序）
     "n_pairs": 130, "n_keywords": 42, "n_docs": 4
   }
 ]
@@ -592,9 +622,18 @@ grga scope rm <name> --knowledge --yes   # 连知识资产 + scopes 行一起清
 `rm --json` 返回 `RemoveStats`：`scope`, `purged_knowledge`, `scope_found`,
 `directory_bindings_removed`, `docs_removed`, `keyword_docs_removed`,
 `heading_docs_removed`, `pairs_removed`, `stats_rows_removed`, `votes_removed`,
-`ngram_rows_removed`, `scope_row_removed`。CLI 的"not found"判定看
-`scope_found`（正向信号，区分"scope 不存在"与"scope 存在但仅有知识、
-无 evidence 可删"两种情形）。
+`ngram_rows_removed`, **`tags_removed`** (v11), `scope_row_removed`。CLI 的
+"not found"判定看 `scope_found`（正向信号，区分"scope 不存在"与"scope
+存在但仅有知识、无 evidence 可删"两种情形）。
+
+`tag mv` 严格拒绝碰撞：目标标签在同一 scope 已存在时抛
+`FileExistsError`（退出码 1），错误信息指向 `scope tag rm` 让 caller
+显式先删旧的。作用域是**单个 scope**——不动其它 scope 上的同名标签。
+
+`build --tag <label>`（可多次）在 `grga index build` / `rebuild` 时把
+标签 UPSERT 到 `scope_tags`（累积不删）。 tag 是知识层元数据，随
+`grga index export/import` 迁移；`ExportStats.n_tags` / `ImportStats.n_tags`
+报告条数。
 
 ---
 

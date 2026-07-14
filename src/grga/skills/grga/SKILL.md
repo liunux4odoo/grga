@@ -1,11 +1,11 @@
 ---
 name: grga
-description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga v2 read verbs (probe / search / expand / related / suggest) and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index has already been built by the user; if `related` / `graph inspect` returns empty, treat that as "no signal available" and continue with the remaining evidence. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
+description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index has already been built by the user; if `related` / `graph inspect` returns empty, treat that as "no signal available" and continue with the remaining evidence. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
 ---
 
 # grga skill
 
-grga v2 is a **local, structure-aware search toolbox** built on top of
+grga is a **local, structure-aware search toolbox** built on top of
 `ripgrep-all`. The skill wraps five independent, idempotent verbs so a
 caller agent can compose them into a reflection loop without hidden
 state and without paying LLM cost until absolutely necessary.
@@ -46,31 +46,36 @@ grga reads a **shared per-user knowledge graph** at
 `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`), built
 **offline by the user beforehand**. This skill never writes to it.
 
-Since v10 (plan-2026-07-14) the graph has a **knowledge / evidence
-split**: knowledge tables are sharded by a **logical scope name**
-(portable across machines; e.g. `physics-cn`, `/小说/科幻`); evidence
-tables (`docs` / `keyword_docs` / `heading_docs` / `scope_directories`)
-are machine-local and rebuilt via `grga index build`.
+The graph is organised around **logical scope names** (portable across
+machines; e.g. `physics-cn`, `/小说/科幻`). A scope binds to one or
+more local directories on this machine via `grga scope list`.
 
-**读侧 scope 语义（v10）**：
+**读侧 scope 语义**：
 
 - `related --mode graph` 用 `--scope <name>`（**多选**：`--scope a
-  --scope b` 走 `WHERE scope_id IN (...)`；不传 `--scope` 则跨全部
-  scope 联查）。每条返回的候选带 `scopes[]` 字段，告诉 caller 它落在
-  哪几个 scope，用来路由 ripgrep 到对应目录。
+  --scope b` 是并集；不传 `--scope` 则跨全部 scope 联查）。每条返回的
+  候选带 `scopes[]` 字段，告诉 caller 它落在哪几个 scope，用来路由
+  ripgrep 到对应目录。
+- **`--tag <label>` 标签过滤**：scope 可携带多值标签（如 `科幻`、
+  `小说`），caller 用 `--tag <a> --tag <b> [--tag-logic and|or]`（默认
+  `or`）按标签选 scope 集合。`--scope` 和 `--tag` 同时给时**取交集**
+  （scope 必须既满足 name 列表又满足 tag 条件）；两者都为空 = cross-scope。
+  用来在混合语料库里按主题域缩范围而不必记住每个 scope 的确切名字。
 - `related --mode heading` 默认跨 scope（heading paths 是结构化过滤，
   抗同名歧义）。加 `--same-scope`（要求恰好一个 `--scope`）以限制。
-- 一个 scope 可以是"knowledge-only"（`grga index import` 后本机还没
-  build）——`related --mode graph` 依然工作，`--mode heading` 会返回
-  空，`graph inspect` 会给出 `evidence_hint`。
+- 一个 scope 可能是"knowledge-only"（已 import 但本机还没建证据）——
+  `related --mode graph` 依然工作，`--mode heading` 会返回空，
+  `graph inspect` 会给出 `evidence_hint`。
 
 **读 verbs 的 `--directory` 语义**：`probe` / `search` / `expand` 是
-纯 rga/文件系统扫描动词，它们的 `--directory` 是**物理目录**，不进
-图 DB、跟 scope 无关。`related` 只有 `--scope`（逻辑名）；
-`deep-search` / `index build` 两者都要（物理目录 + 逻辑归属）。
+纯 rga/文件系统扫描动词，它们的 `--directory` 是**物理目录**，跟
+scope 无关。`related` 只用 `--scope` / `--tag`（逻辑名 / 标签）；
+`suggest` 可选 `--scope` 用于记账。**热路径动词不接受 `--tag`**——想
+按标签缩范围时先跑 `grga related --tag ...` 或 `grga scope list --json`
+拿到候选 scope name，再喂给 `search --scope <name>`。
 
-Full v10 scope semantics、`RelatedKeyword.scopes[]` 用法、
-knowledge-only 分支、`--db` override 场景 → `references/storage-model.md`。
+Full scope semantics、`RelatedKeyword.scopes[]` 用法、knowledge-only
+分支、`--db` override 场景 → `references/storage-model.md`。
 
 ## When to use this skill
 
@@ -82,7 +87,7 @@ Use grga when the task involves any of the following on a local directory:
 - Turning a single hit into a **wider textual context** (nearby lines,
   paragraph, Markdown chapter, whole file).
 - Answering "**what else is related to this?**" via co-occurrence graph
-  （v3 起返回候选关键字 + `npmi`，caller 用 ripgrep 找片段）, or shared
+  （返回候选关键字 + `npmi`，caller 用 ripgrep 找片段）, or shared
   Markdown heading paths（返回文档）.
 - Asking an LLM to expand keywords, rerank hits, or reformulate a vague
   query — only after cheaper layers have been tried.
@@ -94,16 +99,16 @@ separate `grga deep-search` LLM-planned QA command.
 ## The five verbs (contract summary)
 
 Every verb accepts `--json`. All are **idempotent** and **read-only**,
-except `suggest` (which calls an LLM). Full signatures and per-field
+except `suggest` (which calls an LLM). Full CLI usage and per-field
 semantics in `references/verbs.md`; authoritative JSON schemas in
 `docs/api.md`.
 
 | Verb | One-line purpose | Use when |
 |---|---|---|
 | `grga probe <q> -d <dir>` | `rga --count-matches` — returns `total_lines`, `file_count` without bodies. Makes no decision. | About to `search` an unfamiliar corpus / broad keyword / huge file — want a cheap size signal first. |
-| `grga search <q> -d <dir>` | Hits + Layer 2 position metadata (`occurrence_index`, `line_ratio`, `nearby_hits`) + Layer 1 `heading_path` for Markdown. Space-separated terms are **implicit AND** (v2 breaking; `--implicit-or` restores OR). `--max-total N` (default 1000) sets `truncated`. | Concrete query string. First **evidence-fetching** verb — but for open-ended queries a T2-bookend `related` sweep precedes T1 (see workflow). |
+| `grga search <q> -d <dir>` | Hits + position metadata (`occurrence_index`, `line_ratio`, `nearby_hits`) + `heading_path` for Markdown. Space-separated terms are **implicit AND** (`--implicit-or` restores OR). `--max-total N` (default 1000) sets `truncated`. | Concrete query string. First **evidence-fetching** verb — but for open-ended queries a T2-bookend `related` sweep precedes T1 (see workflow). |
 | `grga expand <path>:<line> --level <lines\|paragraph\|chapter\|document>` | Turn one hit into a `Context` block. Degrades `chapter → paragraph → lines(±3) → lines(±0)`. Always read the returned `level`. Never invokes an LLM. | Hit is interesting and surrounding text is needed; want a whole Markdown chapter; quoting a block into another prompt. |
-| `grga related <kw…> --mode <graph\|heading> [--scope <name> …] --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi` + `scopes[]`**（v3 起不再返回文档，caller 按 `scopes[]` 定位 scope 绑定目录再 ripgrep；查 `keyword_pairs`），`heading` 返回共享 Markdown heading path 的**文档**（`scope` 字段区分同名文件）。`--scope` 可**重复**做多选（`WHERE scope_id IN (...)`）；不传 `--scope` 跨全部 scope 联查。v3 起 `--mode dir` 已删除——改用 `grga search --json` 后按目录聚合。**Precondition**: the offline index must already have been built by the user; if not, `related` returns `{"results": []}` — treat empty as "no signal, move on". | Caller has keywords and needs to broaden — not deepen — the exploration. |
+| `grga related <kw…> --mode <graph\|heading> [--scope <name> …] [--tag <label> …] [--tag-logic and\|or] --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi` + `scopes[]`**（不返回文档，caller 按 `scopes[]` 定位 scope 绑定目录再 ripgrep），`heading` 返回共享 Markdown heading path 的**文档**（`scope` 字段区分同名文件）。`--scope` 可**重复**做多选；`--tag` 可**重复**按标签选 scope；两者同时给取交集。不传 `--scope` / `--tag` 跨全部 scope 联查。**Precondition**: the offline index must already have been built by the user; if not, `related` returns `{"results": []}` — treat empty as "no signal, move on". | Caller has keywords and needs to broaden — not deepen — the exploration. |
 | `grga suggest <q> --intent <expand\|rerank\|reformulate> --hits <hits.json>` | **Only** verb that calls an LLM. Returns reformulated queries / expanded keywords / rerankings. | Search returns too few / low-quality results, or query is intrinsically vague. **Never** the first verb (see "Stuck signals" for triggers and relaxed guardrails). |
 
 ### Supporting commands (read-side only)
@@ -257,12 +262,12 @@ partition semantics.
    chains** rather than baking the hypothesis into one query.
 2. **Do not fall back to `grep` mid-workflow** — `grga search -B 0 -A 0
    --max-total N` is the loop-preserving equivalent.
-3. **Do not open the shared DB with `sqlite3`** — the schema is not a
-   caller contract; use `grga graph inspect` for keyword introspection.
+3. **Do not open the shared DB with `sqlite3`** — the DB is internal
+   storage, not a caller contract; use `grga graph inspect` for keyword
+   introspection.
 4. **Do not copy source data to a "clean" path** — `--directory` accepts
    any path with any Unicode / punctuation; copying invalidates the
-   scope's `scope_directories` binding + `docs.doc_path` and creates
-   silent staleness.
+   scope's directory binding and creates silent staleness.
 
 ## Typical composition patterns
 
@@ -295,9 +300,9 @@ Composition notes:
 
 - Every verb accepts `--json` and prints a single JSON document to
   stdout on success. On failure, exit non-zero and either return
-  `"ok": false` in the JSON (probe / search / deep-search / suggest) or
-  a plain error string on stderr (expand / related / index). `probe`
-  failures stay schema-homogeneous.
+  `"ok": false` in the JSON (probe / search / suggest) or a plain error
+  string on stderr (expand / related). `probe` failures stay
+  schema-homogeneous.
 - Paths returned by `search` are **relative to the search directory**
   unless absolute inputs were passed. `expand` accepts either form.
 - Shared SQLite DB defaults to `~/.config/grga/deep_keywords.db`
@@ -319,8 +324,8 @@ Detailed material loaded on demand:
 
 | File | Read when |
 |---|---|
-| `references/verbs.md` | Need a verb's full signature or per-field semantics. |
-| `references/storage-model.md` | Scoped query is thin and weighing `-d` vs cross-scope 求和; deciding `--db` override; indexing multiple corpora. |
+| `references/verbs.md` | Need a verb's full CLI usage or per-field semantics. |
+| `references/storage-model.md` | Scoped query is thin and weighing `-d` vs cross-scope union; deciding `--db` override; indexing multiple corpora. |
 | `references/reflection-loop.md` | Executing a tier (T0-T3); need per-tier decision tables, seed selection, stuck-signal thresholds, `graph inspect` disambiguation, or `suggest` context relaxation. |
 | `references/anti-patterns.md` | Considering a `grep` / `sqlite3` / copy-to-clean-path shortcut, or an identity-disambiguation query. |
 | `references/troubleshooting.md` | A verb misbehaves — empty `related`, `expand` degraded, `suggest` hangs. |
