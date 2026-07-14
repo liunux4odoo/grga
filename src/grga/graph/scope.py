@@ -357,6 +357,7 @@ def remove_scope(
         if row is None:
             return stats
         scope_id = int(row[0])
+        stats.scope_found = True
 
         # Evidence: doc-keyed tables (heading_docs, keyword_docs)
         # then docs, then scope_directories.

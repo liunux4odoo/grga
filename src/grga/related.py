@@ -326,6 +326,95 @@ def related_keywords(
         conn.close()
 
 
+
+def _complete_scope_sets(
+    conn: sqlite3.Connection,
+    seed_id: int,
+    ranked: List[Tuple[int, str, float, float, "frozenset[int]"]],
+    scope_ids: List[int],
+) -> List[Tuple[int, str, float, float, "frozenset[int]"]]:
+    """Refill ``scopes`` on each ranked candidate with the FULL scope set.
+
+    Per-SELECT ``ORDER BY npmi DESC LIMIT ?`` in the caller can drop rows
+    for the same ``(nbr, source)`` pair in a lower-npmi scope before the
+    merge dict sees them. Without a follow-up, ``RelatedKeyword.scopes``
+    silently mis-reports the scope set — violating the v3.1 contract that
+    promises "cross-scope query: every scope in DB that carries this
+    pair" and "multi-scope IN: the subset that actually memorised it".
+
+    This runs after the main SELECTs have chosen the top-k winners and
+    re-fetches the complete scope membership for those winners only,
+    respecting the same ``scope_ids`` filter as the main query. Cost is
+    O(surviving_pairs) index-only lookups on the composite PK
+    ``(scope_id, kw_a_id, kw_b_id, source)`` mirror indexes — a covered
+    scan of at most ``limit_per_seed`` rows per side per source.
+
+    The pair invariant ``kw_a_id < kw_b_id`` means each ``(seed, nbr)``
+    lives on exactly one side of the PK: nbr > seed → a-side; nbr < seed
+    → b-side. We split the surviving neighbours accordingly and issue
+    one query per (direction, source) with an ``IN (...)`` clause on
+    ``nbr``, keeping the total at ≤ 4 statements per seed.
+    """
+    if not ranked:
+        return ranked
+
+    # Group surviving nbr_ids by (direction, source). Direction: 'a' when
+    # nbr > seed (row stored as kw_a=seed, kw_b=nbr), 'b' when nbr < seed.
+    from collections import defaultdict
+    buckets: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+    for (nbr_id, src, _npmi, _cooccur, _scopes) in ranked:
+        direction = "a" if nbr_id > seed_id else "b"
+        buckets[(direction, src)].append(nbr_id)
+
+    scope_filter = ""
+    scope_params: List = []
+    if len(scope_ids) == 1:
+        scope_filter = " AND scope_id = ?"
+        scope_params = [scope_ids[0]]
+    elif len(scope_ids) >= 2:
+        sp = ",".join("?" for _ in scope_ids)
+        scope_filter = f" AND scope_id IN ({sp})"
+        scope_params = list(scope_ids)
+
+    # scope_map[(nbr_id, src)] = complete scope set for this candidate.
+    scope_map: Dict[Tuple[int, str], set] = defaultdict(set)
+    for (direction, src), nbrs in buckets.items():
+        # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER.
+        for i in range(0, len(nbrs), 800):
+            piece = nbrs[i:i + 800]
+            ph = ",".join("?" for _ in piece)
+            if direction == "a":
+                # seed on a-side: WHERE kw_a_id = seed AND kw_b_id IN (...)
+                sql = (
+                    f"SELECT kw_b_id AS nbr_id, scope_id "
+                    f"FROM keyword_pairs "
+                    f"WHERE kw_a_id = ? AND source = ? "
+                    f"AND kw_b_id IN ({ph}){scope_filter}"
+                )
+                params = (seed_id, src, *piece, *scope_params)
+            else:
+                sql = (
+                    f"SELECT kw_a_id AS nbr_id, scope_id "
+                    f"FROM keyword_pairs "
+                    f"WHERE kw_b_id = ? AND source = ? "
+                    f"AND kw_a_id IN ({ph}){scope_filter}"
+                )
+                params = (seed_id, src, *piece, *scope_params)
+            for row in conn.execute(sql, params):
+                scope_map[(int(row[0]), src)].add(int(row[1]))
+
+    # Rewrite ranked with the complete scope sets. When the follow-up
+    # returned no rows for a candidate (should not happen — the pair is
+    # by construction in the DB), fall back to the truncated set rather
+    # than empty, so the caller never sees an empty ``scopes`` list.
+    out: List[Tuple[int, str, float, float, "frozenset[int]"]] = []
+    for (nbr_id, src, npmi_val, cooccur, prev_scopes) in ranked:
+        full = scope_map.get((nbr_id, src))
+        chosen = frozenset(full) if full else prev_scopes
+        out.append((nbr_id, src, npmi_val, cooccur, chosen))
+    return out
+
+
 def _related_keywords_impl(
     conn: sqlite3.Connection,
     seeds: Sequence[str],
@@ -477,6 +566,12 @@ def _related_keywords_impl(
             ],
             key=lambda t: (-t[2], t[0]),
         )[:limit_per_seed]
+
+        # v3.1 D14 fix: refill each candidate's scope set from the DB so
+        # that per-SELECT LIMIT truncation does not silently drop scopes
+        # that also carry the pair with a lower npmi. Costs at most 4
+        # extra index-covered lookups per seed.
+        ranked = _complete_scope_sets(conn, seed_id, ranked, scope_ids)
 
         for (nbr_id, _src, _npmi_val, _cooccur, scope_set) in ranked:
             seen_kw_ids.add(nbr_id)

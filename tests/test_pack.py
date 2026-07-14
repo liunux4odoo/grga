@@ -25,6 +25,7 @@ from grga.graph.build import build_graph_index
 from grga.graph.pack import (
     PACK_FORMAT,
     PACK_FORMAT_VERSION,
+    export_all_scopes,
     export_knowledge_pack,
     import_knowledge_pack,
 )
@@ -137,7 +138,12 @@ def test_export_evidence_tables_are_empty(sidecar_env, tmp_path: Path):
         pack.close()
 
 
-def test_export_all_captures_every_scope(sidecar_env, tmp_path: Path):
+def test_export_all_scopes_writes_directory(sidecar_env, tmp_path: Path):
+    """`export_all_scopes` writes one pack per scope into a directory.
+
+    Regression for the pre-review bug where `scope=None` produced a
+    single multi-scope pack that `import_knowledge_pack` then rejected.
+    """
     corpus_a = tmp_path / "a"; _write_corpus(corpus_a)
     corpus_b = tmp_path / "b"; _write_corpus(corpus_b)
     db = tmp_path / "source.db"
@@ -149,9 +155,20 @@ def test_export_all_captures_every_scope(sidecar_env, tmp_path: Path):
         "scope-b", directory=corpus_b, db_path=db,
         min_pair_count=1, min_npmi=0.0,
     )
-    out = tmp_path / "all.grgapkg"
-    stats = export_knowledge_pack(out_path=out, scope=None, db_path=db)
-    assert set(stats.scopes_included) == {"scope-a", "scope-b"}
+    out_dir = tmp_path / "packs"
+    per = export_all_scopes(out_dir=out_dir, db_path=db)
+    assert {s.scopes_included[0] for s in per} == {"scope-a", "scope-b"}
+    # Each pack lives on disk and can round-trip through import.
+    for stats in per:
+        assert Path(stats.out_path).exists()
+        assert Path(stats.out_path).parent == out_dir
+        scope_name = stats.scopes_included[0]
+        dst = tmp_path / f"dst-{scope_name}.db"
+        imp = import_knowledge_pack(
+            stats.out_path, as_scope=f"imported-{scope_name}", db_path=dst,
+        )
+        assert imp.into_scope == f"imported-{scope_name}"
+        assert imp.n_pairs > 0
 
 
 def test_export_unknown_scope_raises(sidecar_env, tmp_path: Path):
@@ -162,9 +179,21 @@ def test_export_unknown_scope_raises(sidecar_env, tmp_path: Path):
         )
 
 
-def test_export_empty_db_raises(tmp_path: Path):
+def test_export_all_scopes_empty_db_raises(tmp_path: Path):
     db = tmp_path / "empty.db"
     with pytest.raises(ValueError):
+        export_all_scopes(out_dir=tmp_path / "packs", db_path=db)
+
+
+def test_export_knowledge_pack_requires_scope_name(tmp_path: Path):
+    """scope=None / empty raises — multi-scope goes through export_all_scopes."""
+    db = tmp_path / "empty.db"
+    with pytest.raises(ValueError):
+        export_knowledge_pack(
+            out_path=tmp_path / "x.grgapkg", scope="", db_path=db,
+        )
+    with pytest.raises(TypeError):
+        # scope is a required kw-only argument now.
         export_knowledge_pack(out_path=tmp_path / "x.grgapkg", db_path=db)
 
 
@@ -329,25 +358,6 @@ def test_import_requires_as_scope(sidecar_env, tmp_path: Path):
         import_knowledge_pack(out, as_scope=None, db_path=tmp_path / "dst.db")
 
 
-def test_import_rejects_multi_scope_pack(sidecar_env, tmp_path: Path):
-    """`--all` produces a multi-scope pack; single-scope import rejects it."""
-    corpus_a = tmp_path / "a"; _write_corpus(corpus_a)
-    corpus_b = tmp_path / "b"; _write_corpus(corpus_b)
-    db = tmp_path / "source.db"
-    build_graph_index(
-        "scope-a", directory=corpus_a, db_path=db,
-        min_pair_count=1, min_npmi=0.0,
-    )
-    build_graph_index(
-        "scope-b", directory=corpus_b, db_path=db,
-        min_pair_count=1, min_npmi=0.0,
-    )
-    out = tmp_path / "multi.grgapkg"
-    export_knowledge_pack(out_path=out, scope=None, db_path=db)
-    with pytest.raises(ValueError, match="exactly 1 scope"):
-        import_knowledge_pack(
-            out, as_scope="new", db_path=tmp_path / "dst.db",
-        )
 
 
 # ---------------------------------------------------------------------------

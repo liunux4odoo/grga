@@ -1524,13 +1524,13 @@ def index_promote_command(
 
 @index_app.command("export")
 def index_export_command(
-    out: Path = typer.Option(..., "--out", "-o", resolve_path=True, help="Destination .grgapkg file. Overwritten if it exists."),
-    scope: Optional[str] = typer.Option(None, "--scope", "-s", help="Single scope name to export. Omit + pass `--all` to export every scope in the DB."),
-    all_scopes: bool = typer.Option(False, "--all", help="Export every scope in the DB into one pack. Mutually exclusive with --scope."),
+    out: Path = typer.Option(..., "--out", "-o", resolve_path=True, help="Destination path. With --scope: a .grgapkg file (overwritten atomically via same-directory tempfile + os.replace). With --all: a directory (one <scope>.grgapkg per scope written into it)."),
+    scope: Optional[str] = typer.Option(None, "--scope", "-s", help="Single scope name to export. Mutually exclusive with --all."),
+    all_scopes: bool = typer.Option(False, "--all", help="Export every scope in the DB. Writes one pack per scope into --out (which must be a directory). The `1 pack = 1 scope` invariant keeps `grga index import` deterministic — pre-review this flag silently produced multi-scope packs that its own import path then rejected."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="Source SQLite graph library path."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
-    """Write a portable knowledge pack (SQLite ``.grgapkg``).
+    """Write portable knowledge pack(s) (SQLite ``.grgapkg``).
 
     A pack carries only the **knowledge layer** (scopes / keywords /
     keyword_pairs / keyword_stats / scope_stats / auto_ngram_dict /
@@ -1541,7 +1541,7 @@ def index_export_command(
 
     Design: docs/design/plan-2026-07-14-scope-directory-split.md §5.
     """
-    from grga.graph.pack import export_knowledge_pack
+    from grga.graph.pack import export_all_scopes, export_knowledge_pack
 
     if bool(scope) == bool(all_scopes):
         typer.echo(
@@ -1551,11 +1551,17 @@ def index_export_command(
         raise typer.Exit(2)
 
     try:
-        stats = export_knowledge_pack(
-            out_path=out,
-            scope=scope if scope else None,
-            db_path=str(db_path) if db_path else None,
-        )
+        if all_scopes:
+            per_scope_stats = export_all_scopes(
+                out_dir=out,
+                db_path=str(db_path) if db_path else None,
+            )
+        else:
+            per_scope_stats = [export_knowledge_pack(
+                out_path=out,
+                scope=scope,
+                db_path=str(db_path) if db_path else None,
+            )]
     except LookupError as exc:
         typer.echo(f"export: {exc}", err=True)
         raise typer.Exit(1)
@@ -1564,15 +1570,30 @@ def index_export_command(
         raise typer.Exit(2)
 
     if json_output:
-        typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
+        payload = (
+            {"packs": [s.to_dict() for s in per_scope_stats]}
+            if all_scopes
+            else per_scope_stats[0].to_dict()
+        )
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
-    typer.echo(
-        f"exported {len(stats.scopes_included)} scope(s) → {stats.out_path}\n"
-        f"  scopes: {', '.join(stats.scopes_included)}\n"
-        f"  keywords={stats.n_keywords} pairs={stats.n_pairs} "
-        f"stats={stats.n_stats} ngram={stats.n_auto_ngram} "
-        f"votes={stats.n_votes}  ({stats.elapsed_seconds:.2f}s)"
-    )
+    if all_scopes:
+        typer.echo(f"exported {len(per_scope_stats)} pack(s) into {out}")
+        for stats in per_scope_stats:
+            name = stats.scopes_included[0] if stats.scopes_included else "?"
+            typer.echo(
+                f"  {name}: pairs={stats.n_pairs} keywords={stats.n_keywords} "
+                f"stats={stats.n_stats} ngram={stats.n_auto_ngram} "
+                f"votes={stats.n_votes}  ({stats.elapsed_seconds:.2f}s)"
+            )
+    else:
+        stats = per_scope_stats[0]
+        typer.echo(
+            f"exported scope {stats.scopes_included[0]!r} → {stats.out_path}\n"
+            f"  keywords={stats.n_keywords} pairs={stats.n_pairs} "
+            f"stats={stats.n_stats} ngram={stats.n_auto_ngram} "
+            f"votes={stats.n_votes}  ({stats.elapsed_seconds:.2f}s)"
+        )
 
 
 @index_app.command("import")
@@ -2012,23 +2033,34 @@ def scope_rm_command(
     if json_output:
         typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
         return
-    if not stats.scope_row_removed and stats.docs_removed == 0 and stats.directory_bindings_removed == 0:
+    # Determine "not found" from a POSITIVE signal (scope_found), not by
+    # inferring absence from zero side-effect counts. A knowledge-only
+    # scope (freshly imported, no local build yet) legitimately has 0
+    # docs / 0 bindings but MUST be reported as existing.
+    if not stats.scope_found:
         typer.echo(f"scope {scope!r} not found (no-op)", err=True)
         raise typer.Exit(0)
-    typer.echo(
-        f"scope {scope!r} removed: "
-        f"bindings={stats.directory_bindings_removed} "
-        f"docs={stats.docs_removed} "
-        f"keyword_docs={stats.keyword_docs_removed} "
-        f"heading_docs={stats.heading_docs_removed}"
-    )
     if knowledge:
         typer.echo(
+            f"scope {scope!r} removed (evidence + knowledge): "
+            f"bindings={stats.directory_bindings_removed} "
+            f"docs={stats.docs_removed} "
+            f"keyword_docs={stats.keyword_docs_removed} "
+            f"heading_docs={stats.heading_docs_removed}\n"
             f"  knowledge purged: pairs={stats.pairs_removed} "
             f"stats={stats.stats_rows_removed} "
             f"votes={stats.votes_removed} "
             f"ngram={stats.ngram_rows_removed} "
             f"scope_row={stats.scope_row_removed}"
+        )
+    else:
+        # Evidence-only: matches design D6 (knowledge is preserved).
+        typer.echo(
+            f"scope {scope!r} evidence cleared (knowledge retained): "
+            f"bindings={stats.directory_bindings_removed} "
+            f"docs={stats.docs_removed} "
+            f"keyword_docs={stats.keyword_docs_removed} "
+            f"heading_docs={stats.heading_docs_removed}"
         )
 
 

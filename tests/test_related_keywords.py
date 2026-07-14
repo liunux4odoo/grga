@@ -404,3 +404,69 @@ def test_related_keywords_sorted_deterministic(sidecar_env, tmp_path):
     # Verify sort key: non-increasing npmi within a via_seed group.
     npmis = [r.npmi for r in r1]
     assert npmis == sorted(npmis, reverse=True)
+
+
+def test_related_keywords_scopes_survives_limit_truncation(sidecar_env, tmp_path):
+    """Regression for D14: per-SELECT LIMIT must not drop scopes from the
+    ``scopes`` field.
+
+    Setup: build one scope with many high-npmi neighbours (they saturate
+    the LIMIT window) plus a low-npmi pair (target,seed=alpha,beta);
+    build a second scope containing ONLY the same target pair at low
+    npmi. In a cross-scope query with a small ``limit_per_seed``, the
+    low-npmi row from scope-b would be truncated by the per-SELECT
+    LIMIT before the merge dict sees it, so pre-fix
+    ``RelatedKeyword.scopes`` for target reported only ["scope-a"] even
+    though scope-b memorises the pair. Post-fix, the follow-up query in
+    ``_complete_scope_sets`` must recover the full membership.
+    """
+    from grga.graph.schema import connect, ensure_schema
+    from grga.graph.ids import IdInterner
+
+    db = tmp_path / "graph.db"
+    conn = connect(db)
+    try:
+        ensure_schema(conn)
+        interner = IdInterner(conn)
+        sa = interner.scope_id("scope-a")
+        sb = interner.scope_id("scope-b")
+        seed = interner.kw_id("alpha")
+        target = interner.kw_id("beta")
+        # 20 filler high-npmi pairs in scope-a so LIMIT=5 truncates target
+        # from scope-b (which has a lower npmi and would rank below).
+        for i in range(20):
+            filler = interner.kw_id(f"filler{i}")
+            a, b = sorted([seed, filler])
+            conn.execute(
+                "INSERT INTO keyword_pairs(scope_id, kw_a_id, kw_b_id, "
+                "source, cooccur_count, npmi, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, '')",
+                (sa, a, b, "chunk_cooccur", 10, 0.80),
+            )
+        # target: high npmi in scope-a, low npmi in scope-b
+        a, b = sorted([seed, target])
+        conn.execute(
+            "INSERT INTO keyword_pairs(scope_id, kw_a_id, kw_b_id, source, "
+            "cooccur_count, npmi, updated_at) VALUES(?, ?, ?, ?, ?, ?, '')",
+            (sa, a, b, "chunk_cooccur", 5, 0.90),
+        )
+        conn.execute(
+            "INSERT INTO keyword_pairs(scope_id, kw_a_id, kw_b_id, source, "
+            "cooccur_count, npmi, updated_at) VALUES(?, ?, ?, ?, ?, ?, '')",
+            (sb, a, b, "chunk_cooccur", 5, 0.25),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Cross-scope query with a small LIMIT.
+    result = related_keywords(
+        ["alpha"], limit_per_seed=5, min_npmi=0.2, db_path=db,
+    ).results
+    target_row = next((r for r in result if r.kw == "beta"), None)
+    assert target_row is not None, (
+        "target should survive as top-ranked candidate from scope-a"
+    )
+    assert set(target_row.scopes) == {"scope-a", "scope-b"}, (
+        f"D14 regression: expected both scopes, got {target_row.scopes}"
+    )

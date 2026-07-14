@@ -1,11 +1,17 @@
 """Knowledge pack export / import (plan-2026-07-14 §5).
 
 A *knowledge pack* is a self-contained SQLite file (``.grgapkg``) that
-carries the **knowledge layer** for one (or every) scope in the source
+carries the **knowledge layer** for **exactly one scope** in the source
 DB, stripped of every ``evidence`` row. It lets you learn a
 co-occurrence dictionary on one machine and reuse it on another without
 dragging along that machine's ``docs`` / ``keyword_docs`` /
 ``scope_directories`` metadata.
+
+Multi-scope (``--all``) writes to a **directory** of per-scope packs
+(one ``<scope>.grgapkg`` per scope) — see :func:`export_all_scopes`.
+Before the D14 review the ``--all`` path silently emitted a single
+multi-scope pack that its own import path then rejected; the ``1 pack =
+1 scope`` invariant is now enforced end-to-end.
 
 Layer boundary is enforced strictly (plan-2026-07-14 §1.1):
 
@@ -52,18 +58,6 @@ from grga.graph.schema import (
 # Pack format constants.
 PACK_FORMAT = "grga-knowledge-pack"
 PACK_FORMAT_VERSION = "1"
-
-# Tables copied verbatim (mapped via kw_id / scope_id remap during import).
-_KNOWLEDGE_TABLES = (
-    "scopes",
-    "keywords",
-    "keyword_pairs",
-    "keyword_stats",
-    "scope_stats",
-    "auto_ngram_dict",
-    "llm_extension_votes",
-)
-
 
 @dataclass
 class ExportStats:
@@ -129,15 +123,21 @@ class ImportStats:
 def export_knowledge_pack(
     *,
     out_path: Union[str, Path],
-    scope: Optional[str] = None,
+    scope: str,
     db_path: Union[str, Path, None] = None,
 ) -> ExportStats:
-    """Write a knowledge pack.
+    """Write a single-scope knowledge pack (``1 pack = 1 scope``).
 
     Args:
-        out_path: destination ``.grgapkg`` file. Overwritten if it exists.
-        scope: single scope name to export, or ``None`` to export
-            **every** scope in the source DB (``grga index export --all``).
+        out_path: destination ``.grgapkg`` file. Written atomically via
+            a same-directory tempfile + ``os.replace``, so a crash mid-
+            write leaves the previous good pack (if any) intact — never
+            a partial file.
+        scope: **required** logical scope name. Multi-scope export goes
+            through :func:`export_all_scopes` (writes one pack per scope
+            into a directory) — passing a comma-separated list here is
+            NOT accepted (the ``1 pack = 1 scope`` invariant lets
+            :func:`import_knowledge_pack` stay deterministic).
         db_path: source SQLite path (defaults to the shared deep-search DB).
 
     Returns:
@@ -145,44 +145,82 @@ def export_knowledge_pack(
 
     Raises:
         LookupError: named scope does not exist.
-        ValueError: source DB has no scopes to export.
+        ValueError: ``scope`` is empty / whitespace, or source DB is empty.
     """
     from grga.deep_search import DEFAULT_DB_PATH
+
+    resolved_scope = resolve_scope_name(scope)
+    if resolved_scope is None:
+        raise ValueError(
+            "export_knowledge_pack: scope must be a non-empty name; "
+            "use export_all_scopes to write every scope in the DB"
+        )
 
     started = time.perf_counter()
     out_resolved = Path(out_path).expanduser().resolve()
     out_resolved.parent.mkdir(parents=True, exist_ok=True)
-    if out_resolved.exists():
-        out_resolved.unlink()
 
     source_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     src = connect(source_db)
     try:
         ensure_schema(src)
-        scope_ids, scope_names = _resolve_export_scope_set(src, scope)
+        row = src.execute(
+            "SELECT id FROM scopes WHERE name = ?", (resolved_scope,)
+        ).fetchone()
+        if row is None:
+            raise LookupError(
+                f"scope not found in source DB: {resolved_scope!r}"
+            )
+        scope_id = int(row[0])
         stats = ExportStats(
             out_path=str(out_resolved),
-            scopes_included=scope_names,
+            scopes_included=[resolved_scope],
         )
 
-        # Fresh v10 shell for the pack. Evidence tables stay empty by
-        # construction — we only INSERT into knowledge tables below.
-        dst = connect(out_resolved)
+        # Atomic write: build the pack in a same-directory tempfile, then
+        # os.replace onto the final path. Guarantees the caller either
+        # sees the previous good pack (if any) or the newly-written one —
+        # never a partial file. Same-directory tempfile keeps the
+        # replace on-device (POSIX rename is atomic within a filesystem;
+        # ``os.replace`` is atomic on both POSIX and Windows).
+        tmp_fd = None
+        tmp_path = None
         try:
-            ensure_schema(dst)
-            with dst:  # atomic transaction on the destination
-                _copy_scopes(src, dst, scope_ids)
-                stats.n_keywords = _copy_keywords_referenced(
-                    src, dst, scope_ids
+            import os
+            import tempfile
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{out_resolved.name}.",
+                suffix=".tmp",
+                dir=str(out_resolved.parent),
+            )
+            os.close(tmp_fd)
+            tmp_fd = None
+            tmp_path = Path(tmp_name)
+
+            dst = connect(tmp_path)
+            try:
+                ensure_schema(dst)
+                _fill_pack_via_attach(
+                    dst, source_db, [scope_id], [resolved_scope], src, stats,
                 )
-                stats.n_pairs = _copy_pairs(src, dst, scope_ids)
-                stats.n_stats = _copy_keyword_stats(src, dst, scope_ids)
-                stats.n_scope_stats = _copy_scope_stats(src, dst, scope_ids)
-                stats.n_auto_ngram = _copy_auto_ngram(src, dst, scope_ids)
-                stats.n_votes = _copy_votes(src, dst, scope_ids)
-                _write_pack_meta(src, dst, scope_names)
+            finally:
+                dst.close()
+
+            os.replace(str(tmp_path), str(out_resolved))
+            tmp_path = None  # replaced; no cleanup needed
         finally:
-            dst.close()
+            # Best-effort cleanup on error.
+            if tmp_fd is not None:
+                try:
+                    import os as _os
+                    _os.close(tmp_fd)
+                except OSError:
+                    pass
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
     finally:
         src.close()
 
@@ -190,205 +228,168 @@ def export_knowledge_pack(
     return stats
 
 
-def _resolve_export_scope_set(
-    src: sqlite3.Connection,
-    scope: Optional[str],
-) -> tuple[List[int], List[str]]:
-    """Return ``(scope_ids, scope_names)`` for the export set.
+def export_all_scopes(
+    *,
+    out_dir: Union[str, Path],
+    db_path: Union[str, Path, None] = None,
+) -> List[ExportStats]:
+    """Write one ``.grgapkg`` per scope into ``out_dir``.
 
-    ``scope=None`` selects every scope. A named scope that doesn't exist
-    raises :class:`LookupError`. An empty source DB raises :class:`ValueError`.
+    Each output file is named ``<scope>.grgapkg`` (scope names are
+    sanitised for cross-platform filesystem safety). This is the
+    multi-scope entry point that replaces the pre-review ``scope=None``
+    codepath: since :func:`import_knowledge_pack` requires exactly one
+    scope per pack, ``--all`` must emit multiple files, not a single
+    multi-scope blob.
+
+    Returns:
+        One :class:`ExportStats` per scope written, in export order
+        (ascending scope name).
+
+    Raises:
+        ValueError: source DB has no scopes to export.
     """
-    if scope is None:
+    from grga.deep_search import DEFAULT_DB_PATH
+
+    out_root = Path(out_dir).expanduser().resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    source_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    src = connect(source_db)
+    try:
+        ensure_schema(src)
         rows = src.execute(
-            "SELECT id, name FROM scopes ORDER BY name ASC"
+            "SELECT name FROM scopes ORDER BY name ASC"
         ).fetchall()
-        if not rows:
-            raise ValueError(
-                "source DB has no scopes to export — run "
-                "`grga index build --scope <name> --directory <path>` first"
-            )
-        return [int(r["id"]) for r in rows], [str(r["name"]) for r in rows]
-    resolved = resolve_scope_name(scope)
-    if resolved is None:
-        raise ValueError("scope must be a non-empty name")
-    row = src.execute(
-        "SELECT id FROM scopes WHERE name = ?", (resolved,)
-    ).fetchone()
-    if row is None:
-        raise LookupError(f"scope not found in source DB: {resolved!r}")
-    return [int(row["id"])], [resolved]
-
-
-def _copy_scopes(
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    scope_ids: List[int],
-) -> None:
-    """Copy ``scopes`` rows preserving id + name.
-
-    Ids stay stable inside a pack so we can join against them in the same
-    file without a remap; on ``import`` the destination will remap ids
-    into its own space.
-    """
-    ph = ",".join("?" for _ in scope_ids)
-    rows = src.execute(
-        f"SELECT id, name, kind, created_at FROM scopes WHERE id IN ({ph})",
-        scope_ids,
-    ).fetchall()
-    dst.executemany(
-        "INSERT INTO scopes (id, name, kind, created_at) "
-        "VALUES (?, ?, ?, ?)",
-        [
-            (int(r["id"]), str(r["name"]), r["kind"], r["created_at"])
-            for r in rows
-        ],
-    )
-
-
-def _copy_keywords_referenced(
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    scope_ids: List[int],
-) -> int:
-    """Copy every ``keywords`` row referenced by any exported knowledge row.
-
-    Pack size stays small on selective exports: only the vocab actually
-    reachable from ``scope_ids`` is included, not the source's entire
-    ``keywords`` table.
-    """
-    ph = ",".join("?" for _ in scope_ids)
-    rows = src.execute(
-        f"""
-        SELECT id, kw FROM keywords WHERE id IN (
-            SELECT kw_a_id FROM keyword_pairs WHERE scope_id IN ({ph})
-            UNION SELECT kw_b_id FROM keyword_pairs WHERE scope_id IN ({ph})
-            UNION SELECT kw_id  FROM keyword_stats  WHERE scope_id IN ({ph})
-            UNION SELECT kw_a_id FROM llm_extension_votes WHERE scope_id IN ({ph})
-            UNION SELECT kw_b_id FROM llm_extension_votes WHERE scope_id IN ({ph})
+    finally:
+        src.close()
+    if not rows:
+        raise ValueError(
+            "source DB has no scopes to export — run "
+            "`grga index build --scope <name> --directory <path>` first"
         )
-        """,
-        scope_ids * 5,
-    ).fetchall()
-    dst.executemany(
-        "INSERT INTO keywords (id, kw) VALUES (?, ?)",
-        [(int(r["id"]), str(r["kw"])) for r in rows],
-    )
-    return len(rows)
+
+    out: List[ExportStats] = []
+    for row in rows:
+        scope_name = str(row["name"])
+        pack_path = out_root / f"{_safe_pack_filename(scope_name)}.grgapkg"
+        out.append(export_knowledge_pack(
+            out_path=pack_path,
+            scope=scope_name,
+            db_path=db_path,
+        ))
+    return out
 
 
-def _copy_pairs(
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    scope_ids: List[int],
-) -> int:
-    ph = ",".join("?" for _ in scope_ids)
-    rows = src.execute(
-        f"""
-        SELECT scope_id, kw_a_id, kw_b_id, source,
-               cooccur_count, npmi, updated_at
-        FROM keyword_pairs WHERE scope_id IN ({ph})
-        """,
-        scope_ids,
-    ).fetchall()
-    dst.executemany(
-        "INSERT INTO keyword_pairs (scope_id, kw_a_id, kw_b_id, source, "
-        "cooccur_count, npmi, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [tuple(r) for r in rows],
-    )
-    return len(rows)
+def _safe_pack_filename(scope_name: str) -> str:
+    """Sanitise a scope name for use as a filename (cross-platform).
 
-
-def _copy_keyword_stats(
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    scope_ids: List[int],
-) -> int:
-    ph = ",".join("?" for _ in scope_ids)
-    rows = src.execute(
-        f"""
-        SELECT scope_id, kw_id, chunk_df, doc_df, total_occurrences,
-               updated_at
-        FROM keyword_stats WHERE scope_id IN ({ph})
-        """,
-        scope_ids,
-    ).fetchall()
-    dst.executemany(
-        "INSERT INTO keyword_stats (scope_id, kw_id, chunk_df, doc_df, "
-        "total_occurrences, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-        [tuple(r) for r in rows],
-    )
-    return len(rows)
-
-
-def _copy_scope_stats(
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    scope_ids: List[int],
-) -> int:
-    ph = ",".join("?" for _ in scope_ids)
-    rows = src.execute(
-        f"""
-        SELECT scope_id, n_chunks, n_docs, vocab_size, updated_at
-        FROM scope_stats WHERE scope_id IN ({ph})
-        """,
-        scope_ids,
-    ).fetchall()
-    dst.executemany(
-        "INSERT INTO scope_stats (scope_id, n_chunks, n_docs, vocab_size, "
-        "updated_at) VALUES (?, ?, ?, ?, ?)",
-        [tuple(r) for r in rows],
-    )
-    return len(rows)
-
-
-def _copy_auto_ngram(
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    scope_ids: List[int],
-) -> int:
-    ph = ",".join("?" for _ in scope_ids)
-    rows = src.execute(
-        f"""
-        SELECT scope_id, phrase, n, count, npmi, branch_ent, updated_at
-        FROM auto_ngram_dict WHERE scope_id IN ({ph})
-        """,
-        scope_ids,
-    ).fetchall()
-    dst.executemany(
-        "INSERT INTO auto_ngram_dict (scope_id, phrase, n, count, npmi, "
-        "branch_ent, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [tuple(r) for r in rows],
-    )
-    return len(rows)
-
-
-def _copy_votes(
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    scope_ids: List[int],
-) -> int:
-    """Copy votes AND their ``promoted_at`` markers (decision D12).
-
-    Votes are knowledge; ``promoted_at`` is the idempotency marker that
-    keeps ``grga index promote`` from double-graduating a pair. Since
-    the ``llm_promoted`` pair rows travel with the votes in the same
-    pack, ``promoted_at`` stays semantically consistent on the target.
+    Replaces every character that would be problematic on any of Linux /
+    macOS / Windows (``/`` ``\\`` ``:`` ``*`` ``?`` ``"`` ``<`` ``>``
+    ``|`` NUL) with ``_``. Preserves ASCII letters / digits / dash /
+    underscore / dot verbatim; CJK etc. characters are kept as-is because
+    modern filesystems handle Unicode filenames fine.
     """
-    ph = ",".join("?" for _ in scope_ids)
-    rows = src.execute(
-        f"""
-        SELECT scope_id, kw_a_id, kw_b_id, vote_count, last_voted, promoted_at
-        FROM llm_extension_votes WHERE scope_id IN ({ph})
-        """,
-        scope_ids,
-    ).fetchall()
-    dst.executemany(
-        "INSERT INTO llm_extension_votes (scope_id, kw_a_id, kw_b_id, "
-        "vote_count, last_voted, promoted_at) VALUES (?, ?, ?, ?, ?, ?)",
-        [tuple(r) for r in rows],
+    bad = set('/\\:*?"<>|\x00')
+    return "".join("_" if c in bad or ord(c) < 32 else c for c in scope_name) or "scope"
+
+
+# ATTACH-based fast path: keep row copy in SQLite's C layer instead of
+# round-tripping through Python. Export never remaps ids (scope_id and
+# kw_id stay stable inside a pack), so a straight ``INSERT ... SELECT``
+# with an ATTACHED source is safe. Only ``keywords`` needs a subquery
+# to restrict to the referenced vocabulary; the other six tables use
+# a direct scope_id filter.
+
+_ATTACH_COPY_TABLES = {
+    # table_name → column-list SQL (fetched from schema — kept explicit
+    # so a schema change breaks tests loudly rather than silently
+    # copying garbage columns).
+    "keyword_pairs": "scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at",
+    "keyword_stats": "scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at",
+    "scope_stats":   "scope_id, n_chunks, n_docs, vocab_size, updated_at",
+    "auto_ngram_dict": "scope_id, phrase, n, count, npmi, branch_ent, updated_at",
+    "llm_extension_votes": "scope_id, kw_a_id, kw_b_id, vote_count, last_voted, promoted_at",
+}
+
+
+def _fill_pack_via_attach(
+    dst: sqlite3.Connection,
+    source_db_path: Path,
+    scope_ids: List[int],
+    scope_names: List[str],
+    src_conn: sqlite3.Connection,
+    stats: "ExportStats",
+) -> None:
+    """Populate ``dst`` (fresh v10 pack) from ``source_db_path`` via ATTACH.
+
+    Uses a single ATTACH + one ``INSERT ... SELECT`` per knowledge table
+    so row copy happens entirely in the C layer. Falls back to no-op on
+    tables that end up empty (still records 0 in stats).
+
+    ``src_conn`` is passed only so :func:`_write_pack_meta` can inspect
+    the source's ``meta`` (for the toolchain fingerprint carry-through).
+    """
+    dst.execute(
+        "ATTACH DATABASE ? AS src",
+        (str(source_db_path),),
     )
-    return len(rows)
+    try:
+        with dst:  # atomic on the pack DB
+            ph = ",".join("?" for _ in scope_ids)
+            # 1) scopes — id/name/kind/created_at preserved verbatim.
+            dst.execute(
+                f"INSERT INTO scopes (id, name, kind, created_at) "
+                f"SELECT id, name, kind, created_at FROM src.scopes "
+                f"WHERE id IN ({ph})",
+                scope_ids,
+            )
+            # 2) referenced keywords — union of every kw_id touched by
+            #    the exported scopes' business tables.
+            cur = dst.execute(
+                f"""
+                INSERT INTO keywords (id, kw)
+                SELECT id, kw FROM src.keywords WHERE id IN (
+                    SELECT kw_a_id FROM src.keyword_pairs WHERE scope_id IN ({ph})
+                    UNION SELECT kw_b_id FROM src.keyword_pairs WHERE scope_id IN ({ph})
+                    UNION SELECT kw_id   FROM src.keyword_stats  WHERE scope_id IN ({ph})
+                    UNION SELECT kw_a_id FROM src.llm_extension_votes WHERE scope_id IN ({ph})
+                    UNION SELECT kw_b_id FROM src.llm_extension_votes WHERE scope_id IN ({ph})
+                )
+                """,
+                scope_ids * 5,
+            )
+            stats.n_keywords = int(cur.rowcount or 0)
+            # 3-7) Copy each knowledge asset table via _ATTACH_COPY_TABLES.
+            for table, cols in _ATTACH_COPY_TABLES.items():
+                cur = dst.execute(
+                    f"INSERT INTO {table} ({cols}) "
+                    f"SELECT {cols} FROM src.{table} "
+                    f"WHERE scope_id IN ({ph})",
+                    scope_ids,
+                )
+                n = int(cur.rowcount or 0)
+                # Wire the count into the stats object under a
+                # consistent naming scheme. Kept explicit so the JSON
+                # contract stays stable.
+                if table == "keyword_pairs":
+                    stats.n_pairs = n
+                elif table == "keyword_stats":
+                    stats.n_stats = n
+                elif table == "scope_stats":
+                    stats.n_scope_stats = n
+                elif table == "auto_ngram_dict":
+                    stats.n_auto_ngram = n
+                elif table == "llm_extension_votes":
+                    stats.n_votes = n
+            _write_pack_meta(src_conn, dst, scope_names)
+    finally:
+        # DETACH is a no-op if the ATTACH failed; wrap defensively so a
+        # partial ATTACH does not leak into subsequent calls.
+        try:
+            dst.execute("DETACH DATABASE src")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _write_pack_meta(
@@ -494,27 +495,44 @@ def import_knowledge_pack(
         dst = connect(target_db)
         try:
             ensure_schema(dst)
-            existing = dst.execute(
-                "SELECT 1 FROM scopes WHERE name = ?", (resolved_as,)
-            ).fetchone()
-            if existing is not None:
-                raise ValueError(
-                    f"target DB already has scope {resolved_as!r}. "
-                    "Pick a different --as name, or run `grga scope rm "
-                    f"{resolved_as} --knowledge --yes` first."
-                )
-            with dst:
+            # Collision check + INSERT run inside a single write txn so
+            # two concurrent imports can not both pass the check before
+            # either INSERTs (the "SELECT then INSERT" TOCTOU window is
+            # what BEGIN IMMEDIATE closes). We still translate any
+            # IntegrityError from the UNIQUE(name) constraint into the
+            # friendly ValueError as defense-in-depth: if a third writer
+            # slips in between our BEGIN IMMEDIATE and INSERT (should be
+            # impossible under SQLite's single-writer lock but easy to
+            # verify), the caller-facing error stays actionable instead
+            # of surfacing a raw sqlite3.IntegrityError.
+            dst.execute("BEGIN IMMEDIATE")
+            try:
+                existing = dst.execute(
+                    "SELECT 1 FROM scopes WHERE name = ?", (resolved_as,)
+                ).fetchone()
+                if existing is not None:
+                    raise ValueError(
+                        f"target DB already has scope {resolved_as!r}. "
+                        "Pick a different --as name, or run `grga scope rm "
+                        f"{resolved_as} --knowledge --yes` first."
+                    )
                 stats = ImportStats(
                     pack_path=str(pack_resolved),
                     into_scope=resolved_as,
                 )
                 # 1. Create the new scope row in the destination.
                 now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                dst.execute(
-                    "INSERT INTO scopes (name, kind, created_at) "
-                    "VALUES (?, ?, ?)",
-                    (resolved_as, pack_scope_meta["kind"], now),
-                )
+                try:
+                    dst.execute(
+                        "INSERT INTO scopes (name, kind, created_at) "
+                        "VALUES (?, ?, ?)",
+                        (resolved_as, pack_scope_meta["kind"], now),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise ValueError(
+                        f"target DB already has scope {resolved_as!r} "
+                        "(concurrent import). Pick a different --as name."
+                    ) from exc
                 new_scope_id = int(dst.execute(
                     "SELECT id FROM scopes WHERE name = ?", (resolved_as,)
                 ).fetchone()[0])
@@ -540,6 +558,15 @@ def import_knowledge_pack(
                 stats.n_votes = _import_votes(
                     pack, dst, pack_scope_id, new_scope_id, kw_remap
                 )
+                dst.execute("COMMIT")
+            except Exception:
+                # Any failure inside the txn rolls back everything —
+                # including the scope INSERT so the target DB stays clean.
+                try:
+                    dst.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
         finally:
             dst.close()
     finally:
@@ -582,25 +609,25 @@ def _import_keywords(
 
     Returns ``(pack_kw_id → dst_kw_id, n_newly_inserted)``. Never inserts
     duplicate ``kw`` strings — the destination's ``UNIQUE(kw)`` constraint
-    keeps the vocab tidy; existing rows are reused. The insert count comes
-    from ``sqlite3.Cursor.rowcount`` on the INSERT OR IGNORE, which
-    reports rows *actually* inserted (not skipped by the OR IGNORE) — the
-    right accounting for reporting new vs. shared vocabulary to the user.
+    keeps the vocab tidy; existing rows are reused.
 
-    Uses one bulk-INSERT-OR-IGNORE + one bulk-SELECT for O(1) round-trips
-    regardless of vocab size (chunked at 900 params to stay under
-    SQLITE_MAX_VARIABLE_NUMBER's default).
+    Uses one bulk ``executemany`` INSERT OR IGNORE + one bulk SELECT
+    chunked at 900 params (SQLITE_MAX_VARIABLE_NUMBER default). New-row
+    count comes from ``dst.total_changes`` deltas around the executemany,
+    which mirrors ``rowcount`` semantics on INSERT OR IGNORE (skipped
+    rows are NOT counted) without paying the per-row execute cost that
+    a naive rowcount loop would incur.
     """
     pack_rows = pack.execute("SELECT id, kw FROM keywords").fetchall()
     if not pack_rows:
         return {}, 0
     kw_texts = [str(r["kw"]) for r in pack_rows]
-    n_new = 0
-    for text in kw_texts:
-        cur = dst.execute(
-            "INSERT OR IGNORE INTO keywords (kw) VALUES (?)", (text,)
-        )
-        n_new += int(cur.rowcount or 0)
+    before = dst.total_changes
+    dst.executemany(
+        "INSERT OR IGNORE INTO keywords (kw) VALUES (?)",
+        [(t,) for t in kw_texts],
+    )
+    n_new = dst.total_changes - before
     # Bulk lookup: destination ids in one shot per chunk.
     dst_ids: dict = {}
     chunk = 900
