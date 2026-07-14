@@ -21,7 +21,7 @@ grga 侧的具体命令与依赖：
 | 路径搜索（只匹配文件名，不读内容） | ⚠️ 需配合 `find` | ⚠️ 需 `--files \| rg` | ⚠️ 同 rg | `grga search --path-only` | 无 |
 | 命令预览与试探（先看规模再决定读不读） | ❌ | ❌ | ❌ | `grga preview` / `grga probe` | 无 |
 | Markdown / PDF 的段落 / 章节上下文扩展 | ❌ | ❌ | ❌ | `grga expand`（按行 / 段落 / 章节逐级） |  |
-| 关键词共现关系图（离线索引 + 亚毫秒查询） | ❌ | ❌ | ❌ | `grga index build` → `grga related` / `grga graph inspect` | |
+| 关键词共现关系图（离线索引 + 亚毫秒查询） | ❌ | ❌ | ❌ | `grga index build --scope <name>` → `grga related` / `grga graph inspect` | |
 | LLM 深度搜索、查询改写、结果重排 | ❌ | ❌ | ❌ | `grga deep-search` / `grga suggest` | OpenAI 兼容 API；至少 `GRGA_OPENAI_API_KEY` + `GRGA_OPENAI_MODEL`（详见 [docs/env-vars.md](docs/env-vars.md)） |
 | Tk 图形界面 | ❌ | ❌ | ❌ | `grga gui` 或 `grga-gui` | 系统自带 Tk |
 | Agent 友好（`--json` + 稳定退出码契约） | ❌ | ⚠️ 部分 | ⚠️ 部分 | `grga skill install` 分发内置 agent 技能包 | 错误契约见 [docs/exit-codes.md](docs/exit-codes.md) |
@@ -66,8 +66,10 @@ grga --help                        # 查看命令帮助
 grga skill install --to ~/.kilocode/skills   # 换成你的 agent skill 目录即可
 
 # 预学习（可选，视语料规模需要花费一定时间，但可以提供图扩展能力）
+# --scope 是逻辑域名（跨机器可迁移，与本机目录解耦，可任取有意义的名字）；
+# --directory 未传则默认当前目录（这里由前面的 cd 兜底）
 cd /path/to/your/documents
-grga index build
+grga index build --scope my-notes
 ```
 `docs/search-demo`下提供了“纯LLM回答”、“简单文本检索回答”、“图扩展回答”三种搜索结果，可以看到明显的差别。
 
@@ -91,8 +93,8 @@ grga expand ...   # 按行 / 段落 / 章节逐级扩展
 
 ```bash
 cd /path/to/your/documents
-grga index build
-grga related 面壁计划
+grga index build --scope my-notes             # --directory 省略时默认当前目录
+grga related 面壁计划 --scope my-notes         # 不加 --scope 则跨全部 scope 联查
 grga graph inspect 面壁计划
 ```
 

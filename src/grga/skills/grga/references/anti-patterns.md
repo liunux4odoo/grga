@@ -87,13 +87,16 @@ looks harmless but has three real costs:
 - **Disk redundancy** — two copies of the same content to maintain.
 - **Silent staleness** — the copy diverges when the original is edited,
   with no warning.
-- **Broken partition keys for the shared graph.** The `directory` column in
-  `keyword_pairs` / `keyword_stats` / `heading_docs` is a partition key.
-  If the user's offline index was built against the real path, running
-  the skill's read verbs against `/tmp/clean` will simply miss those
-  rows; if the user later re-indexes against a `/tmp` copy the rows
-  bind to a path that vanishes on the next `/tmp` sweep. Either way,
-  the copy habit poisons scope-filtered lookups.
+- **Broken scope bindings for the shared graph.** In v10 the knowledge
+  assets (`keyword_pairs` / `keyword_stats` / `scope_stats`) are sharded
+  by a **logical scope name**, and the physical path lives in the
+  machine-local `scope_directories` binding + `docs.doc_path`. If the
+  user's offline index was built against the real path, `related`
+  candidates resolve their `scopes[]` back to that binding — a `/tmp`
+  copy is not bound to any scope, so `--mode heading` and doc-locating
+  ripgrep miss it; if the user later re-indexes a `/tmp` copy, the
+  `docs.doc_path` rows bind to a path that vanishes on the next `/tmp`
+  sweep, silently staling the evidence layer.
 
 If a directory contains noise that must be excluded, do it at query
 time: `-g '*needle*'` (glob filter passed through to rga), `--type

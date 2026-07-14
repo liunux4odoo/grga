@@ -33,13 +33,15 @@ an explicit caller-owned evaluation checkpoint after every tier.
 ## Commands
 
 ```bash
-DIR=./src
+DIR=./src                              # 物理目录：给 probe / search / expand 用
+SCOPE=my-app                           # v10 逻辑 scope 名：给 related / suggest 用
 DB=~/.config/grga/deep_keywords.db
 
 # ---- T2-bookend (session open, MANDATORY): expand the raw seed --------
-grga related "鉴权" --mode graph -d "$DIR" --db "$DB" --json > /tmp/seed0.json
-#   read results[] + expansion.expanded_keywords[] -> harvest low-DF neighbours
-#   (token / session / middleware ...) into the working seed set
+# related 走图 DB，用 --scope（可多选；不传则跨全部 scope 联查）。
+grga related "鉴权" --mode graph --scope "$SCOPE" --db "$DB" --json > /tmp/seed0.json
+#   read results[] -> harvest low-DF neighbours (token / session / middleware ...)
+#   into the working seed set. 每条候选带 scopes[] 告诉你它落在哪个 scope。
 
 # ---- T0: size the query cheaply -------------------------------------
 grga probe "鉴权" -d "$DIR" --per-file --json > /tmp/p0.json
@@ -59,7 +61,7 @@ grga expand "$(jq -r '.matches[0].path' /tmp/hits.json):$(jq -r '.matches[0].lin
 # ---- T3 (only if T1 was empty/weak): LLM reflect, then loop back ----
 grga suggest "这个项目怎么做鉴权的？" \
     --intent reformulate --hits /tmp/hits.json \
-    -d "$DIR" --db "$DB" --json > /tmp/sugg.json
+    --scope "$SCOPE" --db "$DB" --json > /tmp/sugg.json
 for q in $(jq -r '.queries[]' /tmp/sugg.json); do
     # re-validate the LLM's new query with a cheap probe before searching
     total=$(grga probe "$q" -d "$DIR" --json | jq -r '.total_lines')
@@ -67,7 +69,7 @@ for q in $(jq -r '.queries[]' /tmp/sugg.json); do
 done
 
 # ---- T2-bookend (pre-answer, MANDATORY): final-seed sweep -----------
-grga related "鉴权 token session" --mode graph -d "$DIR" --db "$DB" --json > /tmp/seedN.json
+grga related "鉴权 token session" --mode graph --scope "$SCOPE" --db "$DB" --json > /tmp/seedN.json
 #   read results[] -> fold any new doc/alias into the answer or dismiss it.
 #   Only now commit the answer.
 ```

@@ -4,67 +4,140 @@ Referenced from the "Storage model at a glance" section of `SKILL.md`.
 This file holds the full detail; `SKILL.md` keeps only the summary needed
 at trigger time.
 
-## The core idea
+## The core idea (v10 knowledge / evidence split)
 
-grga reads from a **single per-user knowledge graph**:
+grga reads from a **single per-user knowledge graph** at
 `~/.config/grga/deep_keywords.db` (honours `$XDG_CONFIG_HOME`). The DB is
-**built offline by the user** (outside this skill); every query verb
-here defaults to **filtering results by `--directory`** — scope is a
-*query-time filter*, not a partition boundary. Give `-d ./project_a` and
-you narrow the answer to that corpus; omit `-d` and the whole per-user
-graph is in scope（跨 scope 求和）。
+**built offline by the user** (outside this skill).
 
-Why: grga's target caller is an AI agent that hops across corpora
-(novels, papers, code, notes) in one session. Keeping the graph unified
-turns cross-corpus co-occurrence into a *feature* (recall the concept
-regardless of which corpus you were browsing yesterday) while
-`--directory` still lets a query stay inside one project when needed.
+Since v10 (plan-2026-07-14) the DB draws a hard boundary between two
+kinds of rows:
 
-The user is expected to have indexed each corpus once offline; from this
-skill's perspective all query verbs simply read that shared graph. If a
-scope is missing from the index, `related` / `graph inspect` return
-empty — treat as "no signal" and proceed with the other evidence.
+* **Knowledge (portable across machines)** — `scopes` + `keywords` +
+  `keyword_pairs` + `keyword_stats` + `scope_stats` + `auto_ngram_dict`
+  + `llm_extension_votes`. The shard key is a **logical scope name**
+  (e.g. `physics-cn`, `/小说/科幻`), not a filesystem path. A pair
+  learned on machine A survives verbatim on machine B under the same
+  scope name; the caller can `grga index export` / `import` these rows
+  wholesale.
+* **Evidence (machine-local)** — `scope_directories` (scope → local
+  path bindings) + `docs` + `keyword_docs` + `heading_docs` +
+  `keyword_counts` + `keyword_sources`. These are wiped/rebuilt on
+  transfer; a knowledge pack never includes them.
 
-## v9 起 pair 是累积知识资产（read-side view）
+From this skill's perspective all query verbs simply read that shared
+graph. If a scope is missing from the index, `related` / `graph
+inspect` return empty — treat as "no signal" and proceed with the
+other evidence.
 
-`keyword_pairs`（+ `keyword_stats` + `scope_stats`）在离线 build 阶段
-写入，是 grga 从语料学到的知识资产。从本 skill 的角度只需要知道：
+## Read-side scope semantics
 
-- 资产在读侧不可变；本 skill 不写入。
-- 覆盖范围由用户的离线 build 决定；未覆盖的 scope 上 `related` 为空。
-- 写入期门槛（`--min-pair-count` / `--min-npmi-build`）已在 build 期
-  固化。读侧 `--min-npmi` 只能**收紧**，不能放松到写入期门槛以下——
-  想放宽下界属于离线索引维护，不在本 skill 内解决。
+`related --mode graph` filters by **`--scope <name>`** (v10 rename from
+pre-v10 `--directory`). Multi-select is supported:
 
-## 关于跨 scope
+* `--scope physics-cn` — restrict to that scope's `keyword_pairs`
+  (composite index `(scope_id, kw_a_id, npmi DESC)` gives index-ordered
+  early stop; sub-millisecond hot path).
+* `--scope a --scope b` — union across the listed scopes (`WHERE
+  scope_id IN (?,?)`).
+* omit `--scope` — cross every indexed scope (accepts a temp-sort
+  cost; TODO(perf) marker in `related.py`).
 
-- 传 `-d ./proj_a`：`related --mode graph` 只看 `dir_id=proj_a` 的
-  `keyword_pairs`；`chunk_df` 来自该 scope 的 `keyword_stats`。
-- 不传 `-d`：跨所有 scope 的求和视图。`chunk_df` 是 `SUM(chunk_df)`；
-  `keyword_pairs` 展开时 `dir_id` 不做过滤。
-- v3 起 `--cross-scope` / `--preview` / `crossed_scopes_preview` 都已
-  移除——跨语料合并的显式接口留待未来（§8 of keyword-primary plan）。
-  当前若需比较两个 scope 的结果，caller 各跑一次 `-d` 再合并。
-- `--mode heading` 依然默认跨 scope（heading paths 是结构化过滤，抗
-  同名歧义）。加 `--same-scope` 限制在 `-d`。
+Every returned `RelatedKeyword` carries a `scopes: List[str]` field
+(v3.1) — the scopes within the caller's query range that actually
+memorise the pair. Cross-scope query → every scope in the DB that
+carries it; single-scope query → singleton; multi-scope → the subset
+that matched. Sorted ascending, never empty.
+
+`related --mode heading` returns documents that share a Markdown
+heading path with a seed-carrying document. Cross-scope by default
+(heading paths are structural filters, resist same-name-different-
+meaning noise); add `--same-scope` (with exactly one `--scope`) to
+restrict to a single scope. Each result carries `scope: <name>`
+disambiguating same-relative-path docs across scopes.
+
+## Locating a candidate's original text
+
+Post-v10, the read side deliberately no longer returns file paths from
+`related --mode graph` — candidates are keywords, and the caller
+resolves them to passages via ripgrep. The `scopes[]` field tells the
+caller **which scope binding to point ripgrep at**:
+
+```python
+# 1. pick a candidate
+cand = payload["results"][0]           # {"kw": "曲率", "scopes": ["physics-cn"]}
+# 2. resolve scope → local directory (evidence layer)
+scopes = json.loads(sh("grga scope list --json"))
+bound = next(b["directory"] for s in scopes if s["name"] == cand["scopes"][0]
+             for b in s["directories"])
+# 3. ripgrep in the right corpus
+sh(["rga", "-i", "-e", cand["kw"], bound])
+```
+
+`grga scope list` is authoritative for scope → directory bindings.
+Never join `related` output with a hard-coded directory — a scope may
+bind multiple directories, or may be knowledge-only (freshly imported,
+no local corpus yet; `directories: []`).
+
+## `chunk_df` semantics
+
+`RelatedKeyword.chunk_df` is a hub-word discriminator, not a ranking
+input. It reads `keyword_stats.chunk_df`:
+
+* With `--scope` (single or multi): `SUM(chunk_df) WHERE scope_id IN
+  (...)` across the queried scopes.
+* Without `--scope`: `SUM(chunk_df)` across every scope.
+
+Caller-side pruning: `if r["chunk_df"] > threshold: drop`. Write-time
+floors (`--min-pair-count` / `--min-npmi-build`) already dropped the
+noisiest edges before they entered `keyword_pairs`; the read side can
+only tighten with `--min-npmi`, never relax.
+
+## Knowledge-only scopes (`grga index import`)
+
+A scope that arrived via `grga index import <pack> --as <name>`
+carries `keyword_stats` / `keyword_pairs` (knowledge) but no `docs` /
+`keyword_docs` / `scope_directories` rows (evidence). `related --mode
+graph` still works — knowledge is enough for candidate expansion. But
+`related --mode heading` will return empty on that scope, and `graph
+inspect` will emit an `evidence_hint` explaining the state:
+
+> "'physics-cn' has knowledge in [physics-cn] but no local corpus
+> evidence. Run `grga index build --scope <name> --directory <path>`
+> to attach local documents, or use `grga related --scope <name>` for
+> pure knowledge-graph expansion (evidence not required)."
+
+Building the local evidence is a user-side action (outside this
+skill).
 
 ## Observability
 
-- `grga graph inspect <keyword> --db <path> --json` — 关键字诊断动词：
-  reports `docs_by_scope`（该 keyword 在各 scope 的 doc 分布）、
-  `top_cooccurring_keywords`（top 共现邻居）、`suspected_polysemy`
-  启发（不同 scope 邻居列 Jaccard < 0.2 时为 true）。当 keyword 从未
-  进入索引（`total_docs == 0`）时输出 `index_hint` + `similar_keywords`
-  vocab 探针（含子串/超串匹配，`kind ∈ {substring, superstring}`），
-  `suspected_polysemy` / `polysemy_hint` 字段不出现（key on 字段
-  presence 区分两支）。
-- 用它做**种子质量判断**（hub? 稀有?）、**跨 scope 分布**审计。它不
-  替代 `related`——见 `references/reflection-loop.md` §"T2 是 related，
-  不是 graph inspect"。
+`grga graph inspect <keyword> --db <path> --json` — keyword
+diagnostic:
 
-跨 scope 的结果里，每个 `Related`（heading 模式）仍带 `directory`（该
-文档所在的 scope 根）和 `qualified_path`（`<directory>/<doc_path>`），
-所以同名文件（例如两个 `README.md`）保持可区分。
+* `docs_by_scope`: the keyword's doc distribution grouped by **logical
+  scope name** (v10). Empty on a knowledge-only scope (see previous
+  section).
+* `top_cooccurring_keywords`: top co-occurrence neighbours with
+  `shared_scopes` (list of scope names carrying each neighbour).
+* `suspected_polysemy` heuristic: true when the neighbour lists in
+  different scopes have Jaccard < 0.2 — signals same-name-different-
+  meaning noise.
+* When the keyword is not in the index (`total_docs == 0` **and** the
+  seed does not appear in `keyword_stats`): outputs `index_hint` +
+  `similar_keywords` (substring/superstring vocab probe, `kind ∈
+  {substring, superstring}`). `suspected_polysemy` / `polysemy_hint`
+  fields are absent — key on field presence to distinguish the two
+  branches.
+* Knowledge-only branch (in `keyword_stats` but no `keyword_docs`):
+  outputs `knowledge_scopes` + `evidence_hint` alongside a normal
+  cooccurrence report. Distinguishes "genuinely unknown seed" from
+  "seed known via imported knowledge, no local corpus".
+
+Use it for **seed-quality assessment** (hub? rare?), **cross-scope
+distribution audit**, and **polysemy detection**. It does not replace
+`related` — see `references/reflection-loop.md` § "T2 is `related`,
+not `graph inspect`".
 
 ## When to override with `--db <path>`
 
@@ -78,22 +151,25 @@ The shared per-user DB is the default. Pass an explicit `--db` when:
 - **Sensitive projects** that must not co-occur with anything else:
   `--db ~/work/secret/graph.db`.
 
-## Schema 备忘（v8）
+## Schema cheat-sheet (v10)
 
-| Table | Purpose |
-|---|---|
-| `directories` / `keywords` | 全局 intern 表（id ↔ 文本 1:1） |
-| `docs` | 增量判定（size/mtime/hash），不再喂 pair |
-| `keyword_pairs` | **核心知识资产**：(dir_id, kw_a_id, kw_b_id, source) + `cooccur_count` + `npmi` |
-| `keyword_stats` | per-(dir_id, kw_id) 词频统计（chunk_df / doc_df / total_occurrences） |
-| `keyword_docs` | **doc 级倒排索引**（v9），替代已删的 chunk 级 `keyword_chunks`；一行一 (kw, doc)，比旧表小 ~30×。供 `related --mode heading` / `graph inspect` 的 seed→docs 查找 |
-| `scope_stats` | per-dir_id scalar：`n_chunks`（npmi 分母 N）/ `n_docs` / `vocab_size` |
-| `heading_docs` | Markdown 章节表（`related --mode heading` / `expand --level chapter` 用） |
-| `auto_ngram_dict` | tokenizer 学到的 n-gram 字典 |
-| `llm_extension_votes` | LLM 提出的 pair 投票暂存（离线 promote 才升级；本 skill 不读写） |
+| Layer | Table | Portable? | Purpose |
+|---|---|---|---|
+| **Scope** | `scopes` | ✅ | Logical scope name intern (id ↔ name; v10 PK for every knowledge asset) |
+| **Scope** | `scope_directories` | ❌ | Scope → local directory bindings; bookkeeping only |
+| **Global intern** | `keywords` | ✅ | Casefold vocabulary (id ↔ text 1:1) |
+| **Knowledge** | `keyword_pairs` | ✅ | Core asset: `(scope_id, kw_a_id, kw_b_id, source)` + `cooccur_count` + `npmi` |
+| **Knowledge** | `keyword_stats` | ✅ | per-`(scope_id, kw_id)` frequency (chunk_df / doc_df / total_occurrences) |
+| **Knowledge** | `scope_stats` | ✅ | per-scope scalar: `n_chunks` (npmi denominator N) / `n_docs` / `vocab_size` |
+| **Knowledge** | `auto_ngram_dict` | ✅ | tokenizer-learned n-gram dictionary per scope |
+| **Knowledge** | `llm_extension_votes` | ✅ | LLM-proposed pair votes + `promoted_at` marker |
+| **Evidence** | `docs` | ❌ | Per-file metadata (size/mtime/hash) for incremental build |
+| **Evidence** | `keyword_docs` | ❌ | Doc-level inverted index (seed → docs), replaces the deleted `keyword_chunks` |
+| **Evidence** | `heading_docs` | ❌ | Markdown chapter structure per doc (for `related --mode heading` / `expand --level chapter`) |
+| **Evidence** | `keyword_counts` / `keyword_sources` | ❌ | v1 deep-search heat / source counters |
 
-**v8/v9 已删除**：`chunks`（唯一读者是 npmi 分母，改读 `scope_stats.n_chunks`
-后即可删）、`keyword_chunks`（45GB 线性怪兽；chunk 只在 build 期 RAM
-存活，doc 级需求由 `keyword_docs` 承接）。旧库首次打开会走
-`_migrate_v7_to_v8` / v9 迁移（有损：删掉的 chunk 级信息无法逆向重建）
-——迁移前 stderr 警告一次。
+**Removed in v10**: pre-v10 `directories` intern (absolute path
+shard), `resolve_scope_key`, `scope_write_key`. Pre-v10 DBs are
+rejected by `ensure_schema` with a rebuild hint — no in-place upgrade.
+Historic design: `docs/design/plan-2026-07-12-keyword-primary.md` +
+`docs/design/plan-2026-07-14-scope-directory-split.md`.

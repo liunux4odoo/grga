@@ -29,10 +29,12 @@ grga search "乐观的例子" \
 
 # 2) If hits are too few / off-topic, ask the LLM to reformulate.
 #    Feed the raw hits back so the model has context.
+#    --scope 是 v10 逻辑 scope 名（可选：仅用于把 LLM 提出的关键字对
+#    记账进 llm_extension_votes；不传则跳过投票记录）。
 grga suggest "乐观的例子" \
     --intent reformulate \
     --hits /tmp/hits.json \
-    --directory tests/fixtures/docs \
+    --scope docs \
     --json > /tmp/sugg.json
 
 # 3) Re-run search with each reformulated expression, merge results.

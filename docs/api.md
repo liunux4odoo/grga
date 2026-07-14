@@ -185,7 +185,8 @@ v3 起 graph 模式返回**候选关键字**（不是文档）。heading 模式�
       "cooccur_count": 28.0,          // float — 原始共现次数
       "via_seed": "brew",             // string — 从哪个 seed 扩展来（D4：不融合）
       "chunk_df": 153,                // int — 候选词自身的 chunk_df（hub 判别信号）
-      "source": "chunk_cooccur"       // string — chunk_cooccur | llm_promoted
+      "source": "chunk_cooccur",      // string — chunk_cooccur | llm_promoted
+      "scopes": ["physics-cn"]        // string[] — v3.1：该候选在本次查询范围内命中的 scope 名
     }
   ],
   "resolved_seeds": [                 // v3.1 探针：每个去重 seed 一个 bit
@@ -221,8 +222,8 @@ for s in payload["resolved_seeds"]:
 JSON 里规范化为 `0.0`）。
 
 **`chunk_df` 语义**：
-- 有 `--directory`：`keyword_stats.chunk_df WHERE dir_id = ?`。
-- 无 `--directory`：`SUM(chunk_df)` 跨所有 scope。
+- 有 `--scope`（单选/多选）：`SUM(keyword_stats.chunk_df) WHERE scope_id IN (...)`。
+- 无 `--scope`：`SUM(chunk_df)` 跨所有 scope。
 - caller 用它做 hub 词剪枝：`if r["chunk_df"] > threshold: drop`。
 
 **caller 用法**：拿到候选关键字后走 ripgrep 找原文片段。
@@ -230,10 +231,11 @@ JSON 里规范化为 `0.0`）。
 ```python
 result = json.loads(subprocess.check_output([
     "grga", "related", "brew", "--mode", "graph",
-    "-d", scope, "--json",
+    "--scope", scope_name, "--json",   # 不加 --scope 则跨全部 scope 联查
 ]))
 seeds = ["brew"] + [r["kw"] for r in result["results"][:5]]
-subprocess.run(["rga", "-i"] + [f"-e{s}" for s in seeds] + [scope])
+# 每条候选带 scopes[]，可据此定位到对应 scope 的绑定目录再 ripgrep
+subprocess.run(["rga", "-i"] + [f"-e{s}" for s in seeds] + [corpus_dir])
 ```
 
 Edge filter (`--mode graph` only)：
@@ -251,13 +253,12 @@ Edge filter (`--mode graph` only)：
 {
   "results": [
     {
-      "doc_path": "usage.md",                    // string — relative to `directory`
+      "doc_path": "usage.md",                    // string — relative to the scope's bound directory
       "score": 1.5,                              // float — rounded to 6 dp
       "mode": "heading",                         // string — "heading"
       "reason": "shared-heading",                // string — provenance tag
       "keywords": ["Install > macOS"],           // string[] — 匹配到的 heading path 集合
-      "directory": "/abs/path/to/scope",         // string|null — indexed scope root
-      "qualified_path": "/abs/path/to/scope/usage.md"
+      "scope": "physics-cn"                      // string|null — v10：逻辑 scope 名（原 directory/qualified_path 已移除）
     }
   ]
 }
@@ -272,9 +273,9 @@ schema 用 `additionalProperties: false` 强制）。
 
 Heading 模式的 flag：
 
-- `--same-scope` — restrict heading matches to `--directory`. Off by
-  default; heading mode 默认跨 scope（heading paths 是结构化过滤，抗
-  同名歧义）。
+- `--same-scope` — 把 heading 匹配限制在传入的 `--scope`（需恰好一个
+  `--scope`）。默认关闭；heading mode 默认跨 scope（heading paths 是
+  结构化过滤，抗同名歧义）。
 
 ### `--mode dir`：已移除
 
@@ -416,11 +417,11 @@ values clamped to `[0, 1]`.
 
 ---
 
-## `grga index build`
+## `grga index build` / `grga index rebuild`
 
 ```jsonc
 {
-  "scope": "/abs/dir",            // string — resolved index scope
+  "scope": "physics-cn",          // string — 逻辑 scope 名（v10：可迁移的域名，非绝对路径）
   "files_scanned": 4,             // int
   "files_indexed": 4,             // int — files that produced keyword rows
   "files_skipped": 0,             // int
@@ -432,13 +433,29 @@ values clamped to `[0, 1]`.
 }
 ```
 
-Writes to the v9 keyword-primary tables: `keyword_pairs`（累积知识资产，
+Writes to the v10 knowledge asset tables: `keyword_pairs`（累积知识资产，
 `chunk_cooccur` 边带 `npmi`）、`keyword_stats`（per-scope df）、
-`scope_stats`（分母 N）、`keyword_docs`（doc 级倒排）、`heading_docs`
-（Markdown 结构）。`grga index rebuild` 是全清重建（DELETE 该 scope 后
-等价重跑 build）。
+`scope_stats`（分母 N），加上机器本地 evidence 层的 `docs` / `keyword_docs`
+（doc 级倒排）、`heading_docs`（Markdown 结构）、`scope_directories`
+（scope → 本机绑定目录）。`grga index rebuild` 是全清重建（DELETE 该 scope
+的 evidence 后等价重跑 build，知识资产仍按 upsert 增量累加）。
 
-CLI flag：
+Scope 参数（v10 破变，plan-2026-07-14）：
+
+- `--scope <name>`（**必填**）— 逻辑域名，跨机器可迁移的稳定 handle。
+  与本机目录解耦：同一台机器上一个 scope 可以绑多个目录（多次 build），
+  跨机器可以是完全不同的目录树，只要 scope 名一致，知识资产就能对得上。
+  **不接受路径**：`resolve_scope_name` 只做 strip，不 `expanduser` / 不
+  `Path.resolve`；路径形字符串会字面存进 `scopes.name`（不推荐但不报错）。
+- `--directory <path>`（**默认当前目录**）— 物理语料目录，进 `scope_directories`
+  作为 scope 在本机的绑定；build 从这里枚举文件。`--directory` 省略时用
+  cwd，与 `grga search` / `probe` / `deep-search` 一致。
+- `--seed-ngram-from <other-scope>`（可选）— 冷启动分词字典：借用另一个
+  scope 的 `auto_ngram_dict` 作种子（典型场景：`grga index import` 后本
+  机 build 时省去重新检测短语）；目标 scope 自身条目在冲突时优先，
+  seed scope 不存在或等于目标时静默 no-op。
+
+CLI flag（其余，与 v10 无关）：
 
 - `--min-pair-count INT`（默认未设置 = **scope 自适应阶梯**：`≤200 chunks→2`
   / `≤2000→3` / `≤20000→4` / `>20000→5`）— 单 scope 内 `cooccur_count < N`
@@ -471,7 +488,7 @@ CLI flag：
   "skipped_already_promoted": 1,       // int
   "pairs": [
     {
-      "directory": "/abs/dir",         // string — scope of the vote
+      "scope": "physics-cn",           // string — v10：逻辑 scope 名
       "keyword_a": "brew",             // string
       "keyword_b": "install",          // string
       "vote_count": 4.0,               // float
@@ -483,6 +500,101 @@ CLI flag：
 
 Non-destructive: `llm_extension_votes` rows are never deleted; a
 `promoted_at` marker prevents double counting unless `--repromote` is set.
+
+---
+
+## `grga index export` / `grga index import`（v10 知识包）
+
+v10 支持把一个 scope 的**知识层**（`scopes` + 引用到的 `keywords` +
+`keyword_pairs` + `keyword_stats` + `scope_stats` + `auto_ngram_dict`
++ `llm_extension_votes` + `meta`）打包成便携的 `.grgapkg`（本身是一个
+只装了知识、evidence 表为空的 v10 SQLite 库），拷到另一台机器 import
+后即可复用 —— 见 plan-2026-07-14 §5。
+
+### `grga index export`
+
+```jsonc
+// --scope <name>：写单包
+{
+  "out_path": "/abs/physics-cn.grgapkg",  // string
+  "scopes_included": ["physics-cn"],       // string[]
+  "n_keywords": 42, "n_pairs": 130,
+  "n_stats": 42, "n_scope_stats": 1,
+  "n_auto_ngram": 0, "n_votes": 3,
+  "elapsed_seconds": 0.021
+}
+
+// --all --out <dir>：为每个 scope 写一个 <scope>.grgapkg 到目录
+{"packs": [ {...同上}, {...} ]}
+```
+
+- `--scope <name>` 与 `--all` 互斥；恰好一个必须传。
+- `--out <path>`：单 scope 时是 `.grgapkg` 文件（同目录 tempfile +
+  `os.replace` 原子写，崩溃不留残包）；`--all` 时是目录（每 scope 一
+  个文件，文件名把 `/` / 反斜杠等映射成 `_` 以保跨平台文件系统安全）。
+- **多 scope pack 从不产出**：`--all` 走目录形式而非单文件，保证
+  `1 pack = 1 scope` 不变式，让 `import` 的语义确定。
+
+### `grga index import`
+
+```jsonc
+{
+  "pack_path": "/abs/physics-cn.grgapkg",
+  "into_scope": "physics-en",            // 由 --as 决定
+  "n_keywords_new": 12,                   // 新插入 keywords（其余复用现有词表）
+  "n_pairs": 130, "n_stats": 42,
+  "n_auto_ngram": 0, "n_votes": 3,
+  "scope_stats_written": true,
+  "elapsed_seconds": 0.018
+}
+```
+
+- `--as <name>`（**必填**）— 在目标库中新建的 scope 名（不能与已有
+  scope 冲突；冲突时提前抛 ValueError，不会写脏事务）。
+- **不实现 `--merge-into`**（D9）：npmi 合并策略未定，避免"预留即污染"；
+  传入直接 `NotImplementedError`。
+- import 是原子的：`BEGIN IMMEDIATE` 内一次性写入 scope 行、kw 全量
+  remap、pair/stats/vote/ngram 拷贝；任何步骤失败整体 ROLLBACK。
+- 只搬**知识**：evidence 表不搬（`docs` / `keyword_docs` / `heading_docs`
+  / `scope_directories` 等）。目标机器需要用 `grga index build --scope
+  <as-name> --directory <本机语料>` 补上 evidence。可以配 `--seed-ngram-from
+  <as-name>` 冷启动分词字典。
+
+---
+
+## `grga scope`（v10 scope 管理）
+
+```
+grga scope list                          # 列出所有 scope + 绑定目录 + 规模
+grga scope bind <name> <directory>       # 绑 scope → 本机目录（可多次绑多目录）
+grga scope unbind <name> [<directory>]   # 解绑一个或全部目录（不动 evidence 数据）
+grga scope rename <old> <new>            # 单行 UPDATE，知识资产透明保留
+grga scope rm <name> --yes               # 默认只删 evidence（D6：知识永不因证据丢失而销毁）
+grga scope rm <name> --knowledge --yes   # 连知识资产 + scopes 行一起清
+```
+
+`list --json` 返回：
+
+```jsonc
+[
+  {
+    "name": "physics-cn",
+    "kind": null,
+    "created_at": "2026-07-14T05:28:49Z",
+    "directories": [
+      {"directory": "/abs/corpus", "role": null, "indexed_at": "2026-07-14T05:28:49Z"}
+    ],
+    "n_pairs": 130, "n_keywords": 42, "n_docs": 4
+  }
+]
+```
+
+`rm --json` 返回 `RemoveStats`：`scope`, `purged_knowledge`, `scope_found`,
+`directory_bindings_removed`, `docs_removed`, `keyword_docs_removed`,
+`heading_docs_removed`, `pairs_removed`, `stats_rows_removed`, `votes_removed`,
+`ngram_rows_removed`, `scope_row_removed`。CLI 的"not found"判定看
+`scope_found`（正向信号，区分"scope 不存在"与"scope 存在但仅有知识、
+无 evidence 可删"两种情形）。
 
 ---
 

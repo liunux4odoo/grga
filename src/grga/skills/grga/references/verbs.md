@@ -80,21 +80,23 @@ smaller than requested). Never invokes an LLM. Never modifies anything.
 
 ```
 related(keywords: list[str], *, mode="graph"|"heading",
-        limit=20, db_path, directory,
-        same_scope=False,    # heading only: stay inside --directory
+        limit=20, db_path, scopes=None,  # v10: 多选 scope 名列表（不传 = 跨全部 scope）
+        same_scope=False,    # heading only: 限制到 --scope（要求恰好一个）
         min_npmi=None,       # graph only: 读侧 npmi 地板；默认沿用写入期 0.2，
                              # 可传更严值（如 0.3），不能低于写入期门槛
 ) ->
   # graph（v3 起返回候选关键字，不再是文档）：
   {results: [
-     {kw, npmi, cooccur_count, via_seed, chunk_df, source}
+     # v3.1（plan-2026-07-14 §5.3）: 加 scopes[] 字段
+     {kw, npmi, cooccur_count, via_seed, chunk_df, source, scopes}
    ],
    resolved_seeds: [          # v3.1 探针：每个去重 seed 一个 bit
      {seed, in_index}
    ]}
-  # heading（返回文档，与 v2 兼容）：
+  # heading（返回文档）：
   {results: [
-     {doc_path, score, mode, reason, keywords[], directory, qualified_path}
+     # v10: scope 取代 directory+qualified_path
+     {doc_path, score, mode, reason, keywords[], scope}
   ]}
 ```
 
@@ -111,12 +113,19 @@ Modes:
   `RelatedKeyword` 字段：
   - `kw`：候选关键字（casefold）。
   - `npmi`：与 `via_seed` 的关联强度（存储值，或读侧过滤后）。`llm_promoted`
-    的 pair 在 DB 中 `npmi IS NULL`，JSON 里规范化为 `0.0`。
-  - `cooccur_count`：原始共现次数。
+    的 pair 在 DB 中 `npmi IS NULL`，JSON 里规范化为 `0.0`。多 scope 命中
+    时取 max。
+  - `cooccur_count`：原始共现次数（多 scope 时同上，与 npmi 同行的那份）。
   - `via_seed`：这个候选是从哪个 seed 扩展来的（design D4：不融合）。
-  - `chunk_df`：候选词自身的 chunk_df（hub 词判别信号；有 `-d` 时来自
-    `keyword_stats.chunk_df WHERE dir_id=?`，无 `-d` 时跨 scope 求和）。
+  - `chunk_df`：候选词自身的 chunk_df（hub 词判别信号；有 `--scope` 时
+    `SUM(chunk_df) WHERE scope_id IN (...)`，无 `--scope` 时跨全部 scope
+    求和）。
   - `source`：`chunk_cooccur` | `llm_promoted`。
+  - `scopes`（**v3.1，plan-2026-07-14 §5.3**）：该候选在本次查询范围内命中
+    的**逻辑 scope 名**列表。单 scope 查询是 singleton；多 scope IN 是命中
+    子集；跨 scope（不传 `--scope`）是全库里所有承载该 pair 的 scope。永远
+    非空，字典序稳定。**用途**：让 caller 免于额外的 `graph inspect` 反查
+    就能把候选路由到正确的 `scope_directories` 绑定目录，再 ripgrep 找片段。
   排序 `(via_seed, -npmi, kw)`。稳定，同参数字节一致。
   **`resolved_seeds` 探针**（v3.1）：每个去重后的输入 seed 一条
   `{seed, in_index}`。`in_index=false` = 词表里没有（拼错 / 未 index）；
@@ -129,8 +138,9 @@ Modes:
 - `heading` — documents that share a full or leaf **Markdown heading path**
   with a seed-carrying document. Cross-scope by default (heading paths
   are structural filters that resist same-name-different-meaning noise).
-  Add `--same-scope` to keep matches inside `-d`. `Related` 里的
-  `keyword_contributions` 字段 **在 v3 已删除**。
+  Add `--same-scope` (要求恰好一个 `--scope`) to keep matches inside that
+  scope. `Related` 里 pre-v10 的 `directory` / `qualified_path` 已改成
+  `scope`（逻辑名）；pre-v3 的 `keyword_contributions` 字段整体删除。
 
 Edge filter (`--mode graph` only):
 
@@ -147,6 +157,17 @@ Edge filter (`--mode graph` only):
 - `keyword_chunks` 表在 schema v8 已删除，`related --mode graph` 不再
   经 doc 聚合；文档级证据由 caller 用返回的关键字走 ripgrep 自取。
 
+**v10 破变清单**（对齐 `docs/design/plan-2026-07-14-scope-directory-split.md`）：
+- `related --directory` 移除；改为 `--scope <name>`（**多选**：可重复；
+  不传则跨全部 scope 联查）。Python API `related(directory=)` → `related(scopes=[...])`
+  / `related(scope=)` (heading mode)。
+- `related --mode heading` 返回的每个 doc：`directory` + `qualified_path`
+  → 单个 `scope`（逻辑名，v10）。
+- `related --mode graph` 每个候选新增 `scopes: List[str]` 字段（v3.1，
+  MINOR bump，caller 忽略安全）。
+- `suggest(directory=)` → `suggest(scope=)`。`scope=None` 时静默跳过
+  vote 记录（知识必须有名）。
+
 **Precondition**: the offline graph index must already exist for the
 target scope. If it does not, `related` returns `{"results": []}` —
 treat that as "no signal, move on". Building the index is a user-side
@@ -155,7 +176,7 @@ offline task, not a skill action.
 ## 4. `suggest`
 
 ```
-suggest(query, hits, *, intent, directory, max_hits=20,
+suggest(query, hits, *, intent, scope=None, max_hits=20,
         llm_base_url, llm_api_key, llm_model, db_path) ->
   {intent, keywords[], queries[], keyword_pairs[[a,b],...],
    ranking[], scores{}, reason, llm_generated: true,

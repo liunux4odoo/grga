@@ -28,8 +28,9 @@ grga search "面壁计划"
 grga gui
 
 # 5. 想用共现关系图？先建立索引（增量，首次跑全量，之后只处理变化的文件）
-grga index build --scope ./my-notes
-grga related 面壁计划 --directory ./my-notes
+#    --scope 是逻辑域名（跨机器可迁移，与本机目录解耦）；--directory 省略则默认当前目录
+grga index build --scope my-notes --directory ./my-notes
+grga related 面壁计划 --scope my-notes
 ```
 
 ---

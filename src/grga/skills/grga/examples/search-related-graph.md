@@ -63,9 +63,11 @@ grga related "macOS" \
 {
   "results": [
     {"kw": "linux", "npmi": 0.62, "cooccur_count": 14.0,
-     "via_seed": "brew", "chunk_df": 21, "source": "chunk_cooccur"},
+     "via_seed": "brew", "chunk_df": 21, "source": "chunk_cooccur",
+     "scopes": ["docs"]},
     {"kw": "macos", "npmi": 0.58, "cooccur_count": 11.0,
-     "via_seed": "brew", "chunk_df": 18, "source": "chunk_cooccur"}
+     "via_seed": "brew", "chunk_df": 18, "source": "chunk_cooccur",
+     "scopes": ["docs"]}
   ],
   "resolved_seeds": [
     {"seed": "brew", "in_index": true}
@@ -77,7 +79,8 @@ Interpretation:
 
 - `results[]` 是**候选关键字**，每条带 `npmi`（关联强度）、`cooccur_count`
   （原始共现次数）、`via_seed`（从哪个 seed 扩展来）、`chunk_df`（该候选
-  词自身的 chunk 频次，hub 词判别信号）、`source`。
+  词自身的 chunk 频次，hub 词判别信号）、`source`、`scopes`（v3.1：该候选
+  落在哪几个 scope 里）。
 - 排序为 `(via_seed, -npmi, kw)`。取前几个高 `npmi` 候选拼进 ripgrep。
 - 想剔除 hub 词：过滤掉 `chunk_df` 过高的候选（阈值由 caller 定）。
 - `resolved_seeds[]`（v3.1）：每个去重 seed 一条 `{seed, in_index}`。多
