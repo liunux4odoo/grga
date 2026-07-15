@@ -28,7 +28,30 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+
+# SQLite caps the number of host parameters per statement
+# (``SQLITE_MAX_VARIABLE_NUMBER``: 999 before 3.32, 32766 after). A
+# corpus can produce hundreds of thousands of distinct keywords, so every
+# ``... IN (?, ?, ...)`` lookup must be split into chunks below this cap.
+# 900 stays safe on the oldest supported SQLite build. These symbols are
+# module-public because ``graph/build.py`` and other callers also build
+# oversized ``IN`` clauses on the write path.
+MAX_SQL_VARS = 900
+
+
+def sql_var_chunks(seq: Sequence, size: int = MAX_SQL_VARS) -> Iterator[Sequence]:
+    """Yield ``seq`` in slices of at most ``size`` items.
+
+    Use around any ``... IN (?, ?, ...)`` SQL statement whose parameter
+    list can exceed :data:`MAX_SQL_VARS` (i.e. anything driven by an
+    unbounded caller list — doc ids on the write path, intern-table
+    lookups on hot loops). Callers are expected to run each yielded
+    chunk inside the same enclosing transaction so overall atomicity is
+    preserved.
+    """
+    for start in range(0, len(seq), size):
+        yield seq[start : start + size]
 
 
 class IdInterner:
@@ -115,11 +138,11 @@ class IdInterner:
                 out[name] = hit
             else:
                 need.append(name)
-        if need:
-            placeholders = ",".join("?" for _ in need)
+        for chunk in sql_var_chunks(need):
+            placeholders = ",".join("?" for _ in chunk)
             rows = self._conn.execute(
                 f"SELECT id, name FROM scopes WHERE name IN ({placeholders})",
-                need,
+                chunk,
             ).fetchall()
             for row in rows:
                 sid = int(row[0])
@@ -158,11 +181,11 @@ class IdInterner:
                 out[sid] = hit
             else:
                 need.append(sid)
-        if need:
-            placeholders = ",".join("?" for _ in need)
+        for chunk in sql_var_chunks(need):
+            placeholders = ",".join("?" for _ in chunk)
             rows = self._conn.execute(
                 f"SELECT id, name FROM scopes WHERE id IN ({placeholders})",
-                need,
+                chunk,
             ).fetchall()
             for row in rows:
                 sid = int(row[0])
@@ -411,11 +434,11 @@ class IdInterner:
                 out[kw] = hit
             else:
                 need.append(kw)
-        if need:
-            placeholders = ",".join("?" for _ in need)
+        for chunk in sql_var_chunks(need):
+            placeholders = ",".join("?" for _ in chunk)
             rows = self._conn.execute(
                 f"SELECT id, kw FROM keywords WHERE kw IN ({placeholders})",
-                need,
+                chunk,
             ).fetchall()
             for row in rows:
                 kid = int(row[0])
@@ -444,17 +467,18 @@ class IdInterner:
                 "INSERT OR IGNORE INTO keywords (kw) VALUES (?)",
                 [(kw,) for kw in missing],
             )
-            placeholders = ",".join("?" for _ in missing)
-            rows = self._conn.execute(
-                f"SELECT id, kw FROM keywords WHERE kw IN ({placeholders})",
-                missing,
-            ).fetchall()
-            for row in rows:
-                kid = int(row[0])
-                kw = str(row[1])
-                self._kw_id[kw] = kid
-                self._kw_text[kid] = kw
-                out[kw] = kid
+            for chunk in sql_var_chunks(missing):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT id, kw FROM keywords WHERE kw IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    kid = int(row[0])
+                    kw = str(row[1])
+                    self._kw_id[kw] = kid
+                    self._kw_text[kid] = kw
+                    out[kw] = kid
         return out
 
     def kw_text(self, kw_id: int) -> str:
@@ -482,11 +506,11 @@ class IdInterner:
                 out[kid] = hit
             else:
                 need.append(kid)
-        if need:
-            placeholders = ",".join("?" for _ in need)
+        for chunk in sql_var_chunks(need):
+            placeholders = ",".join("?" for _ in chunk)
             rows = self._conn.execute(
                 f"SELECT id, kw FROM keywords WHERE id IN ({placeholders})",
-                need,
+                chunk,
             ).fetchall()
             for row in rows:
                 kid = int(row[0])
@@ -542,11 +566,11 @@ class IdInterner:
                 out[did] = hit
             else:
                 need.append(did)
-        if need:
-            placeholders = ",".join("?" for _ in need)
+        for chunk in sql_var_chunks(need):
+            placeholders = ",".join("?" for _ in chunk)
             rows = self._conn.execute(
                 f"SELECT id, scope_id, doc_path FROM docs WHERE id IN ({placeholders})",
-                need,
+                chunk,
             ).fetchall()
             for row in rows:
                 did = int(row[0])

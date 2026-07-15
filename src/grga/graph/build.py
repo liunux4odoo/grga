@@ -50,7 +50,7 @@ from grga.file_read import (
     indexable_suffixes,
     read_file_lines_ex,
 )
-from grga.graph.ids import IdInterner
+from grga.graph.ids import IdInterner, sql_var_chunks
 from grga.graph.schema import (
     BUILD_MIN_NPMI,
     BUILD_MIN_PAIR_COUNT,
@@ -1074,10 +1074,7 @@ def _detect_ngram_phrases_impl(
         split_counts: Dict[str, int] = {}
         if need_keys:
             key_list = list(need_keys)
-            _CHUNK = 500  # SQLite default parameter limit is 999 (>=3.32
-                          # bumped to 32k, but stay conservative).
-            for i in range(0, len(key_list), _CHUNK):
-                sub = key_list[i:i + _CHUNK]
+            for sub in sql_var_chunks(key_list):
                 q = (
                     "SELECT phrase_key, c FROM _ng_freq "
                     "WHERE phrase_key IN (" + ",".join("?" * len(sub)) + ")"
@@ -1578,11 +1575,13 @@ def _delete_doc_index_rows(conn, doc_ids: Sequence[int]) -> None:
     if not doc_ids:
         return
     _delete_doc_index_rows_keep_docs(conn, doc_ids)
-    placeholders = ",".join("?" for _ in doc_ids)
-    conn.execute(
-        f"DELETE FROM docs WHERE id IN ({placeholders})",
-        list(doc_ids),
-    )
+    ids = list(doc_ids)
+    for chunk in sql_var_chunks(ids):
+        placeholders = ",".join("?" for _ in chunk)
+        conn.execute(
+            f"DELETE FROM docs WHERE id IN ({placeholders})",
+            chunk,
+        )
 
 
 def _delete_doc_index_rows_keep_docs(
@@ -1605,22 +1604,23 @@ def _delete_doc_index_rows_keep_docs(
     """
     if not doc_ids:
         return
-    placeholders = ",".join("?" for _ in doc_ids)
     ids = list(doc_ids)
-    conn.execute(
-        f"DELETE FROM keyword_docs WHERE doc_id IN ({placeholders})",
-        ids,
-    )
-    conn.execute(
-        f"DELETE FROM heading_docs WHERE doc_id IN ({placeholders})",
-        ids,
-    )
-    # Zero the per-doc chunk count so ``scope_stats.n_chunks`` recomputes
-    # correctly after pass 2 refills it.
-    conn.execute(
-        f"UPDATE docs SET n_chunks_with_kw = 0 WHERE id IN ({placeholders})",
-        ids,
-    )
+    for chunk in sql_var_chunks(ids):
+        placeholders = ",".join("?" for _ in chunk)
+        conn.execute(
+            f"DELETE FROM keyword_docs WHERE doc_id IN ({placeholders})",
+            chunk,
+        )
+        conn.execute(
+            f"DELETE FROM heading_docs WHERE doc_id IN ({placeholders})",
+            chunk,
+        )
+        # Zero the per-doc chunk count so ``scope_stats.n_chunks`` recomputes
+        # correctly after pass 2 refills it.
+        conn.execute(
+            f"UPDATE docs SET n_chunks_with_kw = 0 WHERE id IN ({placeholders})",
+            chunk,
+        )
 
 
 def _delete_scope_index_rows(conn, scope_id: int) -> None:
