@@ -975,6 +975,9 @@ def _make_index_build_progress():
                     "filter": "过滤候选短语",
                     "salvage": "打捞子串短语",
                     "sort": "排序",
+                    # PR-8 SQL-progress heartbeats between phases.
+                    "agg_freq": "聚合频次",
+                    "agg_neighbors": "聚合邻居",
                 }
                 base = sub.rsplit("_", 1)[0]
                 label = _labels.get(base, base)
@@ -1090,11 +1093,13 @@ def _make_index_build_progress():
         elif phase == "pairs_advance":
             task = state.get("pairs")
             if task is not None:
+                tot = event.get("total")
+                cur = event.get("current", 0)
+                # ``total`` is None during the PR-8 self-join heartbeat
+                # (indeterminate) and an int during NPMI recompute.
+                note = f"{cur}/{tot} 对" if tot else f"扫描自连接… ({cur})"
                 progress.update(
-                    task,
-                    total=event["total"] or None,
-                    completed=event["current"],
-                    note=f"{event['current']}/{event['total']} 对",
+                    task, total=tot or None, completed=cur, note=note,
                 )
         elif phase == "pairs_done":
             task = state.get("pairs")

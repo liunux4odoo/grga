@@ -895,6 +895,71 @@ def detect_ngram_phrases(
 # ---------------------------------------------------------------------------
 _NGRAM_KEY_SEP = "\x1f"
 
+# PR-8: SQLite VM-instruction budget between progress-handler callbacks.
+# 1M keeps callback overhead negligible (a huge SQL runs billions of VM
+# ops → thousands of callbacks × ~microseconds) while still ticking a
+# spinner every fraction of a second on slow statements.
+_SQL_PROGRESS_STEPS = 1_000_000
+
+
+class _sql_progress:
+    """Context manager: emit ``<phase>_advance`` heartbeats while a slow
+    SQL statement runs on ``conn``.
+
+    SQLite calls the registered progress handler every
+    ``_SQL_PROGRESS_STEPS`` VM instructions; we forward that to the
+    caller's ``emit(phase_name, **info)`` callable as an
+    indeterminate-progress tick (rising ``step`` counter, no ``total``)
+    so the CLI spinner keeps moving during the multi-minute Stage-2
+    aggregate / Stage-4 UNION / pair self-join instead of appearing
+    frozen. Handler is uninstalled on exit; fast statements never
+    trigger a single callback.
+
+    ``emit`` signature ``(phase: str, **info) -> None`` matches both the
+    inner ``tick`` helper inside ``detect_ngram_phrases`` and the outer
+    ``_emit`` helper used elsewhere in the build pipeline.
+    """
+
+    def __init__(self, conn, phase: str,
+                 emit: Optional[Callable[..., None]]):
+        self._conn = conn
+        self._phase = phase
+        self._emit = emit
+        self._step = 0
+
+    def _handler(self) -> int:
+        self._step += 1
+        if self._emit is not None:
+            try:
+                self._emit(self._phase + "_advance", step=self._step)
+            except Exception:
+                pass
+        return 0  # non-zero would abort the query
+
+    def __enter__(self):
+        if self._emit is not None:
+            try:
+                self._emit(self._phase + "_start")
+            except Exception:
+                pass
+        try:
+            self._conn.set_progress_handler(self._handler, _SQL_PROGRESS_STEPS)
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self._conn.set_progress_handler(None, 0)
+        except Exception:
+            pass
+        if self._emit is not None:
+            try:
+                self._emit(self._phase + "_end", steps=self._step)
+            except Exception:
+                pass
+        return False
+
 # Event-buffer batch size for the pass-1 executemany flush. 200k rows ×
 # ~50 B / tuple ≈ 10 MB Python peak, small enough to be dwarfed by
 # SQLite's own cache. Not user-tunable — it's a performance micro-knob
@@ -1011,12 +1076,16 @@ def _detect_ngram_phrases_impl(
         "  n INTEGER NOT NULL, c INTEGER NOT NULL, mr INTEGER NOT NULL"
         ") WITHOUT ROWID"
     )
-    conn.execute(
-        "INSERT INTO _ng_freq (phrase_key, n, c, mr) "
-        "SELECT phrase_key, n, COUNT(*) AS c, MIN(rowid) AS mr "
-        "FROM _ng_ev GROUP BY phrase_key, n HAVING c >= ?",
-        (min_count,),
-    )
+    # The GROUP BY over ``_ng_ev`` (100M+ rows on a 3M-chunk corpus)
+    # takes several minutes with no natural progress signal. Wrap with a
+    # progress-handler heartbeat so the CLI spinner keeps ticking.
+    with _sql_progress(conn, "agg_freq", tick):
+        conn.execute(
+            "INSERT INTO _ng_freq (phrase_key, n, c, mr) "
+            "SELECT phrase_key, n, COUNT(*) AS c, MIN(rowid) AS mr "
+            "FROM _ng_ev GROUP BY phrase_key, n HAVING c >= ?",
+            (min_count,),
+        )
     conn.execute("CREATE INDEX _idx_ng_freq_mr ON _ng_freq(mr)")
     total_windows = int(conn.execute(
         "SELECT COUNT(*) FROM _ng_freq"
@@ -1193,26 +1262,31 @@ def _detect_ngram_phrases_impl(
     # Merge L/R streams ordered by (phrase_key, side). For phrases with
     # zero L neighbours or zero R neighbours, the missing side's entropy
     # is 0.0 (matches the old Counter()-default semantics).
-    for pk, side, tok, cnt in conn.execute(
-        "SELECT phrase_key, side, tok, COUNT(*) AS cnt FROM ("
-        "  SELECT e.phrase_key AS phrase_key, 'L' AS side, e.left_tok AS tok "
-        "  FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
-        "  WHERE e.left_tok IS NOT NULL "
-        "  UNION ALL "
-        "  SELECT e.phrase_key, 'R', e.right_tok "
-        "  FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
-        "  WHERE e.right_tok IS NOT NULL"
-        ") GROUP BY phrase_key, side, tok "
-        "ORDER BY phrase_key, side"
-    ):
-        if pk != _cur_pk:
-            _flush_current_phrase()
-            _cur_pk = pk
-        if side == "L":
-            _cur_left[tok] = int(cnt)
-        else:
-            _cur_right[tok] = int(cnt)
-    _flush_current_phrase()
+    #
+    # ``ORDER BY`` in this UNION forces SQLite to fully materialise the
+    # aggregate before the first row can be yielded — a multi-minute pause
+    # on large corpora. Wrap the whole iteration with a progress heartbeat.
+    with _sql_progress(conn, "agg_neighbors", tick):
+        for pk, side, tok, cnt in conn.execute(
+            "SELECT phrase_key, side, tok, COUNT(*) AS cnt FROM ("
+            "  SELECT e.phrase_key AS phrase_key, 'L' AS side, e.left_tok AS tok "
+            "  FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
+            "  WHERE e.left_tok IS NOT NULL "
+            "  UNION ALL "
+            "  SELECT e.phrase_key, 'R', e.right_tok "
+            "  FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
+            "  WHERE e.right_tok IS NOT NULL"
+            ") GROUP BY phrase_key, side, tok "
+            "ORDER BY phrase_key, side"
+        ):
+            if pk != _cur_pk:
+                _flush_current_phrase()
+                _cur_pk = pk
+            if side == "L":
+                _cur_left[tok] = int(cnt)
+            else:
+                _cur_right[tok] = int(cnt)
+        _flush_current_phrase()
     if _ent_buf:
         conn.executemany(
             "INSERT INTO _ng_ent (phrase_key, be) VALUES (?, ?)",
@@ -1696,6 +1770,30 @@ def _setup_build_temp_dir(conn: "sqlite3.Connection", main_db_path: Path) -> Pat
     escaped = str(build_dir).replace("'", "''")
     conn.execute("PRAGMA temp_store = FILE")
     conn.execute(f"PRAGMA temp_store_directory = '{escaped}'")
+    # PR-8: enlarge the page cache. The default 2 MB thrashes badly on
+    # multi-million-chunk corpora — every big aggregate (Stage 2 _ng_freq
+    # GROUP BY, Stage 4 neighbour UNION, the pair self-join) spills its
+    # working pages to the temp file and re-reads them. A generous cache
+    # (default 256 MB, override via GRGA_BUILD_CACHE_MB) keeps hot pages
+    # resident. Negative value = KiB budget (decoupled from page_size).
+    # Clamped to [1, 8192] MB: a typo (e.g. 25600 for 256) must not blow
+    # the SQLite page cache past the very RSS ceiling this whole effort
+    # protects. Non-positive / non-numeric → default 256.
+    #
+    # NOTE: we deliberately do NOT touch ``synchronous`` here. The build
+    # connection points at the *shared* library DB (all scopes); in the
+    # default rollback-journal (DELETE) mode ``synchronous=NORMAL`` carries
+    # a small OS-crash corruption risk that could damage *sibling* scopes,
+    # not just the one building. cache_size alone gives the bulk of the win.
+    try:
+        cache_mb = int(os.environ.get("GRGA_BUILD_CACHE_MB", "256"))
+        if cache_mb <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        cache_mb = 256
+    if cache_mb > 8192:
+        cache_mb = 8192
+    conn.execute(f"PRAGMA cache_size = {-cache_mb * 1024}")
     return build_dir
 
 
@@ -2749,25 +2847,45 @@ def _finalize_pairs_from_temp(
     #    pairs BEFORE they cross into ``keyword_pairs``. ``ON CONFLICT``
     #    handles the incremental (mode='build') case where a pair already
     #    exists from an earlier build; rebuild starts from empty.
-    conn.execute(
-        """
-        INSERT INTO keyword_pairs
-            (scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
-        SELECT ?, a.kw_id, b.kw_id, ?, COUNT(*), NULL, ?
-        FROM _build_chunk_kws a
-        JOIN _build_chunk_kws b
-          ON a.doc_id = b.doc_id
-         AND a.chunk_id = b.chunk_id
-         AND a.kw_id < b.kw_id
-        GROUP BY a.kw_id, b.kw_id
-        HAVING COUNT(*) >= ?
-        ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
-            cooccur_count = cooccur_count + excluded.cooccur_count,
-            npmi = NULL,
-            updated_at = excluded.updated_at
-        """,
-        (scope_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
-    )
+    #
+    #    O(chunks × kw_per_chunk²) intermediate rows before GROUP BY —
+    #    on a multi-million-chunk corpus this is the single most
+    #    expensive SQL statement in the whole build. Progress heartbeat
+    #    so the spinner keeps moving instead of showing a blank
+    #    ``pairs_scan_start → pairs_scan_end`` gap.
+    def _emit_pair_join(phase: str, **info) -> None:
+        # Route the self-join heartbeat through the existing
+        # ``pairs_advance`` phase the CLI already renders (indeterminate:
+        # step counter as ``current``, no ``total``). ``_start`` / ``_end``
+        # are dropped — ``pairs_scan_start`` already fired just above and
+        # the NPMI-recompute stage emits its own ``pairs_scan_end``.
+        if on_event is None or not phase.endswith("_advance"):
+            return
+        try:
+            on_event({"phase": "pairs_advance",
+                      "current": info.get("step", 0), "total": None})
+        except Exception:
+            pass
+    with _sql_progress(conn, "pairs_join", _emit_pair_join):
+        conn.execute(
+            """
+            INSERT INTO keyword_pairs
+                (scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
+            SELECT ?, a.kw_id, b.kw_id, ?, COUNT(*), NULL, ?
+            FROM _build_chunk_kws a
+            JOIN _build_chunk_kws b
+              ON a.doc_id = b.doc_id
+             AND a.chunk_id = b.chunk_id
+             AND a.kw_id < b.kw_id
+            GROUP BY a.kw_id, b.kw_id
+            HAVING COUNT(*) >= ?
+            ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+                cooccur_count = cooccur_count + excluded.cooccur_count,
+                npmi = NULL,
+                updated_at = excluded.updated_at
+            """,
+            (scope_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
+        )
 
     # 3. Re-apply the write-time floor to legacy rows. In incremental mode
     #    a previously-present pair might now sit below ``min_pair_count``
