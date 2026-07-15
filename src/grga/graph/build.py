@@ -648,6 +648,31 @@ def _is_single_cjk(tok: str) -> bool:
     return len(tok) == 1 and "\u4e00" <= tok <= "\u9fff"
 
 
+def _derive_scope_stopword_candidates_from_df(
+    df: Counter,
+    n_chunks: int,
+    *,
+    df_threshold: float = STOPWORD_DF_THRESHOLD,
+    min_chunks: int = STOPWORD_MIN_CHUNKS,
+) -> frozenset:
+    """Streaming variant of :func:`_derive_scope_stopword_candidates`.
+
+    Takes a precomputed chunk-df ``Counter`` (single-CJK-char keys,
+    already deduplicated per chunk) plus an explicit ``n_chunks`` count.
+    Callers that stream through the corpus once (see Phase B in
+    :func:`build_graph_index`) accumulate ``df`` directly and skip the
+    O(corpus) ``chunk_tokens`` dict materialisation.
+
+    Returns the same frozenset as the dict-based variant for identical
+    inputs. Kept as a separate function so the dict-based API stays
+    stable for its unit-test callers.
+    """
+    if n_chunks < min_chunks:
+        return frozenset()
+    limit = df_threshold * n_chunks
+    return frozenset(t for t, c in df.items() if c > limit)
+
+
 def _derive_scope_stopword_candidates(
     chunk_tokens: Dict[tuple, List[str]],
     *,
@@ -667,6 +692,11 @@ def _derive_scope_stopword_candidates(
     the chunk-df ratio has no statistical power at that size, and 3b's
     substring evidence is a weaker safety net when the candidate set is
     saturated. Skipping 3a entirely is the safe behaviour for sparse data.
+
+    Since PR-4 this is a thin wrapper over
+    :func:`_derive_scope_stopword_candidates_from_df` — the build pipeline
+    uses the streaming variant directly. This one stays for unit tests and
+    any external caller with a chunk_tokens dict in hand.
     """
     n_chunks = len(chunk_tokens)
     if n_chunks < min_chunks:
@@ -676,8 +706,9 @@ def _derive_scope_stopword_candidates(
         seen = {t.casefold() for t in toks if _is_single_cjk(t)}
         for t in seen:
             df[t] += 1
-    limit = df_threshold * n_chunks
-    return frozenset(t for t, c in df.items() if c > limit)
+    return _derive_scope_stopword_candidates_from_df(
+        df, n_chunks, df_threshold=df_threshold, min_chunks=min_chunks,
+    )
 
 
 def _filter_chunk_kws_for_pairs(
@@ -716,7 +747,7 @@ def _filter_chunk_kws_for_pairs(
 # ---------------------------------------------------------------------------
 
 def detect_ngram_phrases(
-    line_tokens: List[List[str]],
+    line_tokens: "Iterable[Iterable[str]]",
     *,
     max_n: int = DEFAULT_MAX_NGRAM_N,
     min_count: int = _NGRAM_MIN_COUNT,
@@ -725,6 +756,7 @@ def detect_ngram_phrases(
     stop_boundaries: frozenset = _CORE_STOP_BOUNDARIES,
     on_progress: Optional[Callable[[str, dict], None]] = None,
     conn: Optional[sqlite3.Connection] = None,
+    n_lines_hint: Optional[int] = None,
 ) -> List[dict]:
     """Detect CJK compound phrases from tokenised lines.
 
@@ -788,12 +820,24 @@ def detect_ngram_phrases(
     proof). When ``conn is None`` a private ``:memory:`` connection is
     opened for the call — safe for tests / small inputs, but the
     ``temp_store_directory`` route is preferred for large corpora.
+
+    ``line_tokens`` may be any ``Iterable[Iterable[str]]`` — a list (as
+    tests pass) or a one-shot generator (as the streaming build pipeline
+    passes to keep the token list off the Python heap). It is consumed
+    exactly once. ``n_lines_hint`` supplies the progress-total when the
+    input is a generator (``len()`` unavailable); it is cosmetic only.
     """
     def _tick(phase: str, **info) -> None:
         if on_progress is not None:
             on_progress(phase, info)
 
-    n_lines = len(line_tokens)
+    # ``line_tokens`` may be a one-shot generator (PR-4 streaming path),
+    # so avoid ``len()``. ``n_lines`` is cosmetic (progress totals only);
+    # the empty-corpus guard uses ``sum(uni.values())`` which is exact.
+    try:
+        n_lines = len(line_tokens)  # type: ignore[arg-type]
+    except TypeError:
+        n_lines = n_lines_hint or 0
     _tick("unigram_start", lines=n_lines)
 
     _owns_conn = conn is None
@@ -1876,33 +1920,44 @@ def build_graph_index(
             )
             jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
             phrase_set = set(auto_dict.keys())
-            line_token_lists: List[List[str]] = []
-            chunks_done = 0
-            for entry in docs:
-                doc_id, rel_path, path, is_md, chunks = entry[:5]
-                for chunk in chunks:
-                    toks_pos = tokenize_hybrid_with_pos(chunk.text, jieba_tok)
-                    toks = merge_auto_phrases(
-                        toks_pos, phrase_set, max_n=max_ngram_n
-                    )
-                    if toks:
-                        line_token_lists.append(toks)
-                    chunks_done += 1
-                    # Throttle: emit every _PROGRESS_TICK chunks + the last
-                    # one. Reduces callback overhead on large scopes (hot
-                    # path on 100k+ chunks) without visibly slowing the
-                    # progress bar (2048 chunks ≈ 50–200 ms tick).
-                    if (
-                        chunks_done % _PROGRESS_TICK == 0
-                        or chunks_done == total_scanned_chunks
-                    ):
-                        _emit(
-                            "ngram_iter_advance",
-                            iter=iteration + 1,
-                            iters=iters,
-                            current=chunks_done,
-                            total=total_scanned_chunks,
+            # PR-4: stream tokens to ``detect_ngram_phrases`` instead of
+            # materialising a corpus-wide List[List[str]]. Keeps Python
+            # heap flat during iter 1 / iter 2 (previously the ~360 MB
+            # ``line_token_lists`` floor on M-corpus, per PR-4 SPEC §2).
+            # Empty-chunk skip + throttled progress emit preserved.
+            _chunks_done_holder = [0]
+
+            def _stream_iter_tokens(
+                _iteration=iteration, _iters=iters,
+                _jt=jieba_tok, _ps=phrase_set,
+            ):
+                for entry in docs:
+                    doc_id, rel_path, path, is_md, chunks = entry[:5]
+                    for chunk in chunks:
+                        toks_pos = tokenize_hybrid_with_pos(chunk.text, _jt)
+                        toks = merge_auto_phrases(
+                            toks_pos, _ps, max_n=max_ngram_n
                         )
+                        _chunks_done_holder[0] += 1
+                        if (
+                            _chunks_done_holder[0] % _PROGRESS_TICK == 0
+                            or _chunks_done_holder[0] == total_scanned_chunks
+                        ):
+                            _emit(
+                                "ngram_iter_advance",
+                                iter=_iteration + 1,
+                                iters=_iters,
+                                current=_chunks_done_holder[0],
+                                total=total_scanned_chunks,
+                            )
+                        # Yield every chunk (including empty toks): the
+                        # detector's inner loops (``range(len(toks))``) are
+                        # no-ops on empty, so aggregate results are
+                        # unchanged, but this keeps ``n_lines_hint``
+                        # (= total_scanned_chunks) matching the enumerate
+                        # count inside the detector — otherwise the
+                        # ``unigram/window_advance`` totals over-report.
+                        yield toks
             if run_detection:
                 # Forward detector internal phases to the caller so long
                 # scopes don't appear frozen between iter_end and the next
@@ -1930,9 +1985,10 @@ def build_graph_index(
                         }[stage]
                         progress(f"ngram iter {_it}/{_n}: {_lbl}…")
                 detected = detect_ngram_phrases(
-                    line_token_lists, max_n=max_ngram_n,
+                    _stream_iter_tokens(), max_n=max_ngram_n,
                     on_progress=_detect_progress,
                     conn=conn,
+                    n_lines_hint=total_scanned_chunks,
                 )
                 last_iter_added = 0
                 for d_entry in detected:
@@ -1940,10 +1996,19 @@ def build_graph_index(
                         last_iter_added += 1
                     auto_dict[d_entry["phrase"]] = d_entry
             else:
+                # Unreachable in practice: ``iters > 0`` iff
+                # ``refresh_ngram in ('append','replace')``, and
+                # ``run_detection`` is set by the same condition. Left as
+                # a defensive no-op with a clear invariant note so a
+                # future ``refresh_ngram`` mode that decouples the two
+                # doesn't silently skip generator consumption and lose
+                # ``ngram_iter_advance`` emits.
                 last_iter_added = 0
-            # Free the flat view before the next iter / Phase B allocates
-            # the per-chunk map. Detector output is now in ``auto_dict``.
-            del line_token_lists
+                assert False, (
+                    "invariant broken: iters > 0 implies run_detection; "
+                    "see build.py Phase A comments"
+                )
+            chunks_done = _chunks_done_holder[0]
             # Remember this iteration's tokeniser state for possible Phase B
             # reuse (only the final iteration's values survive the loop).
             phase_a_tok = jieba_tok
@@ -1962,11 +2027,14 @@ def build_graph_index(
                 phrases=len(auto_dict),
             )
 
-        # Phase B: one final tokenisation with the frozen dict. Produces
-        # ``chunk_tokens`` for Pass 1.5 and Pass 2. Always runs — even the
-        # ``refresh_ngram="never"`` path needs Pass 2's input, and it costs
-        # exactly one tokenisation pass (same as the pre-fix single-iter
-        # loop, so ``never`` sees no regression).
+        # Phase B (PR-4 streaming): one final tokenisation with the
+        # frozen dict. Instead of materialising a per-chunk ``chunk_tokens``
+        # dict (the ~360 MB floor on M-corpus, per PR-4 SPEC §2), stream
+        # tokenised chunks through two things:
+        #   * a single-CJK-char ``chunk-df`` counter for stopword derivation
+        #   * (implicitly) Pass 2 re-tokenises on-the-fly using the same
+        #     ``jieba_tok`` + ``phrase_set`` — bit-exact by construction
+        # ``refresh_ngram="never"`` path also uses this streaming loop.
         _emit(
             "ngram_finalize_start",
             phrases=len(auto_dict),
@@ -1981,7 +2049,9 @@ def build_graph_index(
         else:
             jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
             phrase_set = set(auto_dict.keys())
-        chunk_tokens: Dict[tuple, List[str]] = {}
+        # Streaming stopword-df accumulation. Only single-CJK chars go
+        # into the counter (matches :func:`_derive_scope_stopword_candidates`).
+        stopword_chunk_df: Counter = Counter()
         chunks_done = 0
         for entry in docs:
             doc_id, rel_path, path, is_md, chunks = entry[:5]
@@ -1990,7 +2060,11 @@ def build_graph_index(
                 toks = merge_auto_phrases(
                     toks_pos, phrase_set, max_n=max_ngram_n
                 )
-                chunk_tokens[(doc_id, chunk.chunk_id)] = toks
+                seen_single_cjk = {
+                    t.casefold() for t in toks if _is_single_cjk(t)
+                }
+                for t in seen_single_cjk:
+                    stopword_chunk_df[t] += 1
                 chunks_done += 1
                 if (
                     chunks_done % _PROGRESS_TICK == 0
@@ -2003,12 +2077,12 @@ def build_graph_index(
                     )
         if progress is not None:
             progress(
-                f"ngram finalize: {len(chunk_tokens)} chunks tokenised "
-                f"with {len(auto_dict)} phrases"
+                f"ngram finalize: {chunks_done} chunks tokenised "
+                f"with {len(auto_dict)} phrases (streaming)"
             )
         _emit(
             "ngram_finalize_end",
-            chunks=len(chunk_tokens),
+            chunks=chunks_done,
             phrases=len(auto_dict),
         )
         # Persist dictionary. In ``refresh_ngram="never"`` we still call
@@ -2026,8 +2100,10 @@ def build_graph_index(
         # this set never touches keyword_stats. See :func:
         # `_derive_scope_stopword_candidates`.
         # ------------------------------------------------------------------
-        scope_stopword_candidates = _derive_scope_stopword_candidates(
-            chunk_tokens
+        # PR-4: streaming variant — inputs already accumulated in
+        # ``stopword_chunk_df`` during Phase B; chunk_tokens not needed.
+        scope_stopword_candidates = _derive_scope_stopword_candidates_from_df(
+            stopword_chunk_df, chunks_done,
         )
         _emit(
             "stopword_derived",
@@ -2101,7 +2177,14 @@ def build_graph_index(
             per_chunk_kw: List[Tuple[int, Dict[str, int]]] = []
             file_distinct_kws: set = set()
             for chunk in chunks:
-                toks = chunk_tokens.get((doc_id, chunk.chunk_id), [])
+                # PR-4: re-tokenise on the fly with the finalised tokeniser
+                # (same ``jieba_tok`` + ``phrase_set`` as Phase B; jieba
+                # tokenisation is deterministic, so this is bit-exact
+                # against the pre-refactor ``chunk_tokens.get(...)`` read).
+                toks_pos = tokenize_hybrid_with_pos(chunk.text, jieba_tok)
+                toks = merge_auto_phrases(
+                    toks_pos, phrase_set, max_n=max_ngram_n
+                )
                 kw_counts = _keywords_from_tokens(toks) if toks else Counter()
                 if kw_counts:
                     per_chunk_kw.append((chunk.chunk_id, kw_counts))

@@ -521,12 +521,18 @@ excluded.cooccur_count` **在续跑下不幂等**。两个应对：
    实验数据显著时才动，否则维持默认。附 §6.7 的 C-spill-* 判据数据。
    更新 `docs/env-vars.md`（`GRGA_BUILD_CACHE_MB`）。
    **PR-2 后此实验才有真实大 spill 工作负载**，拐点信号才可信。
-5. **PR-4（可选）流式化 Phase A**：⏭️ **仅在 100 MB+ 语料的证据出现时做**。
-   PR-2 之后 `line_token_lists` 成为新的 O(corpus) 内存地板（500 MB / 22MB
-   ≈ 23×）。要突破需把 Phase A 从"先全量 tokenize、再喂 detector"改成
-   "tokenize 一行 → 写一行进 `_ng_ev` → detector 直接从 TEMP TABLE 读"。
-   涉及 Phase A / Phase B 整个 token 流水线改造，改动面大。当前 PR-2 后
-   60-70 MB 语料已可在 16 GB 机器 build，覆盖多数用户场景。
+5. **PR-4 流式化 Phase A + Phase B**：✅ **已 landed**（2026-07-15）。
+   experiments/oom_build_fix3_2026_07_15 判据 C1/C4/C6 全绿：**M 22MB
+   peak 从 745 → 517 MB (-30.6%)**，6 张持久表 bit-exact vs baseline
+   （S: 245k 行 + M: 542k 行全严等），wall 1.07×（+1 tokenize pass）。
+   PR-2 FINDINGS 关于"line_token_lists 是新地板"的归因经实测修正：
+   真正的整体 peak 位于 Pass 2 (materialise + pairs_scan)，chunk_tokens
+   dict 占 ~360 MB 才是主贡献者（见 fix3 F1）。
+   落地手法（低风险路径）：
+   - Phase A：`detect_ngram_phrases` 接 `Iterable`，Phase A 主循环用生成器
+   - Phase B：`chunk_tokens` dict → 流式 stopword-df Counter
+   - Pass 2：`chunk_tokens.get()` → 内联 re-tokenize（jieba 确定性 →
+     bit-exact by construction，避开 SQL 3b DELETE 那条复杂路径）
 6. **文档同步**：`docs/design/db-memory-optimization-lessons.md` 加一条
    "ngram 检测也是本方法学的适用对象"；`docs/navigation.md` 文档地图加
    本文件。
