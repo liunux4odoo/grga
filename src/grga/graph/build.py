@@ -2836,56 +2836,146 @@ def _finalize_pairs_from_temp(
     # 1. Index for the self-join. Composite index on (doc_id, chunk_id)
     #    is the join key. Created after all rows are inserted so we do
     #    not pay per-INSERT maintenance during pass 2.
-    _emit("pairs_scan_start")
+    #
+    #    ``pairs_scan_start`` is emitted by each branch below with its
+    #    branch-appropriate payload (``total_docs`` set on per-doc,
+    #    absent on the fast path) — this used to fire here too but the
+    #    duplicate confused the CLI note briefly.
     conn.execute(
         "CREATE INDEX IF NOT EXISTS _idx_bcki_chunk "
         "ON _build_chunk_kws (doc_id, chunk_id)"
     )
 
-    # 2. Self-join + GROUP BY + HAVING + UPSERT-add in one statement.
-    #    SQLite hash-aggregates the join output; HAVING drops below-floor
-    #    pairs BEFORE they cross into ``keyword_pairs``. ``ON CONFLICT``
-    #    handles the incremental (mode='build') case where a pair already
-    #    exists from an earlier build; rebuild starts from empty.
+    # 2. Aggregation strategy chosen by corpus shape.
     #
-    #    O(chunks × kw_per_chunk²) intermediate rows before GROUP BY —
-    #    on a multi-million-chunk corpus this is the single most
-    #    expensive SQL statement in the whole build. Progress heartbeat
-    #    so the spinner keeps moving instead of showing a blank
-    #    ``pairs_scan_start → pairs_scan_end`` gap.
-    def _emit_pair_join(phase: str, **info) -> None:
-        # Route the self-join heartbeat through the existing
-        # ``pairs_advance`` phase the CLI already renders (indeterminate:
-        # step counter as ``current``, no ``total``). ``_start`` / ``_end``
-        # are dropped — ``pairs_scan_start`` already fired just above and
-        # the NPMI-recompute stage emits its own ``pairs_scan_end``.
-        if on_event is None or not phase.endswith("_advance"):
-            return
-        try:
-            on_event({"phase": "pairs_advance",
-                      "current": info.get("step", 0), "total": None})
-        except Exception:
-            pass
-    with _sql_progress(conn, "pairs_join", _emit_pair_join):
-        conn.execute(
-            """
-            INSERT INTO keyword_pairs
-                (scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
-            SELECT ?, a.kw_id, b.kw_id, ?, COUNT(*), NULL, ?
-            FROM _build_chunk_kws a
-            JOIN _build_chunk_kws b
-              ON a.doc_id = b.doc_id
-             AND a.chunk_id = b.chunk_id
-             AND a.kw_id < b.kw_id
-            GROUP BY a.kw_id, b.kw_id
-            HAVING COUNT(*) >= ?
-            ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
-                cooccur_count = cooccur_count + excluded.cooccur_count,
-                npmi = NULL,
-                updated_at = excluded.updated_at
-            """,
-            (scope_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
+    #    Few-doc / small-scope corpora go through the fast single-statement
+    #    path (old code, ~1x baseline). Many-doc corpora go through a
+    #    two-level per-doc pre-aggregate → final merge, which lets the CLI
+    #    show a predictable N/total-docs progress AND typically wins on
+    #    speed (per-doc GROUP BY shrinks the final sort input from
+    #    O(chunks × kw²) raw join rows to O(sum of per-doc distinct pairs)).
+    #    Threshold 8 is a heuristic: below it the doc list is too short for
+    #    progress to matter and the two-level overhead dominates.
+    doc_ids = [
+        int(r[0]) for r in conn.execute(
+            "SELECT DISTINCT doc_id FROM _build_chunk_kws ORDER BY doc_id"
         )
+    ]
+    total_docs = len(doc_ids)
+    # Threshold: per-doc path only pays off with enough work per iteration.
+    # Empirically 12-doc × 100-chunk (~30k rows) is 45% slower than the
+    # single-statement path due to per-doc GROUP BY overhead; the win only
+    # materialises at ~1M-row / 8+ doc scale where the single statement
+    # becomes multi-minute and per-doc pre-agg shrinks the final sort.
+    _stage_rows = int(conn.execute(
+        "SELECT COUNT(*) FROM _build_chunk_kws"
+    ).fetchone()[0])
+    # Override the per-doc row threshold via GRGA_BUILD_PAIR_PERDOC_ROWS
+    # (default 1_000_000). Mainly a testing knob to force the per-doc path
+    # on small corpora; also lets power users tune the cutover.
+    try:
+        _perdoc_min_rows = int(
+            os.environ.get("GRGA_BUILD_PAIR_PERDOC_ROWS", "1000000")
+        )
+        if _perdoc_min_rows < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        _perdoc_min_rows = 1_000_000
+    if total_docs <= 8 or _stage_rows < _perdoc_min_rows:
+        # Fast path: single statement + indeterminate heartbeat (PR-8).
+        # ``total_docs`` intentionally omitted — the fast path never emits
+        # ``unit="docs"`` advances, so promising a determinate N/total-docs
+        # bar we can't advance would flash '0/N' briefly then revert to
+        # indeterminate. Keep the note indeterminate throughout.
+        _emit("pairs_scan_start")
+
+        def _emit_pair_join(phase: str, **info) -> None:
+            if on_event is None or not phase.endswith("_advance"):
+                return
+            try:
+                on_event({"phase": "pairs_advance",
+                          "current": info.get("step", 0), "total": None})
+            except Exception:
+                pass
+        with _sql_progress(conn, "pairs_join", _emit_pair_join):
+            conn.execute(
+                """
+                INSERT INTO keyword_pairs
+                    (scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
+                SELECT ?, a.kw_id, b.kw_id, ?, COUNT(*), NULL, ?
+                FROM _build_chunk_kws a
+                JOIN _build_chunk_kws b
+                  ON a.doc_id = b.doc_id
+                 AND a.chunk_id = b.chunk_id
+                 AND a.kw_id < b.kw_id
+                GROUP BY a.kw_id, b.kw_id
+                HAVING COUNT(*) >= ?
+                ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+                    cooccur_count = cooccur_count + excluded.cooccur_count,
+                    npmi = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (scope_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
+            )
+    else:
+        # Two-level per-doc path: predictable progress + typically faster
+        # on many-doc corpora. See rationale + why-not-per-doc-HAVING /
+        # why-not-per-doc-direct-into-keyword_pairs in the design notes
+        # (experiments/oom_build_fix6_2026_07_15).
+        conn.execute("DROP TABLE IF EXISTS _pair_raw")
+        conn.execute(
+            "CREATE TEMP TABLE _pair_raw ("
+            "  kw_a_id INTEGER NOT NULL, kw_b_id INTEGER NOT NULL,"
+            "  c INTEGER NOT NULL"
+            ")"
+        )
+        _emit("pairs_scan_start", total_docs=total_docs)
+        for di, doc_id in enumerate(doc_ids, start=1):
+            conn.execute(
+                """
+                INSERT INTO _pair_raw (kw_a_id, kw_b_id, c)
+                SELECT a.kw_id, b.kw_id, COUNT(*)
+                FROM _build_chunk_kws a
+                JOIN _build_chunk_kws b
+                  ON a.doc_id = b.doc_id
+                 AND a.chunk_id = b.chunk_id
+                 AND a.kw_id < b.kw_id
+                WHERE a.doc_id = ?
+                GROUP BY a.kw_id, b.kw_id
+                """,
+                (doc_id,),
+            )
+            if di % 64 == 0 or di == total_docs:
+                _emit("pairs_advance", current=di, total=total_docs, unit="docs")
+
+        # Final merge: sum per-doc partials + global HAVING + write survivors.
+        # Semantics identical to the single-statement HAVING COUNT(*)>=k.
+        def _emit_merge(phase: str, **info) -> None:
+            if on_event is None or not phase.endswith("_advance"):
+                return
+            try:
+                on_event({"phase": "pairs_advance",
+                          "current": info.get("step", 0),
+                          "total": None, "unit": "merge"})
+            except Exception:
+                pass
+        with _sql_progress(conn, "pairs_merge", _emit_merge):
+            conn.execute(
+                """
+                INSERT INTO keyword_pairs
+                    (scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
+                SELECT ?, kw_a_id, kw_b_id, ?, SUM(c), NULL, ?
+                FROM _pair_raw
+                GROUP BY kw_a_id, kw_b_id
+                HAVING SUM(c) >= ?
+                ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+                    cooccur_count = cooccur_count + excluded.cooccur_count,
+                    npmi = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (scope_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
+            )
+        conn.execute("DROP TABLE IF EXISTS _pair_raw")
 
     # 3. Re-apply the write-time floor to legacy rows. In incremental mode
     #    a previously-present pair might now sit below ``min_pair_count``

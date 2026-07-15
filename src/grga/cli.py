@@ -1080,7 +1080,12 @@ def _make_index_build_progress():
         elif phase == "pairs_scan_start":
             task = state.get("pairs")
             if task is not None:
-                progress.update(task, total=None, note="扫描 keyword_chunks 自连接…")
+                td = event.get("total_docs")
+                progress.update(
+                    task, total=td or None, completed=0,
+                    note=(f"扫描自连接 0/{td} 文档…" if td
+                          else "扫描 keyword_chunks 自连接…"),
+                )
         elif phase == "pairs_scan_end":
             task = state.get("pairs")
             if task is not None:
@@ -1095,9 +1100,18 @@ def _make_index_build_progress():
             if task is not None:
                 tot = event.get("total")
                 cur = event.get("current", 0)
-                # ``total`` is None during the PR-8 self-join heartbeat
-                # (indeterminate) and an int during NPMI recompute.
-                note = f"{cur}/{tot} 对" if tot else f"扫描自连接… ({cur})"
+                unit = event.get("unit", "对")
+                # ``unit='docs'`` during the PR-8b per-doc self-join
+                # (predictable N/total-docs rate); default ``对`` during
+                # the NPMI-recompute stage.
+                if tot:
+                    label = "文档" if unit == "docs" else "对"
+                    note = f"扫描自连接 {cur}/{tot} {label}" if unit == "docs" \
+                        else f"{cur}/{tot} 对"
+                elif unit == "merge":
+                    note = f"合并共现对… ({cur})"
+                else:
+                    note = f"扫描自连接… ({cur})"
                 progress.update(
                     task, total=tot or None, completed=cur, note=note,
                 )
