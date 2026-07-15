@@ -618,6 +618,25 @@ def merge_auto_phrases(
     return out
 
 
+def _tokenise_chunk(
+    chunk_text: str, jieba_tok, phrase_set: set, max_n: int,
+) -> List[str]:
+    """Tokenise one chunk: hybrid CJK/ASCII split + greedy phrase merge.
+
+    Single source of truth for the tokenisation pipeline used at all three
+    build sites (Phase A detection generator, Phase B stopword-df pass,
+    Pass 2 keyword materialisation). PR-4's "bit-exact by construction"
+    guarantee — Phase B and Pass 2 must produce the *same* token stream for
+    re-tokenisation to safely replace the old ``chunk_tokens`` cache — holds
+    mechanically because all three call this one helper. Do not inline the
+    ``tokenize_hybrid_with_pos`` + ``merge_auto_phrases`` pair at call sites;
+    a divergence between the stopword pass and the keyword pass would be
+    silent (each is only compared to a frozen baseline, never to each other).
+    """
+    toks_pos = tokenize_hybrid_with_pos(chunk_text, jieba_tok)
+    return merge_auto_phrases(toks_pos, phrase_set, max_n=max_n)
+
+
 def _keywords_from_tokens(tokens: Iterable[str]) -> Counter:
     """Casefold + stopword-filter a token list into ``{keyword: count}``."""
     counts: Counter = Counter()
@@ -1934,9 +1953,8 @@ def build_graph_index(
                 for entry in docs:
                     doc_id, rel_path, path, is_md, chunks = entry[:5]
                     for chunk in chunks:
-                        toks_pos = tokenize_hybrid_with_pos(chunk.text, _jt)
-                        toks = merge_auto_phrases(
-                            toks_pos, _ps, max_n=max_ngram_n
+                        toks = _tokenise_chunk(
+                            chunk.text, _jt, _ps, max_ngram_n
                         )
                         _chunks_done_holder[0] += 1
                         if (
@@ -2004,7 +2022,11 @@ def build_graph_index(
                 # doesn't silently skip generator consumption and lose
                 # ``ngram_iter_advance`` emits.
                 last_iter_added = 0
-                assert False, (
+                # Unconditional raise (not ``assert``) so the invariant
+                # survives ``python -O`` — under -O an assert is stripped and
+                # this branch would silently no-op (generator never consumed,
+                # ngram_iter_advance emits lost, chunks_done stuck at 0).
+                raise AssertionError(
                     "invariant broken: iters > 0 implies run_detection; "
                     "see build.py Phase A comments"
                 )
@@ -2056,9 +2078,8 @@ def build_graph_index(
         for entry in docs:
             doc_id, rel_path, path, is_md, chunks = entry[:5]
             for chunk in chunks:
-                toks_pos = tokenize_hybrid_with_pos(chunk.text, jieba_tok)
-                toks = merge_auto_phrases(
-                    toks_pos, phrase_set, max_n=max_ngram_n
+                toks = _tokenise_chunk(
+                    chunk.text, jieba_tok, phrase_set, max_ngram_n
                 )
                 seen_single_cjk = {
                     t.casefold() for t in toks if _is_single_cjk(t)
@@ -2181,9 +2202,8 @@ def build_graph_index(
                 # (same ``jieba_tok`` + ``phrase_set`` as Phase B; jieba
                 # tokenisation is deterministic, so this is bit-exact
                 # against the pre-refactor ``chunk_tokens.get(...)`` read).
-                toks_pos = tokenize_hybrid_with_pos(chunk.text, jieba_tok)
-                toks = merge_auto_phrases(
-                    toks_pos, phrase_set, max_n=max_ngram_n
+                toks = _tokenise_chunk(
+                    chunk.text, jieba_tok, phrase_set, max_ngram_n
                 )
                 kw_counts = _keywords_from_tokens(toks) if toks else Counter()
                 if kw_counts:
