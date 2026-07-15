@@ -877,7 +877,9 @@ def detect_ngram_phrases(
         # metadata only, cheap.
         try:
             conn.execute("DROP TABLE IF EXISTS _ng_ev")
+            conn.execute("DROP TABLE IF EXISTS _ng_freq")
             conn.execute("DROP TABLE IF EXISTS _ng_passed")
+            conn.execute("DROP TABLE IF EXISTS _ng_ent")
         except sqlite3.Error:
             pass
         if _owns_conn:
@@ -995,126 +997,255 @@ def _detect_ngram_phrases_impl(
     def _log_c(c: int) -> float:
         return math.log(c)
 
-    # --- Stage 2: freq aggregate + HAVING, ordered by first occurrence ---
-    # ``ORDER BY MIN(rowid)`` reproduces the mainline dict insertion
-    # order so downstream tie-breaks (final ``sort`` of equal npmi+count)
-    # match Python-for-Python bit-exact.
-    freq_rows = conn.execute(
-        "SELECT phrase_key, n, COUNT(*) AS c "
-        "FROM _ng_ev GROUP BY phrase_key, n "
-        "HAVING c >= ? ORDER BY MIN(rowid)",
-        (min_count,),
-    ).fetchall()
-    tick("window_end", windows=len(freq_rows))
-
-    # Post-freq ngram_count. Contains every split's count too (splits of
-    # freq-passers are themselves freq-passers — proof in the impl
-    # docstring). Bounded by post-freq vocab, not raw window count.
-    ngram_count: Dict[tuple, int] = {}
-    for phrase_key, _n, c in freq_rows:
-        ngram_count[tuple(phrase_key.split(_NGRAM_KEY_SEP))] = int(c)
-
-    def _count(x) -> int:
-        return uni.get(x, 0) if isinstance(x, str) else ngram_count.get(x, 0)
-
-    def _log_count(x) -> float:
-        if isinstance(x, str):
-            return _log_uni(x)
-        c = ngram_count.get(x, 0)
-        return _log_c(c) if c > 0 else math.nan
-
-    def _npmi_pair(a, b, joint_c: int) -> float:
-        ca, cb = _count(a), _count(b)
-        if ca <= 0 or cb <= 0 or joint_c <= 0:
-            return -1.0
-        pmi = log_total + _log_c(joint_c) - _log_count(a) - _log_count(b)
-        denom = log_total - _log_c(joint_c)
-        if denom <= 0:
-            return 0.0
-        return pmi / denom
-
-    def _solidity(win: tuple, joint_c: int) -> float:
-        n = len(win)
-        if n < 2:
-            return 1.0
-        vals = []
-        for k in range(1, n):
-            left = win[0] if k == 1 else win[:k]
-            right = win[-1] if k == n - 1 else win[k:]
-            vals.append(_npmi_pair(left, right, joint_c))
-        return min(vals)
-
-    # --- Stage 3: solidity filter (freq already applied by HAVING) ---
-    total_windows = len(freq_rows)
-    tick("filter_start", windows=total_windows)
-    solid_pass: List[Tuple[tuple, int, float]] = []
-    for idx, (phrase_key, _n, c) in enumerate(freq_rows):
-        if idx % _PROGRESS_TICK == 0:
-            # ``solid_pass``: phrases past freq + solidity so far. The
-            # old ``kept`` field counted phrases past all three gates —
-            # renamed here to avoid consumers mis-reading it as final
-            # survivor count. ``kept`` is still emitted at ``filter_end``
-            # with its original all-three-gates meaning (post entropy).
-            tick("filter_advance", current=idx, total=total_windows,
-                 solid_pass=len(solid_pass))
-        win = tuple(phrase_key.split(_NGRAM_KEY_SEP))
-        sol = _solidity(win, int(c))
-        if sol < npmi_threshold:
-            continue
-        solid_pass.append((win, int(c), sol))
-
-    # --- Stage 4: neighbour distributions for solidity-passing windows ---
-    conn.execute("DROP TABLE IF EXISTS _ng_passed")
-    conn.execute("CREATE TEMP TABLE _ng_passed (phrase_key TEXT PRIMARY KEY)")
-    conn.executemany(
-        "INSERT OR IGNORE INTO _ng_passed VALUES (?)",
-        [(_NGRAM_KEY_SEP.join(win),) for win, _, _ in solid_pass],
+    # --- Stage 2: materialise freq aggregate INTO a TEMP TABLE (PR-6). ---
+    # Previously ``fetchall()`` returned a Python list of every
+    # freq-passing (phrase_key, n, c) — with 1.7M+ chunk corpora this
+    # explodes past a GB (see experiments/oom_build_fix4_2026_07_15).
+    # Store it in SQLite instead; ``mr`` (= MIN(rowid) per group) is
+    # unique across groups and preserves the mainline dict insertion
+    # order for downstream tiebreaks.
+    conn.execute("DROP TABLE IF EXISTS _ng_freq")
+    conn.execute(
+        "CREATE TEMP TABLE _ng_freq ("
+        "  phrase_key TEXT NOT NULL PRIMARY KEY,"
+        "  n INTEGER NOT NULL, c INTEGER NOT NULL, mr INTEGER NOT NULL"
+        ") WITHOUT ROWID"
     )
-    left_dist: Dict[str, "Counter"] = {}
-    right_dist: Dict[str, "Counter"] = {}
-    for pk, tok, cnt in conn.execute(
-        "SELECT e.phrase_key, e.left_tok, COUNT(*) "
-        "FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
-        "WHERE e.left_tok IS NOT NULL "
-        "GROUP BY e.phrase_key, e.left_tok"
-    ):
-        left_dist.setdefault(pk, Counter())[tok] = int(cnt)
-    for pk, tok, cnt in conn.execute(
-        "SELECT e.phrase_key, e.right_tok, COUNT(*) "
-        "FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
-        "WHERE e.right_tok IS NOT NULL "
-        "GROUP BY e.phrase_key, e.right_tok"
-    ):
-        right_dist.setdefault(pk, Counter())[tok] = int(cnt)
+    conn.execute(
+        "INSERT INTO _ng_freq (phrase_key, n, c, mr) "
+        "SELECT phrase_key, n, COUNT(*) AS c, MIN(rowid) AS mr "
+        "FROM _ng_ev GROUP BY phrase_key, n HAVING c >= ?",
+        (min_count,),
+    )
+    conn.execute("CREATE INDEX _idx_ng_freq_mr ON _ng_freq(mr)")
+    total_windows = int(conn.execute(
+        "SELECT COUNT(*) FROM _ng_freq"
+    ).fetchone()[0])
+    tick("window_end", windows=total_windows)
 
-    def _entropy(counter: "Counter") -> float:
+    # --- Stage 3: keyset-paginated solidity filter (PR-6 streaming). ---
+    # No full ``freq_rows`` list, no ``ngram_count`` dict, no
+    # ``solid_pass`` list. Peak Python heap = batch size × ~200 B.
+    # Split counts are queried per-batch via a single
+    # ``WHERE phrase_key IN (...)`` and cached in a per-batch dict.
+    conn.execute("DROP TABLE IF EXISTS _ng_passed")
+    conn.execute(
+        "CREATE TEMP TABLE _ng_passed ("
+        "  phrase_key TEXT NOT NULL PRIMARY KEY,"
+        "  c INTEGER NOT NULL, sol REAL NOT NULL, mr INTEGER NOT NULL"
+        ") WITHOUT ROWID"
+    )
+    tick("filter_start", windows=total_windows)
+
+    def _log_uni_local(t: str) -> float:
+        c = uni.get(t, 0)
+        return math.log(c) if c > 0 else math.nan
+
+    _SOLIDITY_BATCH = 4096
+    last_mr = -1  # rowid is >= 1 in SQLite
+    idx = 0
+    solid_pass_count = 0
+    while True:
+        rows = conn.execute(
+            "SELECT phrase_key, n, c, mr FROM _ng_freq "
+            "WHERE mr > ? ORDER BY mr LIMIT ?",
+            (last_mr, _SOLIDITY_BATCH),
+        ).fetchall()
+        if not rows:
+            break
+        # Collect distinct split phrase_keys needed by this batch (only
+        # tuple splits — unigram splits come from ``uni``).
+        need_keys: set = set()
+        batch: List[Tuple[tuple, int, float, int]] = []
+        for phrase_key, n, c, mr in rows:
+            win = tuple(phrase_key.split(_NGRAM_KEY_SEP))
+            batch.append((win, int(c), 0.0, int(mr)))
+            for k in range(1, n):
+                left = win[0] if k == 1 else win[:k]
+                right = win[-1] if k == n - 1 else win[k:]
+                if not isinstance(left, str):
+                    need_keys.add(_NGRAM_KEY_SEP.join(left))
+                if not isinstance(right, str):
+                    need_keys.add(_NGRAM_KEY_SEP.join(right))
+        # Batch-fetch split counts. All splits of freq-passers are
+        # themselves freq-passers (each container occurrence carries a
+        # split occurrence, so count(sub) >= count(super) >= min_count),
+        # so every needed key is guaranteed to be in ``_ng_freq``.
+        split_counts: Dict[str, int] = {}
+        if need_keys:
+            key_list = list(need_keys)
+            _CHUNK = 500  # SQLite default parameter limit is 999 (>=3.32
+                          # bumped to 32k, but stay conservative).
+            for i in range(0, len(key_list), _CHUNK):
+                sub = key_list[i:i + _CHUNK]
+                q = (
+                    "SELECT phrase_key, c FROM _ng_freq "
+                    "WHERE phrase_key IN (" + ",".join("?" * len(sub)) + ")"
+                )
+                for pk, ck in conn.execute(q, sub):
+                    split_counts[pk] = int(ck)
+
+        # Solidity per candidate, using local split_counts dict.
+        to_insert: List[Tuple[str, int, float, int]] = []
+        for win, c, _, mr in batch:
+            n = len(win)
+            if n < 2:
+                sol = 1.0
+            else:
+                vals = []
+                joint_log = _log_c(c)
+                joint_p_log_ratio_denom = log_total - joint_log
+                # Only proceed with real npmi if denom > 0; else sol = 0
+                for k in range(1, n):
+                    left = win[0] if k == 1 else win[:k]
+                    right = win[-1] if k == n - 1 else win[k:]
+                    # left/right count + log_count (unigram vs tuple)
+                    if isinstance(left, str):
+                        ca = uni.get(left, 0)
+                        log_ca = _log_uni_local(left)
+                    else:
+                        ca = split_counts.get(_NGRAM_KEY_SEP.join(left), 0)
+                        log_ca = _log_c(ca) if ca > 0 else math.nan
+                    if isinstance(right, str):
+                        cb = uni.get(right, 0)
+                        log_cb = _log_uni_local(right)
+                    else:
+                        cb = split_counts.get(_NGRAM_KEY_SEP.join(right), 0)
+                        log_cb = _log_c(cb) if cb > 0 else math.nan
+                    if ca <= 0 or cb <= 0 or c <= 0:
+                        vals.append(-1.0)
+                        continue
+                    pmi = log_total + joint_log - log_ca - log_cb
+                    if joint_p_log_ratio_denom <= 0:
+                        vals.append(0.0)
+                    else:
+                        vals.append(pmi / joint_p_log_ratio_denom)
+                sol = min(vals)
+            if sol < npmi_threshold:
+                continue
+            to_insert.append((_NGRAM_KEY_SEP.join(win), c, float(sol), mr))
+
+        if to_insert:
+            conn.executemany(
+                "INSERT INTO _ng_passed (phrase_key, c, sol, mr) "
+                "VALUES (?, ?, ?, ?)",
+                to_insert,
+            )
+            solid_pass_count += len(to_insert)
+
+        # Advance keyset + progress
+        idx += len(rows)
+        last_mr = int(rows[-1][3])
+        # Progress emit throttled per batch (batches are ~4k rows so
+        # naturally aligned with the old ``idx % _PROGRESS_TICK`` cadence).
+        tick("filter_advance", current=idx, total=total_windows,
+             solid_pass=solid_pass_count)
+
+    # --- Stage 4: streaming per-phrase branch entropy (PR-6). ---
+    # Old code built two full ``defaultdict[str, Counter]`` (left_dist,
+    # right_dist) over ALL solidity-passers — the same O(passing) explosion
+    # as Stage 3 at scale. Replace with a UNION-scan of L/R neighbour
+    # groups ordered by phrase_key + side; accumulate one phrase's
+    # neighbours at a time, compute entropy, INSERT into ``_ng_ent``.
+    conn.execute("DROP TABLE IF EXISTS _ng_ent")
+    conn.execute(
+        "CREATE TEMP TABLE _ng_ent ("
+        "  phrase_key TEXT NOT NULL PRIMARY KEY, be REAL NOT NULL"
+        ") WITHOUT ROWID"
+    )
+    _ENT_INSERT_BATCH = 4096
+
+    def _entropy_from_counter(counter: Counter) -> float:
         tot = sum(counter.values())
         if tot == 0:
             return 0.0
         h = 0.0
-        for c in counter.values():
-            pr = c / tot
+        for cnt in counter.values():
+            pr = cnt / tot
             h -= pr * math.log(pr)
         return h
 
-    # --- Stage 5: branch-entropy gate + entropy_rejects stash ---
-    # Emits ``filter_advance`` here too so consumers keep a live progress
-    # signal across the full Stages 3+5 span (Stage 4 is a single SQL
-    # aggregate with no sub-progress). ``current`` starts at the count
-    # of freq-passers already rejected by solidity so the ticks form a
-    # single monotonic sequence across both stages.
+    # side='L' for left neighbour, 'R' for right. ORDER BY phrase_key, side
+    # groups all L-neighbours then all R-neighbours per phrase; break on
+    # phrase-key or side change → finalise the (phrase, side) entropy.
+    # ``_ent_current[pk] = (be_left, be_right)`` accumulator, but we
+    # only ever hold ONE phrase in memory at a time (streaming).
+    _ent_buf: List[Tuple[str, float]] = []
+    _cur_pk: Optional[str] = None
+    _cur_left: Counter = Counter()
+    _cur_right: Counter = Counter()
+
+    def _flush_current_phrase():
+        nonlocal _ent_buf, _cur_pk, _cur_left, _cur_right
+        if _cur_pk is None:
+            return
+        be = min(
+            _entropy_from_counter(_cur_left),
+            _entropy_from_counter(_cur_right),
+        )
+        _ent_buf.append((_cur_pk, float(be)))
+        _cur_left = Counter()
+        _cur_right = Counter()
+        if len(_ent_buf) >= _ENT_INSERT_BATCH:
+            conn.executemany(
+                "INSERT INTO _ng_ent (phrase_key, be) VALUES (?, ?)",
+                _ent_buf,
+            )
+            _ent_buf = []
+
+    # Merge L/R streams ordered by (phrase_key, side). For phrases with
+    # zero L neighbours or zero R neighbours, the missing side's entropy
+    # is 0.0 (matches the old Counter()-default semantics).
+    for pk, side, tok, cnt in conn.execute(
+        "SELECT phrase_key, side, tok, COUNT(*) AS cnt FROM ("
+        "  SELECT e.phrase_key AS phrase_key, 'L' AS side, e.left_tok AS tok "
+        "  FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
+        "  WHERE e.left_tok IS NOT NULL "
+        "  UNION ALL "
+        "  SELECT e.phrase_key, 'R', e.right_tok "
+        "  FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
+        "  WHERE e.right_tok IS NOT NULL"
+        ") GROUP BY phrase_key, side, tok "
+        "ORDER BY phrase_key, side"
+    ):
+        if pk != _cur_pk:
+            _flush_current_phrase()
+            _cur_pk = pk
+        if side == "L":
+            _cur_left[tok] = int(cnt)
+        else:
+            _cur_right[tok] = int(cnt)
+    _flush_current_phrase()
+    if _ent_buf:
+        conn.executemany(
+            "INSERT INTO _ng_ent (phrase_key, be) VALUES (?, ?)",
+            _ent_buf,
+        )
+        _ent_buf = []
+
+    # --- Stage 5: entropy gate — stream from _ng_passed + _ng_ent. ---
+    # Iterate in ``mr`` order (freq MIN(rowid) → mainline insertion order)
+    # so the final ``results.sort`` tiebreak matches the pre-refactor
+    # ordering. Left-join _ng_ent because phrases with zero neighbours on
+    # both sides never got inserted (be would be 0.0 → correct default).
     results: List[dict] = []
     entropy_rejects: List[Tuple[tuple, int, float, float]] = []
-    _stage5_base = total_windows - len(solid_pass)  # solidity-rejects
-    for idx, (win, c, sol) in enumerate(solid_pass):
-        if idx % _PROGRESS_TICK == 0:
-            tick("filter_advance", current=_stage5_base + idx,
+    _stage5_base = total_windows - solid_pass_count
+    _s5_idx = 0
+    for phrase_key, c, sol, be in conn.execute(
+        "SELECT p.phrase_key, p.c, p.sol, COALESCE(e.be, 0.0) "
+        "FROM _ng_passed p LEFT JOIN _ng_ent e "
+        "ON p.phrase_key = e.phrase_key "
+        "ORDER BY p.mr"
+    ):
+        if _s5_idx % _PROGRESS_TICK == 0:
+            tick("filter_advance", current=_stage5_base + _s5_idx,
                  total=total_windows, kept=len(results))
-        pk = _NGRAM_KEY_SEP.join(win)
-        be = min(_entropy(left_dist.get(pk, Counter())),
-                 _entropy(right_dist.get(pk, Counter())))
+        win = tuple(phrase_key.split(_NGRAM_KEY_SEP))
+        c = int(c); sol = float(sol); be = float(be)
         if be < ent_threshold:
             entropy_rejects.append((win, c, sol, be))
+            _s5_idx += 1
             continue
         results.append({
             "phrase": _join_by_pair_rule(win),
@@ -1123,6 +1254,7 @@ def _detect_ngram_phrases_impl(
             "npmi": round(sol, 4),
             "branch_ent": round(be, 4),
         })
+        _s5_idx += 1
     tick("filter_end", windows=total_windows, kept=len(results))
 
     # --- Stage 6: substring salvage (verbatim mainline logic) ---
