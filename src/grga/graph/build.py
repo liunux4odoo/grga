@@ -1257,30 +1257,65 @@ def _detect_ngram_phrases_impl(
         _s5_idx += 1
     tick("filter_end", windows=total_windows, kept=len(results))
 
-    # --- Stage 6: substring salvage (verbatim mainline logic) ---
+    # --- Stage 6: substring salvage (PR-7: reversed direction). ---
+    # The rule is unchanged: a reject is kept iff its rejoined text is a
+    # *proper* substring of some survivor's text AND its independent-margin
+    # ``count(reject) - max(count(container)) >= 1``. The old algorithm
+    # iterated rejects and, for each, linearly scanned a by-first-char
+    # bucket of survivors — on a 3M-chunk corpus that bucket is huge for
+    # common CJK chars (的 / 是 / 一), giving ~235 rejects/s ≈ 3.8 h total.
+    #
+    # Reversed: index reject texts once (a set), then enumerate each
+    # survivor's proper substrings and record the max container count per
+    # reject text. Complexity O(survivors × L^3 + rejects) with L = phrase
+    # char length (bounded by max_ngram_n tokens ≈ tens of chars), i.e.
+    # minutes instead of hours. The final salvage pass iterates
+    # ``entropy_rejects`` in original order so the append order into
+    # ``results`` — and thus the Stage-7 sort tiebreak — is bit-identical.
     tick("salvage_start", rejects=len(entropy_rejects))
     if entropy_rejects and results:
-        by_first_char: "defaultdict[str, list[Tuple[str, int]]]" = defaultdict(list)
-        for r in results:
-            kt = r["phrase"]
-            kc = int(r["count"])
-            for ch in set(kt):
-                by_first_char[ch].append((kt, kc))
-        salvaged = 0
-        for idx, (win, c, sol, be) in enumerate(entropy_rejects):
+        # Reject text set for O(1) substring membership. Deduped, so this
+        # is ≤ len(entropy_rejects) distinct strings.
+        reject_texts: set = set()
+        for win, _c, _sol, _be in entropy_rejects:
+            reject_texts.add(_join_by_pair_rule(win))
+
+        # For each survivor, enumerate proper substrings; record the
+        # largest container count per reject-text. ``max_container_c[sub]``
+        # is a pure function of ``sub`` (max over all containers), so the
+        # per-reject margin test below is order-independent and matches the
+        # old max-over-candidates semantics exactly.
+        max_container_c: Dict[str, int] = {}
+        n_surv = len(results)
+        for idx, r in enumerate(results):
             if idx % _PROGRESS_TICK == 0:
-                tick("salvage_advance", current=idx,
-                     total=len(entropy_rejects), salvaged=salvaged)
+                tick("salvage_advance", current=idx, total=n_surv,
+                     salvaged=len(max_container_c))
+            kt = r["phrase"]
+            L = len(kt)
+            if L < 2:
+                continue  # no proper substring can match a (≥1-char) reject
+            kc = int(r["count"])
+            # Distinct proper substrings of ``kt`` that are reject texts.
+            local_seen: set = set()
+            for i in range(L):
+                for j in range(i + 1, L + 1):
+                    if i == 0 and j == L:
+                        continue  # full string is not a *proper* substring
+                    sub = kt[i:j]
+                    if sub in reject_texts and sub not in local_seen:
+                        local_seen.add(sub)
+                        if kc > max_container_c.get(sub, 0):
+                            max_container_c[sub] = kc
+
+        # Final salvage pass in original reject order (append-order stable).
+        salvaged = 0
+        for win, c, sol, be in entropy_rejects:
             text = _join_by_pair_rule(win)
-            t_len = len(text)
-            candidates = by_first_char.get(text[0], ()) if text else ()
-            max_container_c = 0
-            for kt, kc in candidates:
-                if len(kt) > t_len and text in kt and kc > max_container_c:
-                    max_container_c = kc
-            if max_container_c == 0:
+            mcc = max_container_c.get(text, 0)
+            if mcc == 0:
                 continue
-            if c - max_container_c < 1:
+            if c - mcc < 1:
                 continue
             results.append({
                 "phrase": text,
