@@ -1,0 +1,4 @@
+# Large pair-dump artefacts (23-37 MB each × 6) — reproducible via
+# `python bench.py --dump ...` per FINDINGS.md §"复现". Excluded from git
+# to keep repo small; regenerated locally for equivalence.py.
+data/dbs/

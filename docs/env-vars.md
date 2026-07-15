@@ -101,6 +101,7 @@ grga 的缓存与配置位置。
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `GRGA_PPR_MIN_NPMI` | `0.2` | `related --mode graph` 读侧的 pair NPMI 下限。**只能收紧**写入期 v8 门槛（0.2），设置更低值会被忽略。命令行 `--min-npmi` 优先 |
+| `GRGA_BUILD_NPMI_BATCH` | `50000` | `index build` pair npmi 重算的 fallback 分批游标批大小（仅当 SQLite 无 `ln()` 时走此路径）。控制该分支的峰值 Python 内存；有 `ln()` 的环境走纯 SQL、此值不生效。见 `docs/design/plan-2026-07-15-build-memory-oom.md` §4 |
 | `GRGA_QUIET_MIGRATION` | `0` | 置 `1` 静音 schema 迁移日志，主要用于 CI / 测试降噪 |
 
 ## 桌面 GUI

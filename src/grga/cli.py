@@ -995,6 +995,8 @@ def _make_index_build_progress():
                     extra = ""
                     if "windows" in event:
                         extra = f" · {event['windows']} 窗口"
+                    elif "solid_pass" in event:
+                        extra = f" · 过实心门 {event['solid_pass']}"
                     elif "kept" in event:
                         extra = f" · 已留 {event['kept']}"
                     progress.update(

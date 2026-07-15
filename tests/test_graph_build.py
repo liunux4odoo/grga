@@ -950,3 +950,173 @@ def test_independence_gate_survives_incremental_grow_only_accumulation(
         f"co should grow across incremental builds; "
         f"build1={co_after_build1} build2={co_after_build2}"
     )
+
+# ---------------------------------------------------------------------------
+# Parity between the SQL and batch backends of _finalize_pairs_from_temp
+# step 4 (npmi recompute + glued / below-floor drops).
+#
+# Duplication risk: the npmi expression + Gate 1 glued check live twice —
+# once in Python ``_npmi()`` (used by ``_step4_batch``), once as SQL inside
+# ``_step4_sql``. A change in one path that isn't mirrored in the other
+# would produce different keyword_pairs.npmi values depending on whether
+# ``ln()`` is compiled into the target SQLite. This test freezes the
+# equivalence contract with an edge-case corpus so any drift fails loudly.
+# ---------------------------------------------------------------------------
+
+
+def _run_step4(variant: str, tmp_path: Path, fixture: dict) -> list[tuple]:
+    """Set up a minimal schema, seed keyword_stats + keyword_pairs from
+    ``fixture``, run the given step-4 backend, return sorted survivor rows.
+    """
+    import time
+    from grga.graph.build import _step4_sql, _step4_batch, _NPMI_BATCH_SIZE
+    from grga.graph.schema import (
+        connect, ensure_schema, CHUNK_COOCCUR_SOURCE,
+    )
+    from grga.graph.ids import IdInterner
+
+    db = tmp_path / f"parity_{variant}.db"
+    conn = connect(db)
+    try:
+        ensure_schema(conn)
+        interner = IdInterner(conn)
+        scope_id = interner.scope_id("parity")
+        # Intern a small keyword vocabulary.
+        kw_ids = {name: interner.kw_id(name) for name in fixture["keywords"]}
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # Seed keyword_stats.chunk_df.
+        conn.executemany(
+            "INSERT INTO keyword_stats "
+            "(scope_id, kw_id, doc_df, chunk_df, total_occurrences, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(scope_id, kw_ids[kw], 0, df, df, now)
+             for kw, df in fixture["chunk_df"].items()],
+        )
+        # Seed keyword_pairs with cooccur_count only (npmi NULL initially).
+        conn.executemany(
+            "INSERT INTO keyword_pairs "
+            "(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            [(scope_id, kw_ids[a], kw_ids[b], CHUNK_COOCCUR_SOURCE, co, now)
+             for a, b, co in fixture["pairs"]],
+        )
+        conn.commit()
+        # Invoke step 4.
+        events: list = []
+        n_chunks = fixture["n_chunks"]
+        min_npmi = fixture["min_npmi"]
+        if variant == "sql":
+            _step4_sql(conn, scope_id=scope_id, min_npmi=min_npmi,
+                       n_chunks=n_chunks, on_event=events.append)
+        elif variant == "batch":
+            _step4_batch(conn, scope_id=scope_id, min_npmi=min_npmi,
+                         n_chunks=n_chunks, on_event=events.append,
+                         batch_size=_NPMI_BATCH_SIZE)
+        else:
+            raise ValueError(variant)
+        # Fetch survivors + reverse kw_id → text.
+        id_to_text = {v: k for k, v in kw_ids.items()}
+        rows = conn.execute(
+            "SELECT kw_a_id, kw_b_id, cooccur_count, npmi "
+            "FROM keyword_pairs WHERE scope_id = ? AND source = ? "
+            "ORDER BY kw_a_id, kw_b_id",
+            (scope_id, CHUNK_COOCCUR_SOURCE),
+        ).fetchall()
+        return [
+            (id_to_text[int(r[0])], id_to_text[int(r[1])],
+             int(r[2]), float(r[3]) if r[3] is not None else None)
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def test_step4_sql_and_batch_backends_are_bit_exact(tmp_path):
+    """Edge-case parity: SQL and batch backends must produce identical
+    surviving-pair sets and identical (int-strict count, float-abs<1e-9
+    npmi) values. Drops (glued / min_npmi / degenerate) must match.
+    """
+    kw_ids = interner_stub = ["a", "b", "c", "d", "e", "f", "g", "h"]
+    # Fixture designed to exercise every branch of _npmi:
+    fixture = {
+        "n_chunks": 100,
+        "min_npmi": 0.1,
+        "keywords": kw_ids,
+        # kw -> chunk_df
+        "chunk_df": {
+            "a": 50, "b": 40, "c": 30, "d": 20,
+            "e": 10, "f": 5,  "g": 0,  "h": 3,
+        },
+        # (kw_a, kw_b, cooccur_count) — cases:
+        "pairs": [
+            ("a", "b", 20),  # normal case, positive npmi
+            ("a", "c", 15),  # normal
+            ("b", "d", 8),   # smaller co
+            ("c", "e", 5),   # very small
+            ("d", "e", 1),   # borderline low
+            # p_ab >= 1 boundary: co == n_chunks
+            ("a", "b", 100),  # duplicate scope? no, single-pair PK
+        ],
+    }
+    # Avoid duplicate PK by using distinct pairs.
+    fixture["pairs"] = [
+        ("a", "b", 20),
+        ("a", "c", 15),
+        ("b", "d", 8),
+        ("c", "e", 5),
+        ("d", "e", 1),   # below-count doesn't apply; below-min_npmi may drop
+        ("e", "f", 5),   # small counts, but co == df_a == df_b → GLUED
+        ("f", "h", 3),   # co == df_h == 3, df_f = 5 → NOT glued (df_a != df_b)
+        ("a", "g", 3),   # df_g = 0 → npmi None → drop
+    ]
+    sql_rows = _run_step4("sql", tmp_path, fixture)
+    batch_rows = _run_step4("batch", tmp_path, fixture)
+
+    # Set of (a, b, count) must be identical (bit-exact on drops).
+    def _key(r):
+        return (r[0], r[1], r[2])
+    assert {_key(r) for r in sql_rows} == {_key(r) for r in batch_rows}, (
+        f"survivor sets differ\nsql={sql_rows}\nbatch={batch_rows}"
+    )
+    # npmi values must match to 1e-9 tolerance.
+    sql_by_key = {_key(r): r[3] for r in sql_rows}
+    batch_by_key = {_key(r): r[3] for r in batch_rows}
+    for k, sql_v in sql_by_key.items():
+        batch_v = batch_by_key[k]
+        if sql_v is None and batch_v is None:
+            continue
+        assert sql_v is not None and batch_v is not None, (
+            f"npmi NULL mismatch at {k}: sql={sql_v} batch={batch_v}"
+        )
+        assert abs(sql_v - batch_v) < 1e-9, (
+            f"npmi drift at {k}: sql={sql_v} batch={batch_v}"
+        )
+    # Sanity: glued case (e, f) with co=5, df_e=10, df_f=5 → NOT glued
+    # (df_a != df_b). But we designed a real glued case: none in this
+    # fixture. Verify at least the below-min case and NULL-df case dropped.
+    surviving_keys = {_key(r) for r in sql_rows}
+    assert ("a", "g", 3) not in surviving_keys, "df_g=0 pair should have been dropped"
+
+
+def test_step4_glued_drop_parity(tmp_path):
+    """Specifically pin the Gate 1 glued behaviour (df_a == df_b == co)."""
+    fixture = {
+        "n_chunks": 100,
+        "min_npmi": 0.0,
+        "keywords": ["a", "b", "c"],
+        "chunk_df": {"a": 5, "b": 5, "c": 7},
+        "pairs": [
+            ("a", "b", 5),   # df_a == df_b == co == 5 → GLUED, drop
+            ("a", "c", 3),   # df_a != df_c → not glued, keep
+            ("b", "c", 5),   # df_b=5, df_c=7, co=5 → not glued (df_a != df_b), keep
+        ],
+    }
+    sql_rows = _run_step4("sql", tmp_path, fixture)
+    batch_rows = _run_step4("batch", tmp_path, fixture)
+    sql_keys = {(r[0], r[1]) for r in sql_rows}
+    batch_keys = {(r[0], r[1]) for r in batch_rows}
+    assert sql_keys == batch_keys, f"glued gate drift: sql={sql_keys} batch={batch_keys}"
+    assert ("a", "b") not in sql_keys, "glued pair (a,b) should be dropped"
+    assert ("a", "c") in sql_keys, "non-glued (a,c) should survive"
+    assert ("b", "c") in sql_keys, "non-glued (b,c) should survive"
+

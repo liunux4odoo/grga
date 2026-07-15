@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import time
 from collections import Counter, defaultdict
@@ -722,6 +724,7 @@ def detect_ngram_phrases(
     ent_threshold: float = _NGRAM_ENT_THRESHOLD,
     stop_boundaries: frozenset = _CORE_STOP_BOUNDARIES,
     on_progress: Optional[Callable[[str, dict], None]] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> List[dict]:
     """Detect CJK compound phrases from tokenised lines.
 
@@ -774,6 +777,17 @@ def detect_ngram_phrases(
     ``salvage`` stages also send per-tick updates every
     :data:`_PROGRESS_TICK` items so the caller can drive a spinner /
     progress bar. Passing ``None`` is a no-op.
+
+    ``conn`` is an optional sqlite3.Connection. When provided, the
+    aggregation of raw n-gram window occurrences moves into a
+    ``CREATE TEMP TABLE`` + ``GROUP BY`` + ``HAVING`` pipeline whose peak
+    memory is bounded by SQLite's cache (spills to disk via the caller's
+    ``PRAGMA temp_store_directory``) rather than by three Python dicts
+    (see docs/design/plan-2026-07-15-build-memory-oom.md §3 for the
+    ~2 GB → ~100 MB Python-heap reduction and bit-exact equivalence
+    proof). When ``conn is None`` a private ``:memory:`` connection is
+    opened for the call — safe for tests / small inputs, but the
+    ``temp_store_directory`` route is preferred for large corpora.
     """
     def _tick(phase: str, **info) -> None:
         if on_progress is not None:
@@ -781,15 +795,131 @@ def detect_ngram_phrases(
 
     n_lines = len(line_tokens)
     _tick("unigram_start", lines=n_lines)
+
+    _owns_conn = conn is None
+    if _owns_conn:
+        conn = sqlite3.connect(":memory:")
+
+    try:
+        return _detect_ngram_phrases_impl(
+            conn, line_tokens,
+            max_n=max_n, min_count=min_count,
+            npmi_threshold=npmi_threshold, ent_threshold=ent_threshold,
+            stop_boundaries=stop_boundaries, tick=_tick,
+            n_lines=n_lines,
+        )
+    finally:
+        # Always drop the TEMP tables so a shared connection doesn't
+        # carry state into the next call. DROP TEMP TABLE is per-conn
+        # metadata only, cheap.
+        try:
+            conn.execute("DROP TABLE IF EXISTS _ng_ev")
+            conn.execute("DROP TABLE IF EXISTS _ng_passed")
+        except sqlite3.Error:
+            pass
+        if _owns_conn:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Unit separator for the ``_ng_ev.phrase_key`` column. U+001F cannot appear
+# in jieba / regex output, giving a bijective tuple ↔ string mapping without
+# the rejoin-rule ambiguity of ``_join_by_pair_rule``. Two windows with
+# different token tuples but identical rejoined text (e.g. ``("章","北海")``
+# vs ``("章北","海")`` if both were ever produced) keep distinct keys.
+# ---------------------------------------------------------------------------
+_NGRAM_KEY_SEP = "\x1f"
+
+# Event-buffer batch size for the pass-1 executemany flush. 200k rows ×
+# ~50 B / tuple ≈ 10 MB Python peak, small enough to be dwarfed by
+# SQLite's own cache. Not user-tunable — it's a performance micro-knob
+# not a correctness one.
+_NGRAM_EVENT_FLUSH = 200_000
+
+
+def _detect_ngram_phrases_impl(
+    conn: sqlite3.Connection,
+    line_tokens: List[List[str]],
+    *,
+    max_n: int,
+    min_count: int,
+    npmi_threshold: float,
+    ent_threshold: float,
+    stop_boundaries: frozenset,
+    tick: Callable[..., None],
+    n_lines: int,
+) -> List[dict]:
+    """Body of :func:`detect_ngram_phrases`. See docstring there.
+
+    Stages (per SPEC §2.2):
+
+    1. Stream ``(phrase_key, n, left_tok, right_tok)`` events + unigrams
+       in one scan of ``line_tokens``.
+    2. SQL ``GROUP BY ... HAVING COUNT(*) >= min_count`` over ``_ng_ev``
+       — only freq-passing windows come back to Python. Note that every
+       *split* of a freq-passing window also passes freq (each container
+       occurrence carries one split occurrence), so this smaller dict is
+       sufficient for :func:`_npmi_pair` lookups later.
+    3. Solidity gate (Python; reads the post-freq dict).
+    4. Fetch left/right neighbour distributions for solidity-passing
+       phrases only, via a JOIN against a small ``_ng_passed`` table.
+    5. Branch-entropy gate (Python; input is 100× smaller than before).
+    6. Substring salvage (verbatim mainline logic).
+    7. Sort + return (verbatim).
+    """
+    # --- Stage 0: fresh TEMP TABLE (in case caller reuses conn) ---
+    conn.execute("DROP TABLE IF EXISTS _ng_ev")
+    conn.execute(
+        "CREATE TEMP TABLE _ng_ev ("
+        "  phrase_key TEXT NOT NULL, n INTEGER NOT NULL, "
+        "  left_tok TEXT, right_tok TEXT"
+        ")"
+    )
+
+    # --- Stage 1: stream events + unigram counts (single pass) ---
+    tick("window_start", lines=n_lines, max_n=max_n)
     uni: Counter = Counter()
+    buf: List[Tuple[str, int, Optional[str], Optional[str]]] = []
     for idx, toks in enumerate(line_tokens):
         uni.update(toks)
+        L = len(toks)
+        for i in range(L):
+            for n in range(2, max_n + 1):
+                if i + n > L:
+                    break
+                win = tuple(toks[i:i + n])
+                if any(t in stop_boundaries for t in win):
+                    continue
+                left = toks[i - 1] if (i > 0 and toks[i - 1] not in stop_boundaries) else None
+                right = toks[i + n] if (i + n < L and toks[i + n] not in stop_boundaries) else None
+                buf.append((_NGRAM_KEY_SEP.join(win), n, left, right))
+                if len(buf) >= _NGRAM_EVENT_FLUSH:
+                    conn.executemany(
+                        "INSERT INTO _ng_ev VALUES (?, ?, ?, ?)", buf
+                    )
+                    buf.clear()
         if idx % _PROGRESS_TICK == 0:
-            _tick("unigram_advance", current=idx, total=n_lines)
-    _tick("unigram_end", lines=n_lines, vocab=len(uni))
+            tick("unigram_advance", current=idx, total=n_lines)
+            # ``windows`` field intentionally omitted: the SQL backend
+            # doesn't materialise the pre-freq window count in Python (it
+            # lives in ``_ng_ev`` on disk). Consumers should guard the
+            # field's presence rather than expect a running count here.
+            tick("window_advance", current=idx, total=n_lines)
+    if buf:
+        conn.executemany("INSERT INTO _ng_ev VALUES (?, ?, ?, ?)", buf)
+        buf.clear()
+
+    # ``unigram_end`` intentionally not emitted here: unigram counting
+    # is now fused into the same loop as window enumeration (Stage 1), so
+    # the two logically end together. Emitting a separate ``unigram_end``
+    # after ``window_start`` used to flip the CLI's progress-bar note
+    # back to "统计词频完成" mid-enumeration. ``window_end`` (below) is
+    # the single end-of-Stage-1 marker; consumers that key on
+    # ``unigram_end`` should switch to it. ``uni`` / ``vocab`` size is
+    # available for the informational tail if needed.
     total = sum(uni.values())
     if total == 0:
-        _tick("empty", lines=n_lines)
+        tick("empty", lines=n_lines)
         return []
     log_total = math.log(total)
 
@@ -802,44 +932,24 @@ def detect_ngram_phrases(
     def _log_c(c: int) -> float:
         return math.log(c)
 
-    ngram_count: Counter = Counter()
-    left_ctx: "defaultdict[tuple, Counter]" = defaultdict(Counter)
-    right_ctx: "defaultdict[tuple, Counter]" = defaultdict(Counter)
+    # --- Stage 2: freq aggregate + HAVING, ordered by first occurrence ---
+    # ``ORDER BY MIN(rowid)`` reproduces the mainline dict insertion
+    # order so downstream tie-breaks (final ``sort`` of equal npmi+count)
+    # match Python-for-Python bit-exact.
+    freq_rows = conn.execute(
+        "SELECT phrase_key, n, COUNT(*) AS c "
+        "FROM _ng_ev GROUP BY phrase_key, n "
+        "HAVING c >= ? ORDER BY MIN(rowid)",
+        (min_count,),
+    ).fetchall()
+    tick("window_end", windows=len(freq_rows))
 
-    _tick("window_start", lines=n_lines, max_n=max_n)
-    for idx, toks in enumerate(line_tokens):
-        L = len(toks)
-        for i in range(L):
-            for n in range(2, max_n + 1):
-                if i + n > L:
-                    break
-                win = tuple(toks[i:i + n])
-                # No structural-particle boundary; mixed CJK/ASCII allowed
-                # so 艾AA / PDC主席 kind of hybrid entities get discovered.
-                if any(t in stop_boundaries for t in win):
-                    continue
-                ngram_count[win] += 1
-                if i > 0 and toks[i - 1] not in stop_boundaries:
-                    left_ctx[win][toks[i - 1]] += 1
-                if i + n < L and toks[i + n] not in stop_boundaries:
-                    right_ctx[win][toks[i + n]] += 1
-        if idx % _PROGRESS_TICK == 0:
-            _tick(
-                "window_advance",
-                current=idx, total=n_lines,
-                windows=len(ngram_count),
-            )
-    _tick("window_end", windows=len(ngram_count))
-
-    def _entropy(counter: Counter) -> float:
-        tot = sum(counter.values())
-        if tot == 0:
-            return 0.0
-        h = 0.0
-        for c in counter.values():
-            pr = c / tot
-            h -= pr * math.log(pr)
-        return h
+    # Post-freq ngram_count. Contains every split's count too (splits of
+    # freq-passers are themselves freq-passers — proof in the impl
+    # docstring). Bounded by post-freq vocab, not raw window count.
+    ngram_count: Dict[tuple, int] = {}
+    for phrase_key, _n, c in freq_rows:
+        ngram_count[tuple(phrase_key.split(_NGRAM_KEY_SEP))] = int(c)
 
     def _count(x) -> int:
         return uni.get(x, 0) if isinstance(x, str) else ngram_count.get(x, 0)
@@ -851,7 +961,6 @@ def detect_ngram_phrases(
         return _log_c(c) if c > 0 else math.nan
 
     def _npmi_pair(a, b, joint_c: int) -> float:
-        # Single-N NPMI: all P over ``total`` -> value stays in [-1, 1].
         ca, cb = _count(a), _count(b)
         if ca <= 0 or cb <= 0 or joint_c <= 0:
             return -1.0
@@ -872,31 +981,75 @@ def detect_ngram_phrases(
             vals.append(_npmi_pair(left, right, joint_c))
         return min(vals)
 
-    total_windows = len(ngram_count)
-    _tick("filter_start", windows=total_windows)
-    results: List[dict] = []
-    # Windows that clear frequency + solidity but fail *only* the branch
-    # entropy gate. A phrase like 苍坤 (followed by 上人 in 80/86 hits) has
-    # near-zero right entropy and dies here — yet it is a genuine standalone
-    # referent, not a tokenisation artefact. We stash such rejects and, once
-    # the survivor set is known, salvage any whose text is a substring of a
-    # kept phrase (see the salvage pass below). Frequency + solidity stay
-    # enforced, so boundary-crossing fragments (器学 ⊂ 机器学习) still die on
-    # solidity and are never candidates.
-    entropy_rejects: List[Tuple[tuple, int, float, float]] = []
-    for idx, (win, c) in enumerate(ngram_count.items()):
+    # --- Stage 3: solidity filter (freq already applied by HAVING) ---
+    total_windows = len(freq_rows)
+    tick("filter_start", windows=total_windows)
+    solid_pass: List[Tuple[tuple, int, float]] = []
+    for idx, (phrase_key, _n, c) in enumerate(freq_rows):
         if idx % _PROGRESS_TICK == 0:
-            _tick(
-                "filter_advance",
-                current=idx, total=total_windows,
-                kept=len(results),
-            )
-        if c < min_count:
-            continue
-        sol = _solidity(win, c)
+            # ``solid_pass``: phrases past freq + solidity so far. The
+            # old ``kept`` field counted phrases past all three gates —
+            # renamed here to avoid consumers mis-reading it as final
+            # survivor count. ``kept`` is still emitted at ``filter_end``
+            # with its original all-three-gates meaning (post entropy).
+            tick("filter_advance", current=idx, total=total_windows,
+                 solid_pass=len(solid_pass))
+        win = tuple(phrase_key.split(_NGRAM_KEY_SEP))
+        sol = _solidity(win, int(c))
         if sol < npmi_threshold:
             continue
-        be = min(_entropy(left_ctx[win]), _entropy(right_ctx[win]))
+        solid_pass.append((win, int(c), sol))
+
+    # --- Stage 4: neighbour distributions for solidity-passing windows ---
+    conn.execute("DROP TABLE IF EXISTS _ng_passed")
+    conn.execute("CREATE TEMP TABLE _ng_passed (phrase_key TEXT PRIMARY KEY)")
+    conn.executemany(
+        "INSERT OR IGNORE INTO _ng_passed VALUES (?)",
+        [(_NGRAM_KEY_SEP.join(win),) for win, _, _ in solid_pass],
+    )
+    left_dist: Dict[str, "Counter"] = {}
+    right_dist: Dict[str, "Counter"] = {}
+    for pk, tok, cnt in conn.execute(
+        "SELECT e.phrase_key, e.left_tok, COUNT(*) "
+        "FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
+        "WHERE e.left_tok IS NOT NULL "
+        "GROUP BY e.phrase_key, e.left_tok"
+    ):
+        left_dist.setdefault(pk, Counter())[tok] = int(cnt)
+    for pk, tok, cnt in conn.execute(
+        "SELECT e.phrase_key, e.right_tok, COUNT(*) "
+        "FROM _ng_ev e JOIN _ng_passed p ON e.phrase_key = p.phrase_key "
+        "WHERE e.right_tok IS NOT NULL "
+        "GROUP BY e.phrase_key, e.right_tok"
+    ):
+        right_dist.setdefault(pk, Counter())[tok] = int(cnt)
+
+    def _entropy(counter: "Counter") -> float:
+        tot = sum(counter.values())
+        if tot == 0:
+            return 0.0
+        h = 0.0
+        for c in counter.values():
+            pr = c / tot
+            h -= pr * math.log(pr)
+        return h
+
+    # --- Stage 5: branch-entropy gate + entropy_rejects stash ---
+    # Emits ``filter_advance`` here too so consumers keep a live progress
+    # signal across the full Stages 3+5 span (Stage 4 is a single SQL
+    # aggregate with no sub-progress). ``current`` starts at the count
+    # of freq-passers already rejected by solidity so the ticks form a
+    # single monotonic sequence across both stages.
+    results: List[dict] = []
+    entropy_rejects: List[Tuple[tuple, int, float, float]] = []
+    _stage5_base = total_windows - len(solid_pass)  # solidity-rejects
+    for idx, (win, c, sol) in enumerate(solid_pass):
+        if idx % _PROGRESS_TICK == 0:
+            tick("filter_advance", current=_stage5_base + idx,
+                 total=total_windows, kept=len(results))
+        pk = _NGRAM_KEY_SEP.join(win)
+        be = min(_entropy(left_dist.get(pk, Counter())),
+                 _entropy(right_dist.get(pk, Counter())))
         if be < ent_threshold:
             entropy_rejects.append((win, c, sol, be))
             continue
@@ -907,32 +1060,11 @@ def detect_ngram_phrases(
             "npmi": round(sol, 4),
             "branch_ent": round(be, 4),
         })
-    _tick("filter_end", windows=total_windows, kept=len(results))
+    tick("filter_end", windows=total_windows, kept=len(results))
 
-    # Substring salvage (2026-07-13, tightened 2026-07-13-r2). Purely
-    # textual + counting: a reject is kept iff (i) its rejoined text is a
-    # *proper* substring — anywhere, prefix / infix / suffix — of some
-    # survivor's text, **and** (ii) the reject has enough independent
-    # occurrences that no single survivor container can account for them:
-    # ``count(sub) - max(count(container)) >= min_count``. This kills the
-    # over-salvage of edge fragments like 苍坤上 / 坤上人 (which only ever
-    # appear inside their container) while still recovering 苍坤 (86 total,
-    # 80 inside 苍坤上人, margin 6 ≥ min_count). No semantic prior — the
-    # margin is a pure counting subtraction (AGENTS.md 铁律 2). Using
-    # ``max`` (not ``sum``) over containers keeps the floor conservative:
-    # overlapping containers never over-subtract, so a genuinely
-    # independent sub is never wrongly dropped.
-    _tick("salvage_start", rejects=len(entropy_rejects))
+    # --- Stage 6: substring salvage (verbatim mainline logic) ---
+    tick("salvage_start", rejects=len(entropy_rejects))
     if entropy_rejects and results:
-        # Index each survivor under every distinct character it contains,
-        # so a candidate only tests the survivors whose text overlaps its
-        # first character — a proper substring must share ``text[0]`` with
-        # its container. Avoids the naive O(rejects × survivors) scan on
-        # large scopes. Bucket contents are still short (single-char keys
-        # partition the survivor set) and the ``len(kt) > t_len`` guard
-        # keeps the "proper" (strict) substring semantics. We also carry
-        # the survivor's ``count`` in the bucket so the independence-margin
-        # test is a single pass over the same candidate list.
         by_first_char: "defaultdict[str, list[Tuple[str, int]]]" = defaultdict(list)
         for r in results:
             kt = r["phrase"]
@@ -942,30 +1074,18 @@ def detect_ngram_phrases(
         salvaged = 0
         for idx, (win, c, sol, be) in enumerate(entropy_rejects):
             if idx % _PROGRESS_TICK == 0:
-                _tick(
-                    "salvage_advance",
-                    current=idx, total=len(entropy_rejects),
-                    salvaged=salvaged,
-                )
+                tick("salvage_advance", current=idx,
+                     total=len(entropy_rejects), salvaged=salvaged)
             text = _join_by_pair_rule(win)
             t_len = len(text)
             candidates = by_first_char.get(text[0], ()) if text else ()
-            # Largest container count among strict text-containers of ``text``.
-            # ``max`` (not ``sum``) is the conservative floor — see docstring.
             max_container_c = 0
             for kt, kc in candidates:
                 if len(kt) > t_len and text in kt and kc > max_container_c:
                     max_container_c = kc
             if max_container_c == 0:
-                # No container matched — nothing to salvage against.
                 continue
             if c - max_container_c < 1:
-                # All of this sub's occurrences are inside its largest
-                # container (margin == 0). Pure boundary fragment (苍坤上 /
-                # 坤上人 kind); drop. A margin of 1+ is sufficient: it means
-                # the sub is either seen fully standalone at least once, or
-                # nested in a *different* container — either is independence
-                # evidence (frequency has already been enforced upstream).
                 continue
             results.append({
                 "phrase": text,
@@ -975,13 +1095,14 @@ def detect_ngram_phrases(
                 "branch_ent": round(be, 4),
             })
             salvaged += 1
-        _tick("salvage_end", rejects=len(entropy_rejects), salvaged=salvaged)
+        tick("salvage_end", rejects=len(entropy_rejects), salvaged=salvaged)
     else:
-        _tick("salvage_end", rejects=len(entropy_rejects), salvaged=0)
+        tick("salvage_end", rejects=len(entropy_rejects), salvaged=0)
 
-    _tick("sort_start", phrases=len(results))
+    # --- Stage 7: sort + return (verbatim) ---
+    tick("sort_start", phrases=len(results))
     results.sort(key=lambda x: (-x["npmi"], -x["count"]))
-    _tick("sort_end", phrases=len(results))
+    tick("sort_end", phrases=len(results))
     return results
 
 
@@ -1304,6 +1425,69 @@ VALID_BUILD_MODES = ("build", "rebuild")
 VALID_REFRESH_NGRAM = ("never", "append", "replace")
 
 
+# ---------------------------------------------------------------------------
+# Build-local temp directory for SQLite's own temp files (2026-07-15).
+#
+# Motivation: SQLite's TEMP TABLE + query engine spill (sorters, hash
+# aggregates for GROUP BY / self-join) write to the OS temp dir by
+# default (typically ``/tmp``). On distros where ``/tmp`` is tmpfs
+# (Fedora, Arch, some Ubuntu configs) that's actually RAM — a spill
+# meant to bound peak RSS silently becomes RAM again. We can't detect
+# fstype cross-platform, so instead we point SQLite at a dir on the
+# **same filesystem as the main DB**, which we know the user chose
+# for durable storage. Cleaned up on connection close + rmdir.
+#
+# Per-build subdir (mkdtemp) so concurrent builds don't step on each
+# other's cleanup. ``temp_store = FILE`` forces on-disk temp regardless
+# of how SQLite was compiled (some builds default to MEMORY).
+# See docs/design/plan-2026-07-15-build-memory-oom.md §6 for the wider
+# spill-config discussion; this helper is the minimal first step.
+# ---------------------------------------------------------------------------
+
+_BUILD_TEMP_ROOT_NAME = "db-temp"
+
+
+def _setup_build_temp_dir(conn: "sqlite3.Connection", main_db_path: Path) -> Path:
+    """Create ``<main_db.parent>/db-temp/<uniq>/`` and point ``conn`` there.
+
+    Uses :func:`tempfile.mkdtemp` so concurrent builds get isolated
+    subdirs. Sets ``PRAGMA temp_store_directory`` (deprecated but still
+    works on all supported SQLite versions) so all TEMP TABLE storage
+    and query-engine spill for **this connection** lands under the
+    returned path. Also forces ``PRAGMA temp_store = FILE`` — otherwise
+    a SQLite compiled with ``TEMP_STORE=3`` (memory-only) would ignore
+    ``temp_store_directory`` entirely.
+    """
+    import tempfile
+    root = main_db_path.parent / _BUILD_TEMP_ROOT_NAME
+    root.mkdir(parents=True, exist_ok=True)
+    build_dir = Path(tempfile.mkdtemp(prefix="build-", dir=str(root)))
+    # PRAGMA doesn't accept bound parameters; escape single quotes.
+    escaped = str(build_dir).replace("'", "''")
+    conn.execute("PRAGMA temp_store = FILE")
+    conn.execute(f"PRAGMA temp_store_directory = '{escaped}'")
+    return build_dir
+
+
+def _cleanup_build_temp_dir(build_dir: Optional[Path]) -> None:
+    """Remove ``build_dir`` after connection close. Best-effort.
+
+    SQLite unlinks its own temp files on connection close, so this dir
+    is expected to be empty. ``shutil.rmtree(..., ignore_errors=True)``
+    handles the (rare) case where an orphan file remains — better a
+    tiny leak than a build that crashes on cleanup.
+
+    We deliberately do **not** try to remove the shared ``db-temp`` root
+    itself: with concurrent builds, the sequence
+    ``B.mkdir(exist_ok=True) → A.rmdir(empty) → B.mkdtemp(...)``
+    races and crashes B with ``FileNotFoundError``. An empty shared root
+    directory is harmless and gets reused by the next build.
+    """
+    if build_dir is None:
+        return
+    shutil.rmtree(str(build_dir), ignore_errors=True)
+
+
 def build_graph_index(
     scope: str,
     *,
@@ -1445,7 +1629,9 @@ def build_graph_index(
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     conn = connect(target_db)
+    build_temp_dir: Optional[Path] = None
     try:
+        build_temp_dir = _setup_build_temp_dir(conn, target_db)
         ensure_schema(conn)
         interner = IdInterner(conn)
         scope_id = interner.scope_id(scope_name)
@@ -1746,6 +1932,7 @@ def build_graph_index(
                 detected = detect_ngram_phrases(
                     line_token_lists, max_n=max_ngram_n,
                     on_progress=_detect_progress,
+                    conn=conn,
                 )
                 last_iter_added = 0
                 for d_entry in detected:
@@ -2203,6 +2390,11 @@ def build_graph_index(
         conn.commit()
     finally:
         conn.close()
+        # Connection close releases all SQLite temp files under this build's
+        # private temp dir; remove the now-empty dir. Best-effort — a
+        # concurrent build with its own subdir is unaffected (each gets a
+        # unique dir via mkdtemp).
+        _cleanup_build_temp_dir(build_temp_dir)
 
     stats.elapsed_seconds = time.perf_counter() - started
     _emit("pairs_done", pairs_written=stats.pairs_written)
@@ -2317,68 +2509,35 @@ def _finalize_pairs_from_temp(
         (scope_id, CHUNK_COOCCUR_SOURCE, int(min_pair_count)),
     )
 
-    # 4. Recompute npmi for all surviving pairs in this scope. Bounded by
-    #    the post-HAVING row count (much smaller than pre-v9's raw pair
-    #    space). Load fresh chunk_df from the freshly-populated
-    #    keyword_stats table.
-    chunk_df: Dict[int, int] = {
-        int(r[0]): int(r[1]) for r in conn.execute(
-            "SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?",
-            (scope_id,),
+    # 4. Recompute npmi for all surviving pairs in this scope. Two backends:
+    #
+    # * ``_step4_sql``: one SQL ``UPDATE`` (npmi) + one SQL ``DELETE``
+    #   (glued / below-floor). Needs SQLite ``ln()`` from the optional
+    #   math-functions module (``-DSQLITE_ENABLE_MATH_FUNCTIONS``).
+    # * ``_step4_batch``: paginated cursor + ``executemany``. Peak Python
+    #   heap bounded by ``batch_size`` instead of total surviving pairs.
+    #   Same semantics as the previous full-Python loop.
+    #
+    # Both are bit-exact against each other and against the pre-refactor
+    # Python loop (verified in ``experiments/oom_build_fix_2026_07_15``:
+    # 293k-pair M-corpus dumps compare with ``max_npmi_diff = 0.0``,
+    # ``set jaccard = 1.0``, ``count`` int-strict equal).
+    #
+    # Motivation: the pre-refactor loop fetched every surviving pair into
+    # Python and built ``updates`` / ``drops`` tuple lists — ~800 MB peak
+    # on the M-corpus (see ``FINDINGS.md`` F5). Both backends drop that to
+    # ~4 MB Δ RSS across the ``pairs_scan_start`` → ``pairs_scan_end``
+    # window while keeping the emit contract intact.
+    if _sqlite_has_ln(conn):
+        _step4_sql(
+            conn, scope_id=scope_id, min_npmi=min_npmi,
+            n_chunks=n_chunks, on_event=on_event,
         )
-    }
-
-    pair_rows = conn.execute(
-        "SELECT kw_a_id, kw_b_id, cooccur_count FROM keyword_pairs "
-        "WHERE scope_id = ? AND source = ?",
-        (scope_id, CHUNK_COOCCUR_SOURCE),
-    ).fetchall()
-
-    updates: List[Tuple[float, int, int, int]] = []
-    drops: List[Tuple[int, int, int]] = []
-    total = len(pair_rows)
-    step = max(1, total // 200) if total else 1
-    for idx, row in enumerate(pair_rows, start=1):
-        a, b, co = int(row[0]), int(row[1]), int(row[2])
-        df_a = chunk_df.get(a, 0)
-        df_b = chunk_df.get(b, 0)
-        npmi = _npmi(co, df_a, df_b, n_chunks)
-        # Gate 1 (independence, parameter-free): drop pairs where the two
-        # words are perfectly "glued" — every occurrence of either word is
-        # accompanied by the other. The exact npmi=1.0 degenerate case is
-        # ``p_ab == p_a == p_b`` ⟺ ``df_a == df_b == co`` (three-way
-        # equality), independent of the corpus size. Use strict equality
-        # rather than ``co >= max(df_a, df_b)`` so incremental builds
-        # (mode='build') don't misfire: their ``cooccur_count`` is grow-only
-        # by design (D6), while ``chunk_df`` is recomputed fresh, so
-        # ``co > min(df_a, df_b)`` can arise on legitimate one-way
-        # attachments after a doc update / removal — those must not be
-        # confused with the true glued artefact.
-        glued = df_a > 0 and df_b > 0 and df_a == df_b == co
-        # v8 invariant: chunk_cooccur.npmi is de-facto NOT NULL; drop
-        # degenerate rows regardless of the floor. Below-floor rows also
-        # drop when caller set a positive min_npmi.
-        if npmi is None or glued or (min_npmi > 0.0 and npmi < min_npmi):
-            drops.append((scope_id, a, b))
-        else:
-            updates.append((float(npmi), scope_id, a, b))
-        if idx == total or idx % step == 0:
-            _emit("pairs_advance", current=idx, total=total)
-    _emit("pairs_scan_end", surviving=len(updates))
-
-    if drops:
-        conn.executemany(
-            "DELETE FROM keyword_pairs "
-            "WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ? "
-            "AND source = 'chunk_cooccur'",
-            drops,
-        )
-    if updates:
-        conn.executemany(
-            "UPDATE keyword_pairs SET npmi = ? "
-            "WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ? "
-            "AND source = 'chunk_cooccur'",
-            updates,
+    else:
+        _step4_batch(
+            conn, scope_id=scope_id, min_npmi=min_npmi,
+            n_chunks=n_chunks, on_event=on_event,
+            batch_size=_NPMI_BATCH_SIZE,
         )
 
     return int(conn.execute(
@@ -2386,6 +2545,260 @@ def _finalize_pairs_from_temp(
         "WHERE scope_id = ? AND source = ?",
         (scope_id, CHUNK_COOCCUR_SOURCE),
     ).fetchone()[0])
+
+
+# ---------------------------------------------------------------------------
+# _finalize_pairs_from_temp step 4 backends (2026-07-15).
+# Design: docs/design/plan-2026-07-15-build-memory-oom.md §4
+# Experiment: experiments/oom_build_fix_2026_07_15/ (C2/C5/C6 pass)
+# ---------------------------------------------------------------------------
+
+# Batch size for the fallback ``_step4_batch`` cursor. Bounds peak Python
+# heap in the fallback path to ``batch_size × ~40 B`` (kw_a, kw_b,
+# cooccur, npmi tuple ~ 40 B), well under 10 MB at the default 50k.
+# Callers may override via ``GRGA_BUILD_NPMI_BATCH`` (see
+# ``docs/env-vars.md``). The constant is read at import time; the value is
+# **clamped to a positive int** — a non-positive setting would silently
+# break the pagination loop (``LIMIT 0`` skips step-4 entirely; a negative
+# ``LIMIT`` degenerates to unbounded and defeats the memory bound).
+_NPMI_BATCH_DEFAULT = 50000
+try:
+    _NPMI_BATCH_SIZE = int(os.environ.get("GRGA_BUILD_NPMI_BATCH",
+                                          str(_NPMI_BATCH_DEFAULT)))
+    if _NPMI_BATCH_SIZE <= 0:
+        raise ValueError("must be positive")
+except (TypeError, ValueError):
+    _NPMI_BATCH_SIZE = _NPMI_BATCH_DEFAULT
+
+
+def _sqlite_has_ln(conn) -> bool:
+    """Probe for SQLite's natural-log function.
+
+    ``ln()`` is part of the optional math-functions module
+    (``-DSQLITE_ENABLE_MATH_FUNCTIONS``, SQLite ≥ 3.35). Not all Python
+    distributions bundle a build with it, so the SQL backend needs a
+    graceful fallback. Presence probing (not return value) — a
+    ``base-10 log()`` build would still return a number, just the wrong
+    one; the missing-function case raises ``OperationalError``.
+    """
+    import sqlite3
+    try:
+        conn.execute("SELECT ln(1.0)")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def _step4_sql(
+    conn,
+    *,
+    scope_id: int,
+    min_npmi: float,
+    n_chunks: int,
+    on_event: Optional[Callable[[dict], None]],
+) -> None:
+    """Recompute npmi via one UPDATE + delete degenerates via one DELETE.
+
+    The npmi SQL expression mirrors :func:`_npmi`'s evaluation order
+    exactly (per-log intermediate divisions), which is what makes the
+    result bit-exact against the pre-refactor Python loop. Algebraic
+    simplification (e.g. ``ln(co*n / (df_a*df_b))``) reshuffles the
+    floating-point rounding sequence and would move ~1 ulp on some rows.
+    """
+    def _emit(phase: str, **fields) -> None:
+        if on_event is None:
+            return
+        payload = {"phase": phase}
+        payload.update(fields)
+        try:
+            on_event(payload)
+        except Exception:
+            pass
+
+    # Pre-count for the pairs_advance emit contract (observers expect a
+    # ``current/total`` tick even when Step 4 is a single SQL statement).
+    total = int(conn.execute(
+        "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+        (scope_id, CHUNK_COOCCUR_SOURCE),
+    ).fetchone()[0])
+
+    # UPDATE: recompute npmi for every surviving chunk_cooccur row in
+    # this scope. Degenerate cases (df zero, p_ab >= 1, denom <= 0) get
+    # NULL — deleted in the DELETE below.
+    conn.execute(
+        """
+        WITH df AS (
+            SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?
+        )
+        UPDATE keyword_pairs
+        SET npmi = (
+            SELECT CASE
+                WHEN kp_co <= 0 OR df_a IS NULL OR df_b IS NULL
+                     OR df_a <= 0 OR df_b <= 0 OR ? <= 0 THEN NULL
+                WHEN (kp_co * 1.0 / ?) >= 1.0 THEN NULL
+                WHEN (-ln(kp_co * 1.0 / ?)) <= 0 THEN NULL
+                ELSE ln((kp_co * 1.0 / ?)
+                         / ((df_a * 1.0 / ?) * (df_b * 1.0 / ?)))
+                     / (-ln(kp_co * 1.0 / ?))
+            END
+            FROM (
+                SELECT keyword_pairs.cooccur_count AS kp_co,
+                       (SELECT chunk_df FROM df WHERE df.kw_id = keyword_pairs.kw_a_id) AS df_a,
+                       (SELECT chunk_df FROM df WHERE df.kw_id = keyword_pairs.kw_b_id) AS df_b
+            )
+        )
+        WHERE scope_id = ? AND source = ?
+        """,
+        (scope_id, n_chunks, n_chunks, n_chunks, n_chunks, n_chunks, n_chunks, n_chunks,
+         scope_id, CHUNK_COOCCUR_SOURCE),
+    )
+
+    # DELETE: (a) npmi NULL from the UPDATE; (b) below the min_npmi
+    # floor; (c) Gate 1 "glued" — three-way integer equality
+    # df_a = df_b = cooccur_count. Using EXISTS(SELECT ... FROM df JOIN df)
+    # keeps the glued check as an int comparison (mainline invariant).
+    conn.execute(
+        """
+        WITH df AS (
+            SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?
+        )
+        DELETE FROM keyword_pairs
+        WHERE scope_id = ? AND source = ?
+          AND (
+              npmi IS NULL
+              OR (? > 0.0 AND npmi < ?)
+              OR EXISTS (
+                  SELECT 1 FROM df da JOIN df db
+                    ON da.kw_id = keyword_pairs.kw_a_id
+                   AND db.kw_id = keyword_pairs.kw_b_id
+                  WHERE da.chunk_df > 0 AND db.chunk_df > 0
+                    AND da.chunk_df = db.chunk_df
+                    AND da.chunk_df = keyword_pairs.cooccur_count
+              )
+          )
+        """,
+        (scope_id, scope_id, CHUNK_COOCCUR_SOURCE, min_npmi, min_npmi),
+    )
+
+    # No ``pairs_advance`` here: the SQL backend runs the UPDATE + DELETE
+    # as two atomic statements, so there is no intra-step progress signal
+    # to emit. Consumers should render an indeterminate spinner between
+    # ``pairs_scan_start`` and ``pairs_scan_end`` on installs with math
+    # functions available. The batch fallback still emits progress ticks.
+    surviving = int(conn.execute(
+        "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+        (scope_id, CHUNK_COOCCUR_SOURCE),
+    ).fetchone()[0])
+    _emit("pairs_scan_end", surviving=surviving)
+
+
+def _step4_batch(
+    conn,
+    *,
+    scope_id: int,
+    min_npmi: float,
+    n_chunks: int,
+    on_event: Optional[Callable[[dict], None]],
+    batch_size: int,
+) -> None:
+    """Fallback: paginate through surviving pairs in ``batch_size`` chunks.
+
+    Peak Python heap bounded by the batch. Pagination key is
+    ``(kw_a_id, kw_b_id)`` (the second/third columns of the primary key)
+    — ``keyword_pairs`` is ``WITHOUT ROWID``, so ``rowid`` isn't
+    available. The primary key gives a stable order for the tuple-compare
+    ``(kw_a_id > last_a OR (= last_a AND kw_b_id > last_b))`` cursor.
+    """
+    def _emit(phase: str, **fields) -> None:
+        if on_event is None:
+            return
+        payload = {"phase": phase}
+        payload.update(fields)
+        try:
+            on_event(payload)
+        except Exception:
+            pass
+
+    chunk_df: Dict[int, int] = {
+        int(r[0]): int(r[1]) for r in conn.execute(
+            "SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?",
+            (scope_id,),
+        )
+    }
+
+    total = int(conn.execute(
+        "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+        (scope_id, CHUNK_COOCCUR_SOURCE),
+    ).fetchone()[0])
+
+    step_emit = max(1, total // 200) if total else 1
+    processed = 0
+    last_a = -1
+    last_b = -1
+
+    while True:
+        # Row-value tuple compare is index-aware since SQLite 3.15 (2016):
+        # ``(kw_a_id, kw_b_id) > (?, ?)`` becomes a true PK-range seek. The
+        # OR-expanded form (``kw_a_id > ? OR (kw_a_id = ? AND kw_b_id > ?)``)
+        # does **not** — the planner leaves it as a filter after
+        # ``PRIMARY KEY (scope_id=?)``, so every batch re-scans the whole
+        # scope, giving O(N²/batch_size) total cost that defeats the OOM
+        # bound the fallback exists to enforce.
+        rows = conn.execute(
+            """
+            SELECT kw_a_id, kw_b_id, cooccur_count
+            FROM keyword_pairs
+            WHERE scope_id = ? AND source = ?
+              AND (kw_a_id, kw_b_id) > (?, ?)
+            ORDER BY kw_a_id, kw_b_id
+            LIMIT ?
+            """,
+            (scope_id, CHUNK_COOCCUR_SOURCE, last_a, last_b, batch_size),
+        ).fetchall()
+        if not rows:
+            break
+
+        updates: List[Tuple[float, int, int, int]] = []
+        drops: List[Tuple[int, int, int]] = []
+        for row in rows:
+            a, b, co = int(row[0]), int(row[1]), int(row[2])
+            df_a = chunk_df.get(a, 0)
+            df_b = chunk_df.get(b, 0)
+            npmi = _npmi(co, df_a, df_b, n_chunks)
+            # Gate 1 (glued): int-strict three-way equality; see mainline
+            # comment in the pre-refactor loop for the incremental-mode
+            # rationale (must not confuse legitimate one-way attachments
+            # with the true glued artefact).
+            glued = df_a > 0 and df_b > 0 and df_a == df_b == co
+            if npmi is None or glued or (min_npmi > 0.0 and npmi < min_npmi):
+                drops.append((scope_id, a, b))
+            else:
+                updates.append((float(npmi), scope_id, a, b))
+            last_a, last_b = a, b
+            processed += 1
+            if processed == total or processed % step_emit == 0:
+                _emit("pairs_advance", current=processed, total=total)
+
+        if drops:
+            conn.executemany(
+                "DELETE FROM keyword_pairs "
+                "WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ? "
+                "AND source = 'chunk_cooccur'",
+                drops,
+            )
+        if updates:
+            conn.executemany(
+                "UPDATE keyword_pairs SET npmi = ? "
+                "WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ? "
+                "AND source = 'chunk_cooccur'",
+                updates,
+            )
+
+    surviving = int(conn.execute(
+        "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+        (scope_id, CHUNK_COOCCUR_SOURCE),
+    ).fetchone()[0])
+    _emit("pairs_scan_end", surviving=surviving)
 
 
 
