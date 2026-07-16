@@ -1,0 +1,5 @@
+# Local build artifacts (regenerable via build_baseline.py / synth_L.py + batched_bench.py)
+data/corpora/
+data/dbs/
+data/results/
+__pycache__/

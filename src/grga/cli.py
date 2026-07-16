@@ -1133,6 +1133,8 @@ def index_build_command(
     tags: List[str] = typer.Option([], "--tag", "-t", help="Attach a multi-value scope tag (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Written to `scope_tags` (knowledge layer, portable across machines). Accumulate-only: existing tags survive; remove with `grga scope tag rm`."),
     append: bool = typer.Option(False, "--append", help="[deprecated] Same effect as the new default (`build` is incremental and never clears the vocabulary). Prints a deprecation warning."),
     replace: bool = typer.Option(False, "--replace", help="[deprecated] Wipe the scope's asset + index + derived layers and rebuild from scratch. Use `grga index forget --all` followed by `grga index build`, or `grga index rebuild --refresh-ngram=replace` instead."),
+    batch_chunks: int = typer.Option(0, "--batch-chunks", help="[not supported on `grga index build`] Present for CLI symmetry — passing >0 exits with an error pointing to `grga index rebuild --batch-chunks`."),
+    top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="[not supported on `grga index build`] Present for CLI symmetry."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Incrementally update the graph index for a scope.
@@ -1166,6 +1168,14 @@ def index_build_command(
         raise typer.Exit(2)
     if max_ngram_n < 2:
         typer.echo("--max-ngram-n must be >= 2", err=True)
+        raise typer.Exit(2)
+
+    if batch_chunks > 0:
+        typer.echo(
+            "--batch-chunks is not supported with `grga index build`. "
+            "Use `grga index rebuild --batch-chunks N` instead.",
+            err=True,
+        )
         raise typer.Exit(2)
 
     # Deprecated flag translation.
@@ -1239,6 +1249,8 @@ def index_rebuild_command(
     refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy: `append` keeps the existing dict and adds newly detected phrases (default); `never` skips detection and uses the current dict as-is; `replace` clears the dict first, then relearns from the full scope."),
     seed_ngram_from: Optional[str] = typer.Option(None, "--seed-ngram-from", help="Cold-start the tokeniser with another scope's auto n-gram dictionary (v10). Useful after `grga index import`. Target-scope entries take precedence on collision."),
     tags: List[str] = typer.Option([], "--tag", help="Attach a multi-value scope tag (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Accumulate-only (existing tags survive a rebuild); remove with `grga scope tag rm`."),
+    batch_chunks: int = typer.Option(0, "--batch-chunks", help="Enable batched build with target N chunks per batch (0 = disabled = default mainline path, unchanged). >0 activates a fundamentally different pipeline: per-batch phrase detection + top-N per-chunk kw cap (see --top-n-kw). Faster + lower peak on large corpora BUT produces a different phrase/pair set (per-batch phrase drift ~27%; top-N discards low-rank kws). Use for corpora too large for single-pass. See experiments/batched_build_2026_07_16/FINDINGS.md."),
+    top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="Only used with --batch-chunks>0. Per-chunk keyword cap for pair enumeration (higher=more pairs, more RAM). Default via env GRGA_BATCH_TOP_N (default 64)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Full-scope re-scan: clear the index + derived layers, then rebuild.
@@ -1289,6 +1301,8 @@ def index_rebuild_command(
             max_ngram_n=max_ngram_n,
             seed_ngram_from=seed_ngram_from,
             tags=tags,
+            batch_chunks=batch_chunks,
+            top_n_kw=top_n_kw,
             text_progress=text_progress,
             rich_on_event=rich_on_event,
         )
@@ -1318,6 +1332,8 @@ def _run_index_build(
     max_ngram_n: int,
     seed_ngram_from: Optional[str] = None,
     tags: Optional[List[str]] = None,
+    batch_chunks: int = 0,
+    top_n_kw: Optional[int] = None,
     text_progress,
     rich_on_event,
 ):
@@ -1347,6 +1363,8 @@ def _run_index_build(
         tags=tuple(tags or ()),
         mode=mode,
         refresh_ngram=refresh_ngram,
+        batch_chunks=batch_chunks,
+        top_n_kw=top_n_kw,
         progress=text_progress,
         on_event=rich_on_event,
     )

@@ -1816,6 +1816,507 @@ def _cleanup_build_temp_dir(build_dir: Optional[Path]) -> None:
     shutil.rmtree(str(build_dir), ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Batched build pipeline (batched_build_2026_07_16).
+#
+# Ported from ``experiments/batched_build_2026_07_16/batched_bench.py``
+# ``batched_build()``. Only engaged when ``build_graph_index`` is called
+# with ``batch_chunks > 0`` (rebuild + refresh_ngram="replace" only for
+# this first integration). Design + frozen decisions live in
+# ``experiments/batched_build_2026_07_16/{SPEC,QUESTIONS,FINDINGS}.md``.
+#
+# The batched path processes the corpus in file-aligned greedy batches,
+# running per-batch phrase detection + top-N (direction-3 npmi-ranked)
+# keyword sampling, dumping (doc_id, chunk_id, kw_id) triples into the
+# same cross-batch ``_build_chunk_kws`` TEMP TABLE the single-pass path
+# uses. ``_finalize_pairs_from_temp`` (unchanged) does global pair
+# aggregation at the end. See SPEC.md §2.
+# ---------------------------------------------------------------------------
+
+# Direction-3 fallback score for a kw with no prior-batch npmi evidence.
+# Slightly above the default min_npmi=0.2 so unseen-but-plausible kws are
+# not starved out of the top-N cap on cold batches.
+_BATCHED_UNKNOWN_KW_PRIOR = 0.25
+
+
+def _resolve_top_n_kw(top_n_kw: Optional[int]) -> int:
+    """Resolve top_n_kw: explicit arg > GRGA_BATCH_TOP_N env > default 64."""
+    if top_n_kw is not None:
+        return max(1, int(top_n_kw))
+    try:
+        v = int(os.environ.get("GRGA_BATCH_TOP_N", "64"))
+        return v if v > 0 else 64
+    except (TypeError, ValueError):
+        return 64
+
+
+def _pack_batches_by_docs(
+    docs: List[tuple], target_chunks: int,
+) -> List[List[tuple]]:
+    """File-aligned greedy batch packing over Pass-0 ``docs`` entries.
+
+    Adapted from the prototype's ``pack_batches`` to consume already-scanned
+    ``docs`` entries (``(doc_id, rel_path, path, is_md, chunks, ...)``)
+    rather than re-reading files. Sorts by ``rel_path`` so same-directory
+    files stay together, then greedily fills batches to ``~target_chunks``
+    non-empty chunks. A whole file never straddles a batch; a single file
+    larger than ``target_chunks`` becomes its own over-sized batch (Q1
+    soft cap).
+    """
+    # Sort by rel_path (entry[1]) for locality; ties fall back to doc_id.
+    ordered = sorted(docs, key=lambda e: (str(e[1]), int(e[0])))
+    batches: List[List[tuple]] = []
+    cur: List[tuple] = []
+    cur_chunks = 0
+    for entry in ordered:
+        n = sum(1 for c in entry[4] if c.text.strip())
+        if n <= 0:
+            # Keep the doc in a batch anyway so its metadata is refreshed,
+            # but it contributes zero chunks toward the target.
+            if not cur:
+                cur.append(entry)
+                continue
+        if cur_chunks > 0 and cur_chunks + n > target_chunks:
+            batches.append(cur)
+            cur = []
+            cur_chunks = 0
+        cur.append(entry)
+        cur_chunks += n
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+def _compute_prior_kw_scores(
+    conn, scope_id: int, n_chunks_prior: int,
+) -> Dict[int, float]:
+    """Compute ``{kw_id -> max npmi across pairs it participates in}``.
+
+    Uses the accumulated ``keyword_pairs.cooccur_count`` +
+    ``keyword_stats.chunk_df`` from PRIOR batches. Returns ``{}`` on
+    cold start (batch 1, ``n_chunks_prior <= 0``). npmi is computed
+    on-the-fly here because ``keyword_pairs.npmi`` is NULL during the
+    batch loop (``_finalize_pairs_from_temp`` step 4 has not run yet).
+    """
+    if n_chunks_prior <= 0:
+        return {}
+    kw_score: Dict[int, float] = {}
+    for kw_a, kw_b, cc, df_a, df_b in conn.execute(
+        """
+        SELECT p.kw_a_id, p.kw_b_id, p.cooccur_count, sa.chunk_df, sb.chunk_df
+        FROM keyword_pairs p
+        JOIN keyword_stats sa ON sa.kw_id=p.kw_a_id AND sa.scope_id=?
+        JOIN keyword_stats sb ON sb.kw_id=p.kw_b_id AND sb.scope_id=?
+        WHERE p.scope_id=? AND p.source=?
+        """,
+        (scope_id, scope_id, scope_id, CHUNK_COOCCUR_SOURCE),
+    ):
+        cc = int(cc); df_a = int(df_a); df_b = int(df_b)
+        if cc <= 0 or df_a <= 0 or df_b <= 0:
+            continue
+        p_ab = cc / n_chunks_prior
+        if p_ab <= 0 or p_ab >= 1.0:
+            continue
+        denom = -math.log(p_ab)
+        if denom <= 0:
+            continue
+        pmi = math.log(cc * n_chunks_prior / (df_a * df_b))
+        npmi = pmi / denom
+        if npmi > kw_score.get(int(kw_a), -1.0):
+            kw_score[int(kw_a)] = npmi
+        if npmi > kw_score.get(int(kw_b), -1.0):
+            kw_score[int(kw_b)] = npmi
+    return kw_score
+
+
+def _rank_and_cap_kws(
+    kw_ids: List[int],
+    phrase_id_set: set,
+    global_chunk_df: Dict[int, int],
+    prior_kw_npmi: Dict[int, float],
+    prior_kw_seen: set,
+    n: int,
+) -> List[int]:
+    """Direction-3 top-N cap: rank kws by their max participating npmi.
+
+    Sort keys (all ASC; ``(bool, negated_score)`` yields DESC semantics):
+
+      1. is_new (0=new, 1=seen) — Q1: new kws always win, so cross-batch
+         connections stay discoverable.
+      2. neg_npmi — DESC by prior participating npmi; kws with no prior
+         evidence fall back to ``_BATCHED_UNKNOWN_KW_PRIOR``.
+      3. is_phrase (0=phrase, 1=not) — multi-char learned phrases first.
+      4. chunk_df ASC — rarer kws first (tiebreaker).
+      5. kw_id ASC — deterministic final tiebreaker.
+    """
+    if len(kw_ids) <= n:
+        return kw_ids
+
+    def _key(k):
+        is_new = 0 if k not in prior_kw_seen else 1
+        neg_score = -prior_kw_npmi.get(k, _BATCHED_UNKNOWN_KW_PRIOR)
+        is_phrase = 0 if k in phrase_id_set else 1
+        df = global_chunk_df.get(k, 0)
+        return (is_new, neg_score, is_phrase, df, k)
+
+    return sorted(kw_ids, key=_key)[:n]
+
+
+def _run_batched_pipeline(
+    conn,
+    *,
+    scope_id: int,
+    docs: List[tuple],
+    total_scanned_chunks: int,
+    batch_target_chunks: int,
+    top_n_kw: int,
+    max_ngram_n: int,
+    ngram_iters: int,
+    interner: "IdInterner",
+    auto_dict: Dict[str, dict],
+    stats: "BuildStats",
+    now: str,
+    on_event: Optional[Callable[[dict], None]] = None,
+) -> None:
+    """Batched build pipeline — produces the same output state as the
+    single-pass Phase A/B + Pass 1.5 + Pass 2 block.
+
+    Populates ``_build_chunk_kws`` (doc_id, chunk_id, kw_id triples),
+    ``keyword_docs``, ``heading_docs``, ``docs.n_chunks_with_kw``,
+    ``docs`` metadata, ``auto_ngram_dict`` (via count-add UPSERT), mutates
+    ``auto_dict`` in place, and updates the relevant ``stats`` counters.
+    Pair aggregation (``_finalize_pairs_from_temp``) + keyword_stats /
+    scope_stats refresh run in the caller after this returns, reading the
+    triples this function staged.
+    """
+    def _emit(phase: str, **fields) -> None:
+        if on_event is None:
+            return
+        payload = {"phase": phase}
+        payload.update(fields)
+        try:
+            on_event(payload)
+        except Exception:
+            pass
+
+    # Cross-batch persistent TEMP TABLE for pair aggregation (Q9). The
+    # single-pass path creates this inside Pass 2; the batched path owns
+    # it here. Clear in case of a prior aborted run on a reused conn.
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _build_chunk_kws ("
+        "  doc_id INTEGER NOT NULL, "
+        "  chunk_id INTEGER NOT NULL, "
+        "  kw_id INTEGER NOT NULL"
+        ")"
+    )
+    conn.execute("DELETE FROM _build_chunk_kws")
+
+    prior_dict_size = len(auto_dict)
+    # Persist any seed / pre-existing dict entries up front so a phrase that
+    # never re-detects in a later batch still lands in auto_ngram_dict.
+    if auto_dict:
+        _persist_auto_dict(conn, scope_id, auto_dict.values(), now)
+
+    batches = _pack_batches_by_docs(docs, batch_target_chunks)
+    n_batches = len(batches)
+    _emit(
+        "materialise_start",
+        total_docs=len(docs),
+        total_chunks=total_scanned_chunks,
+    )
+
+    n_chunks_total = 0
+    kw_docs_rows: List[Tuple[int, int, int, int, int]] = []
+    TRIPLES_FLUSH = 100_000
+
+    for bi, batch in enumerate(batches):
+        _emit(
+            "batch_start",
+            batch=bi + 1,
+            total=n_batches,
+            batch_files=len(batch),
+        )
+        _emit(
+            "ngram_iter_start",
+            iter=1, iters=1,
+            chunks=total_scanned_chunks,
+            phrases=len(auto_dict),
+        )
+
+        # 1. First-tokenize each chunk with the current accumulated dict.
+        jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
+        phrase_set = set(auto_dict.keys())
+        batch_chunk_meta: List[Tuple[int, int, str, bool]] = []
+        line_tokens_for_detect: List[List[str]] = []
+        for entry in batch:
+            doc_id, rel_path, path, is_md, chunks = entry[:5]
+            for chunk in chunks:
+                if not chunk.text.strip():
+                    continue
+                toks = _tokenise_chunk(
+                    chunk.text, jieba_tok, phrase_set, max_ngram_n
+                )
+                batch_chunk_meta.append(
+                    (doc_id, chunk.chunk_id, chunk.text, is_md)
+                )
+                if toks:
+                    line_tokens_for_detect.append(toks)
+
+        # 2/3. Detect phrases for this batch, UPSERT-add into auto_dict + DB.
+        new_phrases = detect_ngram_phrases(
+            line_tokens_for_detect, max_n=max_ngram_n, conn=conn,
+        )
+        del line_tokens_for_detect
+        added_any = False
+        for pdata in new_phrases:
+            ph = pdata["phrase"]
+            if ph not in auto_dict:
+                auto_dict[ph] = dict(pdata)
+                added_any = True
+            else:
+                auto_dict[ph]["count"] = (
+                    int(auto_dict[ph].get("count", 0)) + int(pdata["count"])
+                )
+        # Count-only merge into auto_ngram_dict (Q3): existing rows keep
+        # first-seen npmi/entropy, only count accumulates.
+        if new_phrases:
+            merge_rows = [
+                (scope_id, e["phrase"], int(e["n"]), int(e["count"]),
+                 float(e["npmi"]), float(e["branch_ent"]), now)
+                for e in new_phrases
+            ]
+            conn.executemany(
+                """
+                INSERT INTO auto_ngram_dict
+                    (scope_id, phrase, n, count, npmi, branch_ent, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_id, phrase) DO UPDATE SET
+                    count = count + excluded.count,
+                    updated_at = excluded.updated_at
+                """,
+                merge_rows,
+            )
+
+        # 4. Re-tokenize with updated dict (PR-4 pattern, bit-exact det.).
+        if added_any:
+            jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
+            phrase_set = set(auto_dict.keys())
+        chunk_tokens: Dict[Tuple[int, int], List[str]] = {}
+        for doc_id, chunk_id, text, _is_md in batch_chunk_meta:
+            chunk_tokens[(doc_id, chunk_id)] = _tokenise_chunk(
+                text, jieba_tok, phrase_set, max_ngram_n
+            )
+
+        batch_n_chunks = len(batch_chunk_meta)
+        n_chunks_total += batch_n_chunks
+
+        # 5. Per-batch stopwords derived from this batch's tokens.
+        stopwords = _derive_scope_stopword_candidates(chunk_tokens)
+        _emit(
+            "stopword_derived",
+            count=len(stopwords),
+            chars=sorted(stopwords),
+            threshold=STOPWORD_DF_THRESHOLD,
+            batch=bi + 1,
+        )
+
+        # Intern all kw ids for this batch in one shot.
+        all_kws: set = set()
+        for toks in chunk_tokens.values():
+            if toks:
+                all_kws.update(_keywords_from_tokens(toks).keys())
+        kw_id_map = interner.kw_ids(sorted(all_kws)) if all_kws else {}
+
+        # 6/7. Prior evidence for direction-3 ranking (from PRIOR batches).
+        global_chunk_df: Dict[int, int] = {}
+        prior_kw_seen: set = set()
+        for r in conn.execute(
+            "SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?",
+            (scope_id,),
+        ):
+            global_chunk_df[int(r[0])] = int(r[1])
+            prior_kw_seen.add(int(r[0]))
+        n_chunks_prior = n_chunks_total - batch_n_chunks
+        prior_kw_npmi = _compute_prior_kw_scores(
+            conn, scope_id, n_chunks_prior,
+        )
+        phrase_id_set: set = set()
+        for ph in auto_dict.keys():
+            kid = kw_id_map.get(ph)
+            if kid is not None and len(ph) > 1:
+                phrase_id_set.add(kid)
+
+        # 8. Per-chunk: kw extraction, 3b filter, top-N cap, dump triples,
+        #    accumulate per-doc kw_counts for keyword_docs.
+        per_doc_agg: Dict[int, Dict[int, Tuple[int, int]]] = defaultdict(dict)
+        per_doc_n_chunks_with_kw: Counter = Counter()
+        docs_in_batch: Dict[int, tuple] = {}
+        for entry in batch:
+            docs_in_batch[int(entry[0])] = entry
+        triples_buf: List[Tuple[int, int, int]] = []
+        for (doc_id, chunk_id), toks in chunk_tokens.items():
+            if not toks:
+                continue
+            kw_counts = _keywords_from_tokens(toks)
+            if not kw_counts:
+                continue
+            per_doc_n_chunks_with_kw[doc_id] += 1
+            agg = per_doc_agg[doc_id]
+            for kw, occ in kw_counts.items():
+                kid = kw_id_map[kw]
+                prev_occ, prev_chunks = agg.get(kid, (0, 0))
+                agg[kid] = (prev_occ + int(occ), prev_chunks + 1)
+            # Pair enumeration uses the 3b-filtered + top-N-capped set.
+            pair_kws = _filter_chunk_kws_for_pairs(
+                list(kw_counts.keys()), stopword_candidates=stopwords,
+            )
+            if pair_kws:
+                pids = list({kw_id_map[k] for k in pair_kws})
+                capped = _rank_and_cap_kws(
+                    pids, phrase_id_set, global_chunk_df,
+                    prior_kw_npmi, prior_kw_seen, top_n_kw,
+                )
+                for kid in capped:
+                    triples_buf.append((doc_id, chunk_id, kid))
+                    if len(triples_buf) >= TRIPLES_FLUSH:
+                        conn.executemany(
+                            "INSERT INTO _build_chunk_kws "
+                            "(doc_id, chunk_id, kw_id) VALUES (?, ?, ?)",
+                            triples_buf,
+                        )
+                        triples_buf.clear()
+        if triples_buf:
+            conn.executemany(
+                "INSERT INTO _build_chunk_kws (doc_id, chunk_id, kw_id) "
+                "VALUES (?, ?, ?)",
+                triples_buf,
+            )
+            triples_buf.clear()
+
+        # 9. keyword_docs UPSERT-add + heading_docs + docs metadata.
+        for doc_id, entry in docs_in_batch.items():
+            _, rel_path, path, is_md, chunks = entry[:5]
+            _, st_size, st_mtime, new_hash = entry[5:]
+            agg = per_doc_agg.get(doc_id, {})
+            for kid, (occ_sum, chunk_cnt) in agg.items():
+                kw_docs_rows.append(
+                    (scope_id, kid, doc_id, occ_sum, chunk_cnt)
+                )
+            n_chunks_with_kw_for_doc = int(per_doc_n_chunks_with_kw.get(doc_id, 0))
+            conn.execute(
+                "UPDATE docs SET n_chunks_with_kw = ? WHERE id = ?",
+                (n_chunks_with_kw_for_doc, int(doc_id)),
+            )
+            if agg:
+                stats.files_indexed += 1
+            else:
+                stats.files_skipped += 1
+                stats.bump_reason("no_keywords")
+
+            structure = _load_structure(path)
+            if structure is not None and structure.chapters:
+                head_rows = []
+                for chapter in structure.chapters:
+                    heading_path_key = " > ".join(chapter.heading_path)
+                    head_rows.append(
+                        (doc_id, heading_path_key, chapter.chapter_id,
+                         int(chapter.start_line), int(chapter.end_line), now)
+                    )
+                if head_rows:
+                    conn.executemany(
+                        """
+                        INSERT INTO heading_docs
+                            (doc_id, heading_path, chapter_id,
+                             start_line, end_line, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(doc_id, heading_path, chapter_id)
+                        DO UPDATE SET
+                            start_line = excluded.start_line,
+                            end_line = excluded.end_line,
+                            updated_at = excluded.updated_at
+                        """,
+                        head_rows,
+                    )
+                    stats.heading_docs_written += len(head_rows)
+                    stats.md_files_indexed += 1
+
+            _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
+
+        # Flush this batch's keyword_docs rows so peak Python heap stays
+        # bounded by one batch instead of the whole corpus.
+        if kw_docs_rows:
+            conn.executemany(
+                """
+                INSERT INTO keyword_docs
+                    (scope_id, kw_id, doc_id, occurrence_count, chunk_count)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(kw_id, doc_id) DO UPDATE SET
+                    occurrence_count = occurrence_count + excluded.occurrence_count,
+                    chunk_count = chunk_count + excluded.chunk_count
+                """,
+                kw_docs_rows,
+            )
+            kw_docs_rows.clear()
+
+        # Refresh keyword_stats deltas from this batch so the NEXT batch's
+        # direction-3 ranking sees accumulated chunk_df / prior evidence.
+        conn.execute(
+            "DELETE FROM keyword_stats WHERE scope_id = ?", (scope_id,)
+        )
+        conn.execute(
+            """
+            INSERT INTO keyword_stats
+                (scope_id, kw_id, chunk_df, doc_df,
+                 total_occurrences, updated_at)
+            SELECT scope_id, kw_id,
+                   COALESCE(SUM(chunk_count), 0) AS chunk_df,
+                   COUNT(*) AS doc_df,
+                   COALESCE(SUM(occurrence_count), 0) AS total_occ,
+                   ?
+            FROM keyword_docs
+            WHERE scope_id = ?
+            GROUP BY scope_id, kw_id
+            """,
+            (now, scope_id),
+        )
+        conn.commit()
+
+        _emit(
+            "ngram_iter_end",
+            iter=1, iters=1,
+            chunks=batch_n_chunks,
+            phrases=len(auto_dict),
+        )
+        _emit(
+            "batch_end",
+            batch=bi + 1,
+            total=n_batches,
+            batch_files=len(batch),
+            batch_chunks=batch_n_chunks,
+            new_phrases_this_batch=len(new_phrases),
+            dict_size=len(auto_dict),
+        )
+        del chunk_tokens, kw_id_map, global_chunk_df, prior_kw_seen
+        del prior_kw_npmi, phrase_id_set, per_doc_agg, batch_chunk_meta
+
+    # ngram stats: batched does one detection iter per batch; report 1
+    # conceptually for the whole run.
+    stats.ngram_iters_run = 1 if n_batches else 0
+    stats.ngram_phrases_written = len(auto_dict)
+    stats.ngram_dict_size = len(auto_dict)
+    stats.ngram_dict_added = max(0, len(auto_dict) - prior_dict_size)
+    stats.keyword_chunks_written = int(conn.execute(
+        "SELECT COUNT(*) FROM keyword_docs WHERE scope_id = ?",
+        (scope_id,),
+    ).fetchone()[0])
+    _emit(
+        "materialise_end",
+        total_docs=len(docs),
+        n_batches=n_batches,
+        n_chunks=n_chunks_total,
+    )
+
+
 def build_graph_index(
     scope: str,
     *,
@@ -1832,6 +2333,8 @@ def build_graph_index(
                                    ".mypy_cache", ".pytest_cache"),
     mode: str = "rebuild",
     refresh_ngram: str = "replace",
+    batch_chunks: int = 0,
+    top_n_kw: Optional[int] = None,
     replace: Optional[bool] = None,
     ngram_iters: int = DEFAULT_NGRAM_ITERS,
     max_ngram_n: int = DEFAULT_MAX_NGRAM_N,
@@ -1927,6 +2430,22 @@ def build_graph_index(
             "Use `grga index forget --all` followed by `grga index build`, "
             "or run `grga index rebuild --refresh-ngram=replace`."
         )
+
+    # Batched build (batched_build_2026_07_16) restrictions. First
+    # integration only supports rebuild + refresh_ngram="replace" — the
+    # exact configuration the M10 experiment validated. Incremental
+    # support (Q1 grow-and-refine batches) is a follow-up.
+    if batch_chunks > 0:
+        if mode != "rebuild":
+            raise ValueError(
+                "batch_chunks > 0 requires mode='rebuild' "
+                "(batched build is a rebuild-only path currently; "
+                "incremental support TBD)"
+            )
+        if refresh_ngram != "replace":
+            raise ValueError(
+                "batch_chunks > 0 requires refresh_ngram='replace'"
+            )
 
     from grga.deep_search import DEFAULT_DB_PATH
 
@@ -2103,535 +2622,593 @@ def build_graph_index(
         )
 
         # ------------------------------------------------------------------
-        # Pass 1: n-gram dictionary refinement.
-        # rebuild + append/replace: multi-iter detection as before.
-        # rebuild + never:          skip detection.
-        # build + append:           single detection iter on changed docs.
-        # build + never:            skip detection.
-        #
-        # Two-phase design (2026-07-13, fixes "detected phrases invisible
-        # in same-build keyword_stats"):
-        #
-        #   Phase A — detection loop: each iteration tokenises with the
-        #     current ``auto_dict``, feeds ``line_token_lists`` (flat,
-        #     detection-only view) into ``detect_ngram_phrases``, and merges
-        #     the result back into ``auto_dict``. ``chunk_tokens`` is NOT
-        #     materialised here — Pass 2 would use a stale copy anyway once
-        #     the next iteration or the final tokenise runs. Halving peak
-        #     memory: only one token view lives at a time.
-        #
-        #   Phase B — final tokenisation: once ``auto_dict`` is frozen for
-        #     this build, tokenise every chunk exactly once with the
-        #     finalised dict. The resulting ``chunk_tokens`` feeds Pass 1.5
-        #     (scope stopword derivation) and Pass 2 (keyword_docs /
-        #     keyword_pairs). This is what makes "苍坤上人" queryable in
-        #     the same ``build`` that discovered it — previously the
-        #     compound was persisted to ``auto_ngram_dict`` but never
-        #     applied to ``chunk_tokens``, so ``keyword_stats`` only saw
-        #     "苍坤" and ``related 苍坤上人`` returned empty.
-        #
-        # Cost accounting: same total work as before. Phase A does N
-        # tokenisation passes for N detection iters (unchanged). Phase B
-        # adds one tokenisation pass that used to be the last iter's
-        # discarded work. The multi-iter convergence promise (final dict
-        # is fixed-point of "detect from tokens produced by this dict") is
-        # preserved for ``rebuild``: any phrases emergent only after
-        # Phase B's re-tokenisation are picked up on the next build, same
-        # as any pre-existing iter's residual.
+        # Dispatch: batched pipeline (batched_build_2026_07_16) if
+        # ``batch_chunks > 0``, else the default single-pass path.
+        # The batched pipeline replaces Pass 1 (Phase A + B), Pass 1.5
+        # (stopword derivation), and Pass 2 (chunk-kw materialisation +
+        # keyword_docs / heading_docs / docs metadata + _build_chunk_kws
+        # staging). Downstream (Pass 3 = ``_finalize_pairs_from_temp``,
+        # scope_stats stamp, toolchain fingerprint) is shared.
         # ------------------------------------------------------------------
-        prior_dict_size = int(conn.execute(
-            "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ?",
-            (scope_id,),
-        ).fetchone()[0])
-
-        # Seed the working dict. ``refresh_ngram="replace"`` on rebuild
-        # already dropped the DB rows above, so this loads empty.
-        auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_id)
-
-        # v10 optional cold-start (plan-2026-07-14 §6): borrow a sibling
-        # scope's auto_ngram_dict as a starting vocabulary. Typical use
-        # after ``grga index import`` when the target scope has no local
-        # phrases yet; layers the seed *under* the target's own entries so
-        # the target always wins on collisions (its own npmi/count are
-        # more accurate for its corpus).
-        if seed_ngram_from:
-            seed_dict = _load_seed_auto_dict(
-                conn, scope_id, seed_ngram_from,
-            )
-            if seed_dict:
-                seeded = 0
-                for phrase, entry in seed_dict.items():
-                    if phrase not in auto_dict:
-                        auto_dict[phrase] = entry
-                        seeded += 1
-                _emit(
-                    "seed_ngram_loaded",
-                    from_scope=seed_ngram_from,
-                    phrases_seeded=seeded,
-                    phrases_skipped=len(seed_dict) - seeded,
+        if batch_chunks > 0:
+            # ``refresh_ngram="replace"`` already wiped the scope's
+            # auto_ngram_dict rows above, so start with an empty working
+            # dict (seed_ngram_from can layer under the empty dict).
+            auto_dict: Dict[str, dict] = {}
+            if seed_ngram_from:
+                seed_dict = _load_seed_auto_dict(
+                    conn, scope_id, seed_ngram_from,
                 )
-
-        if mode == "rebuild" and refresh_ngram in ("append", "replace"):
-            iters = max(1, int(ngram_iters))
-        elif mode == "build" and refresh_ngram == "append":
-            iters = 1
-        else:
-            # ``refresh_ngram="never"``: skip detection loop entirely.
-            iters = 0
-
-        run_detection = refresh_ngram in ("append", "replace")
-
-        # Track whether the last Phase A iteration's ``jieba_tok`` /
-        # ``phrase_set`` are still valid for Phase B. They are valid iff
-        # the *last* detection iteration added zero new phrases (or if
-        # detection is off entirely, in which case Phase A never mutated
-        # ``auto_dict``). Saves one ~1 s ``jieba.Tokenizer`` init on
-        # steady-state builds where the dict has converged.
-        phase_a_tok = None  # type: ignore[assignment]
-        phase_a_phrase_set: Optional[set] = None
-        last_iter_added = 0
-
-        # Phase A: detection-only iterations. Each iter tokenises + detects
-        # without keeping the per-chunk view; only the flat token list is
-        # retained for the detector.
-        for iteration in range(iters):
-            _emit(
-                "ngram_iter_start",
-                iter=iteration + 1,
-                iters=iters,
-                chunks=total_scanned_chunks,
-                phrases=len(auto_dict),
-            )
-            jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
-            phrase_set = set(auto_dict.keys())
-            # PR-4: stream tokens to ``detect_ngram_phrases`` instead of
-            # materialising a corpus-wide List[List[str]]. Keeps Python
-            # heap flat during iter 1 / iter 2 (previously the ~360 MB
-            # ``line_token_lists`` floor on M-corpus, per PR-4 SPEC §2).
-            # Empty-chunk skip + throttled progress emit preserved.
-            _chunks_done_holder = [0]
-
-            def _stream_iter_tokens(
-                _iteration=iteration, _iters=iters,
-                _jt=jieba_tok, _ps=phrase_set,
-            ):
-                for entry in docs:
-                    doc_id, rel_path, path, is_md, chunks = entry[:5]
-                    for chunk in chunks:
-                        toks = _tokenise_chunk(
-                            chunk.text, _jt, _ps, max_ngram_n
-                        )
-                        _chunks_done_holder[0] += 1
-                        if (
-                            _chunks_done_holder[0] % _PROGRESS_TICK == 0
-                            or _chunks_done_holder[0] == total_scanned_chunks
-                        ):
-                            _emit(
-                                "ngram_iter_advance",
-                                iter=_iteration + 1,
-                                iters=_iters,
-                                current=_chunks_done_holder[0],
-                                total=total_scanned_chunks,
-                            )
-                        # Yield every chunk (including empty toks): the
-                        # detector's inner loops (``range(len(toks))``) are
-                        # no-ops on empty, so aggregate results are
-                        # unchanged, but this keeps ``n_lines_hint``
-                        # (= total_scanned_chunks) matching the enumerate
-                        # count inside the detector — otherwise the
-                        # ``unigram/window_advance`` totals over-report.
-                        yield toks
-            if run_detection:
-                # Forward detector internal phases to the caller so long
-                # scopes don't appear frozen between iter_end and the next
-                # iter_start. The detector's own phase name goes into
-                # ``stage`` (not ``phase``) to avoid colliding with the
-                # top-level event ``phase`` slot.
-                def _detect_progress(stage: str, info: dict,
-                                     _it=iteration + 1, _n=iters) -> None:
+                if seed_dict:
+                    seeded = 0
+                    for phrase, entry in seed_dict.items():
+                        if phrase not in auto_dict:
+                            auto_dict[phrase] = entry
+                            seeded += 1
                     _emit(
-                        "ngram_detect",
-                        iter=_it,
-                        iters=_n,
-                        stage=stage,
-                        **info,
+                        "seed_ngram_loaded",
+                        from_scope=seed_ngram_from,
+                        phrases_seeded=seeded,
+                        phrases_skipped=len(seed_dict) - seeded,
                     )
-                    # Plain-text fallback (rich bar off): announce the two
-                    # slow analysis stages so the terminal doesn't look
-                    # frozen after tokenisation finishes.
-                    if progress is not None and stage in (
-                        "window_start", "filter_start"
-                    ):
-                        _lbl = {
-                            "window_start": "枚举 n-gram 窗口",
-                            "filter_start": "过滤候选短语",
-                        }[stage]
-                        progress(f"ngram iter {_it}/{_n}: {_lbl}…")
-                detected = detect_ngram_phrases(
-                    _stream_iter_tokens(), max_n=max_ngram_n,
-                    on_progress=_detect_progress,
-                    conn=conn,
-                    n_lines_hint=total_scanned_chunks,
+            resolved_top_n = _resolve_top_n_kw(top_n_kw)
+            _run_batched_pipeline(
+                conn,
+                scope_id=scope_id,
+                docs=docs,
+                total_scanned_chunks=total_scanned_chunks,
+                batch_target_chunks=int(batch_chunks),
+                top_n_kw=resolved_top_n,
+                max_ngram_n=max_ngram_n,
+                ngram_iters=max(1, int(ngram_iters)),
+                interner=interner,
+                auto_dict=auto_dict,
+                stats=stats,
+                now=now,
+                on_event=on_event,
+            )
+            # Metadata-only refresh (touch / stable rga output) — the
+            # single-pass path does this inline after Pass 2; batched does
+            # it here to stay parity.
+            for doc_id, st_size, st_mtime, new_hash in metadata_only_updates:
+                _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
+            # Remove docs that disappeared from disk. Not currently exercised
+            # (batched is rebuild-only in this integration), but symmetric
+            # with the single-pass tail so a future incremental+batched path
+            # inherits the correct semantics for free.
+            if removed_doc_ids:
+                _delete_doc_index_rows(conn, removed_doc_ids)
+        else:
+            # ------------------------------------------------------------------
+            # Pass 1: n-gram dictionary refinement.
+            # rebuild + append/replace: multi-iter detection as before.
+            # rebuild + never:          skip detection.
+            # build + append:           single detection iter on changed docs.
+            # build + never:            skip detection.
+            #
+            # Two-phase design (2026-07-13, fixes "detected phrases invisible
+            # in same-build keyword_stats"):
+            #
+            #   Phase A — detection loop: each iteration tokenises with the
+            #     current ``auto_dict``, feeds ``line_token_lists`` (flat,
+            #     detection-only view) into ``detect_ngram_phrases``, and merges
+            #     the result back into ``auto_dict``. ``chunk_tokens`` is NOT
+            #     materialised here — Pass 2 would use a stale copy anyway once
+            #     the next iteration or the final tokenise runs. Halving peak
+            #     memory: only one token view lives at a time.
+            #
+            #   Phase B — final tokenisation: once ``auto_dict`` is frozen for
+            #     this build, tokenise every chunk exactly once with the
+            #     finalised dict. The resulting ``chunk_tokens`` feeds Pass 1.5
+            #     (scope stopword derivation) and Pass 2 (keyword_docs /
+            #     keyword_pairs). This is what makes "苍坤上人" queryable in
+            #     the same ``build`` that discovered it — previously the
+            #     compound was persisted to ``auto_ngram_dict`` but never
+            #     applied to ``chunk_tokens``, so ``keyword_stats`` only saw
+            #     "苍坤" and ``related 苍坤上人`` returned empty.
+            #
+            # Cost accounting: same total work as before. Phase A does N
+            # tokenisation passes for N detection iters (unchanged). Phase B
+            # adds one tokenisation pass that used to be the last iter's
+            # discarded work. The multi-iter convergence promise (final dict
+            # is fixed-point of "detect from tokens produced by this dict") is
+            # preserved for ``rebuild``: any phrases emergent only after
+            # Phase B's re-tokenisation are picked up on the next build, same
+            # as any pre-existing iter's residual.
+            # ------------------------------------------------------------------
+            prior_dict_size = int(conn.execute(
+                "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ?",
+                (scope_id,),
+            ).fetchone()[0])
+
+            # Seed the working dict. ``refresh_ngram="replace"`` on rebuild
+            # already dropped the DB rows above, so this loads empty.
+            auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_id)
+
+            # v10 optional cold-start (plan-2026-07-14 §6): borrow a sibling
+            # scope's auto_ngram_dict as a starting vocabulary. Typical use
+            # after ``grga index import`` when the target scope has no local
+            # phrases yet; layers the seed *under* the target's own entries so
+            # the target always wins on collisions (its own npmi/count are
+            # more accurate for its corpus).
+            if seed_ngram_from:
+                seed_dict = _load_seed_auto_dict(
+                    conn, scope_id, seed_ngram_from,
                 )
-                last_iter_added = 0
-                for d_entry in detected:
-                    if d_entry["phrase"] not in auto_dict:
-                        last_iter_added += 1
-                    auto_dict[d_entry["phrase"]] = d_entry
+                if seed_dict:
+                    seeded = 0
+                    for phrase, entry in seed_dict.items():
+                        if phrase not in auto_dict:
+                            auto_dict[phrase] = entry
+                            seeded += 1
+                    _emit(
+                        "seed_ngram_loaded",
+                        from_scope=seed_ngram_from,
+                        phrases_seeded=seeded,
+                        phrases_skipped=len(seed_dict) - seeded,
+                    )
+
+            if mode == "rebuild" and refresh_ngram in ("append", "replace"):
+                iters = max(1, int(ngram_iters))
+            elif mode == "build" and refresh_ngram == "append":
+                iters = 1
             else:
-                # Unreachable in practice: ``iters > 0`` iff
-                # ``refresh_ngram in ('append','replace')``, and
-                # ``run_detection`` is set by the same condition. Left as
-                # a defensive no-op with a clear invariant note so a
-                # future ``refresh_ngram`` mode that decouples the two
-                # doesn't silently skip generator consumption and lose
-                # ``ngram_iter_advance`` emits.
-                last_iter_added = 0
-                # Unconditional raise (not ``assert``) so the invariant
-                # survives ``python -O`` — under -O an assert is stripped and
-                # this branch would silently no-op (generator never consumed,
-                # ngram_iter_advance emits lost, chunks_done stuck at 0).
-                raise AssertionError(
-                    "invariant broken: iters > 0 implies run_detection; "
-                    "see build.py Phase A comments"
+                # ``refresh_ngram="never"``: skip detection loop entirely.
+                iters = 0
+
+            run_detection = refresh_ngram in ("append", "replace")
+
+            # Track whether the last Phase A iteration's ``jieba_tok`` /
+            # ``phrase_set`` are still valid for Phase B. They are valid iff
+            # the *last* detection iteration added zero new phrases (or if
+            # detection is off entirely, in which case Phase A never mutated
+            # ``auto_dict``). Saves one ~1 s ``jieba.Tokenizer`` init on
+            # steady-state builds where the dict has converged.
+            phase_a_tok = None  # type: ignore[assignment]
+            phase_a_phrase_set: Optional[set] = None
+            last_iter_added = 0
+
+            # Phase A: detection-only iterations. Each iter tokenises + detects
+            # without keeping the per-chunk view; only the flat token list is
+            # retained for the detector.
+            for iteration in range(iters):
+                _emit(
+                    "ngram_iter_start",
+                    iter=iteration + 1,
+                    iters=iters,
+                    chunks=total_scanned_chunks,
+                    phrases=len(auto_dict),
                 )
-            chunks_done = _chunks_done_holder[0]
-            # Remember this iteration's tokeniser state for possible Phase B
-            # reuse (only the final iteration's values survive the loop).
-            phase_a_tok = jieba_tok
-            phase_a_phrase_set = phrase_set
-            stats.ngram_iters_run = iteration + 1
+                jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
+                phrase_set = set(auto_dict.keys())
+                # PR-4: stream tokens to ``detect_ngram_phrases`` instead of
+                # materialising a corpus-wide List[List[str]]. Keeps Python
+                # heap flat during iter 1 / iter 2 (previously the ~360 MB
+                # ``line_token_lists`` floor on M-corpus, per PR-4 SPEC §2).
+                # Empty-chunk skip + throttled progress emit preserved.
+                _chunks_done_holder = [0]
+
+                def _stream_iter_tokens(
+                    _iteration=iteration, _iters=iters,
+                    _jt=jieba_tok, _ps=phrase_set,
+                ):
+                    for entry in docs:
+                        doc_id, rel_path, path, is_md, chunks = entry[:5]
+                        for chunk in chunks:
+                            toks = _tokenise_chunk(
+                                chunk.text, _jt, _ps, max_ngram_n
+                            )
+                            _chunks_done_holder[0] += 1
+                            if (
+                                _chunks_done_holder[0] % _PROGRESS_TICK == 0
+                                or _chunks_done_holder[0] == total_scanned_chunks
+                            ):
+                                _emit(
+                                    "ngram_iter_advance",
+                                    iter=_iteration + 1,
+                                    iters=_iters,
+                                    current=_chunks_done_holder[0],
+                                    total=total_scanned_chunks,
+                                )
+                            # Yield every chunk (including empty toks): the
+                            # detector's inner loops (``range(len(toks))``) are
+                            # no-ops on empty, so aggregate results are
+                            # unchanged, but this keeps ``n_lines_hint``
+                            # (= total_scanned_chunks) matching the enumerate
+                            # count inside the detector — otherwise the
+                            # ``unigram/window_advance`` totals over-report.
+                            yield toks
+                if run_detection:
+                    # Forward detector internal phases to the caller so long
+                    # scopes don't appear frozen between iter_end and the next
+                    # iter_start. The detector's own phase name goes into
+                    # ``stage`` (not ``phase``) to avoid colliding with the
+                    # top-level event ``phase`` slot.
+                    def _detect_progress(stage: str, info: dict,
+                                         _it=iteration + 1, _n=iters) -> None:
+                        _emit(
+                            "ngram_detect",
+                            iter=_it,
+                            iters=_n,
+                            stage=stage,
+                            **info,
+                        )
+                        # Plain-text fallback (rich bar off): announce the two
+                        # slow analysis stages so the terminal doesn't look
+                        # frozen after tokenisation finishes.
+                        if progress is not None and stage in (
+                            "window_start", "filter_start"
+                        ):
+                            _lbl = {
+                                "window_start": "枚举 n-gram 窗口",
+                                "filter_start": "过滤候选短语",
+                            }[stage]
+                            progress(f"ngram iter {_it}/{_n}: {_lbl}…")
+                    detected = detect_ngram_phrases(
+                        _stream_iter_tokens(), max_n=max_ngram_n,
+                        on_progress=_detect_progress,
+                        conn=conn,
+                        n_lines_hint=total_scanned_chunks,
+                    )
+                    last_iter_added = 0
+                    for d_entry in detected:
+                        if d_entry["phrase"] not in auto_dict:
+                            last_iter_added += 1
+                        auto_dict[d_entry["phrase"]] = d_entry
+                else:
+                    # Unreachable in practice: ``iters > 0`` iff
+                    # ``refresh_ngram in ('append','replace')``, and
+                    # ``run_detection`` is set by the same condition. Left as
+                    # a defensive no-op with a clear invariant note so a
+                    # future ``refresh_ngram`` mode that decouples the two
+                    # doesn't silently skip generator consumption and lose
+                    # ``ngram_iter_advance`` emits.
+                    last_iter_added = 0
+                    # Unconditional raise (not ``assert``) so the invariant
+                    # survives ``python -O`` — under -O an assert is stripped and
+                    # this branch would silently no-op (generator never consumed,
+                    # ngram_iter_advance emits lost, chunks_done stuck at 0).
+                    raise AssertionError(
+                        "invariant broken: iters > 0 implies run_detection; "
+                        "see build.py Phase A comments"
+                    )
+                chunks_done = _chunks_done_holder[0]
+                # Remember this iteration's tokeniser state for possible Phase B
+                # reuse (only the final iteration's values survive the loop).
+                phase_a_tok = jieba_tok
+                phase_a_phrase_set = phrase_set
+                stats.ngram_iters_run = iteration + 1
+                if progress is not None:
+                    progress(
+                        f"ngram iter {iteration + 1}/{iters}: "
+                        f"{len(auto_dict)} phrases"
+                    )
+                _emit(
+                    "ngram_iter_end",
+                    iter=iteration + 1,
+                    iters=iters,
+                    chunks=chunks_done,
+                    phrases=len(auto_dict),
+                )
+
+            # Phase B (PR-4 streaming): one final tokenisation with the
+            # frozen dict. Instead of materialising a per-chunk ``chunk_tokens``
+            # dict (the ~360 MB floor on M-corpus, per PR-4 SPEC §2), stream
+            # tokenised chunks through two things:
+            #   * a single-CJK-char ``chunk-df`` counter for stopword derivation
+            #   * (implicitly) Pass 2 re-tokenises on-the-fly using the same
+            #     ``jieba_tok`` + ``phrase_set`` — bit-exact by construction
+            # ``refresh_ngram="never"`` path also uses this streaming loop.
+            _emit(
+                "ngram_finalize_start",
+                phrases=len(auto_dict),
+                chunks=total_scanned_chunks,
+            )
+            # Reuse the last Phase A tokeniser when the dict converged (final
+            # iteration added nothing), else build fresh. ``iters == 0``
+            # (refresh_ngram="never") has no Phase A state, so always fresh.
+            if phase_a_tok is not None and last_iter_added == 0:
+                jieba_tok = phase_a_tok
+                phrase_set = phase_a_phrase_set
+            else:
+                jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
+                phrase_set = set(auto_dict.keys())
+            # Streaming stopword-df accumulation. Only single-CJK chars go
+            # into the counter (matches :func:`_derive_scope_stopword_candidates`).
+            stopword_chunk_df: Counter = Counter()
+            chunks_done = 0
+            for entry in docs:
+                doc_id, rel_path, path, is_md, chunks = entry[:5]
+                for chunk in chunks:
+                    toks = _tokenise_chunk(
+                        chunk.text, jieba_tok, phrase_set, max_ngram_n
+                    )
+                    seen_single_cjk = {
+                        t.casefold() for t in toks if _is_single_cjk(t)
+                    }
+                    for t in seen_single_cjk:
+                        stopword_chunk_df[t] += 1
+                    chunks_done += 1
+                    if (
+                        chunks_done % _PROGRESS_TICK == 0
+                        or chunks_done == total_scanned_chunks
+                    ):
+                        _emit(
+                            "ngram_finalize_advance",
+                            current=chunks_done,
+                            total=total_scanned_chunks,
+                        )
             if progress is not None:
                 progress(
-                    f"ngram iter {iteration + 1}/{iters}: "
-                    f"{len(auto_dict)} phrases"
+                    f"ngram finalize: {chunks_done} chunks tokenised "
+                    f"with {len(auto_dict)} phrases (streaming)"
                 )
             _emit(
-                "ngram_iter_end",
-                iter=iteration + 1,
-                iters=iters,
+                "ngram_finalize_end",
                 chunks=chunks_done,
                 phrases=len(auto_dict),
             )
+            # Persist dictionary. In ``refresh_ngram="never"`` we still call
+            # this: the dict was loaded from DB unchanged and re-persisting
+            # is a no-op (INSERT OR REPLACE on the same rows).
+            _persist_auto_dict(conn, scope_id, auto_dict.values(), now)
+            stats.ngram_phrases_written = len(auto_dict)
+            stats.ngram_dict_size = len(auto_dict)
+            stats.ngram_dict_added = max(0, len(auto_dict) - prior_dict_size)
 
-        # Phase B (PR-4 streaming): one final tokenisation with the
-        # frozen dict. Instead of materialising a per-chunk ``chunk_tokens``
-        # dict (the ~360 MB floor on M-corpus, per PR-4 SPEC §2), stream
-        # tokenised chunks through two things:
-        #   * a single-CJK-char ``chunk-df`` counter for stopword derivation
-        #   * (implicitly) Pass 2 re-tokenises on-the-fly using the same
-        #     ``jieba_tok`` + ``phrase_set`` — bit-exact by construction
-        # ``refresh_ngram="never"`` path also uses this streaming loop.
-        _emit(
-            "ngram_finalize_start",
-            phrases=len(auto_dict),
-            chunks=total_scanned_chunks,
-        )
-        # Reuse the last Phase A tokeniser when the dict converged (final
-        # iteration added nothing), else build fresh. ``iters == 0``
-        # (refresh_ngram="never") has no Phase A state, so always fresh.
-        if phase_a_tok is not None and last_iter_added == 0:
-            jieba_tok = phase_a_tok
-            phrase_set = phase_a_phrase_set
-        else:
-            jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
-            phrase_set = set(auto_dict.keys())
-        # Streaming stopword-df accumulation. Only single-CJK chars go
-        # into the counter (matches :func:`_derive_scope_stopword_candidates`).
-        stopword_chunk_df: Counter = Counter()
-        chunks_done = 0
-        for entry in docs:
-            doc_id, rel_path, path, is_md, chunks = entry[:5]
-            for chunk in chunks:
-                toks = _tokenise_chunk(
-                    chunk.text, jieba_tok, phrase_set, max_ngram_n
-                )
-                seen_single_cjk = {
-                    t.casefold() for t in toks if _is_single_cjk(t)
-                }
-                for t in seen_single_cjk:
-                    stopword_chunk_df[t] += 1
-                chunks_done += 1
-                if (
-                    chunks_done % _PROGRESS_TICK == 0
-                    or chunks_done == total_scanned_chunks
-                ):
-                    _emit(
-                        "ngram_finalize_advance",
-                        current=chunks_done,
-                        total=total_scanned_chunks,
-                    )
-        if progress is not None:
-            progress(
-                f"ngram finalize: {chunks_done} chunks tokenised "
-                f"with {len(auto_dict)} phrases (streaming)"
+            # ------------------------------------------------------------------
+            # Pass 1.5 (2026-07-13): derive scope-local stopword candidates from
+            # the tokenised corpus (3a). Single CJK chars with a high chunk-df
+            # ratio are candidates for the pair-time containment filter (3b);
+            # this set never touches keyword_stats. See :func:
+            # `_derive_scope_stopword_candidates`.
+            # ------------------------------------------------------------------
+            # PR-4: streaming variant — inputs already accumulated in
+            # ``stopword_chunk_df`` during Phase B; chunk_tokens not needed.
+            scope_stopword_candidates = _derive_scope_stopword_candidates_from_df(
+                stopword_chunk_df, chunks_done,
             )
-        _emit(
-            "ngram_finalize_end",
-            chunks=chunks_done,
-            phrases=len(auto_dict),
-        )
-        # Persist dictionary. In ``refresh_ngram="never"`` we still call
-        # this: the dict was loaded from DB unchanged and re-persisting
-        # is a no-op (INSERT OR REPLACE on the same rows).
-        _persist_auto_dict(conn, scope_id, auto_dict.values(), now)
-        stats.ngram_phrases_written = len(auto_dict)
-        stats.ngram_dict_size = len(auto_dict)
-        stats.ngram_dict_added = max(0, len(auto_dict) - prior_dict_size)
-
-        # ------------------------------------------------------------------
-        # Pass 1.5 (2026-07-13): derive scope-local stopword candidates from
-        # the tokenised corpus (3a). Single CJK chars with a high chunk-df
-        # ratio are candidates for the pair-time containment filter (3b);
-        # this set never touches keyword_stats. See :func:
-        # `_derive_scope_stopword_candidates`.
-        # ------------------------------------------------------------------
-        # PR-4: streaming variant — inputs already accumulated in
-        # ``stopword_chunk_df`` during Phase B; chunk_tokens not needed.
-        scope_stopword_candidates = _derive_scope_stopword_candidates_from_df(
-            stopword_chunk_df, chunks_done,
-        )
-        _emit(
-            "stopword_derived",
-            count=len(scope_stopword_candidates),
-            chars=sorted(scope_stopword_candidates),
-            threshold=STOPWORD_DF_THRESHOLD,
-        )
-
-        # ------------------------------------------------------------------
-        # Pass 2 (v9.1 keyword-primary): tokenise chunks in RAM and derive
-        # the doc-level inverted index (``keyword_docs``) + per-doc
-        # ``n_chunks_with_kw`` directly from ``chunk_tokens``, while staging
-        # (doc_id, chunk_id, kw_id) triples into the ``_build_chunk_kws``
-        # TEMP TABLE for pass 3's self-join. The deprecated ``chunks`` /
-        # ``keyword_chunks`` permanent tables no longer exist (dropped by
-        # v8→v9 migration); their signal is replaced by
-        # ``keyword_docs.chunk_count`` + ``docs.n_chunks_with_kw``.
-        #
-        # Pairs are NOT enumerated in Python here (that was the v9 approach
-        # whose ``pair_delta`` Counter / ``touched_pair_keys`` set ballooned
-        # to GB-scale RAM on large corpora). Instead the raw chunk-kw
-        # membership goes to the TEMP TABLE and SQLite's hash-aggregate does
-        # the pair counting + min_pair_count filter in one pass (design D6
-        # accumulate semantics preserved via UPSERT-add). See
-        # :func:`_finalize_pairs_from_temp`.
-        # ------------------------------------------------------------------
-        if mode == "build" and docs:
-            _delete_doc_index_rows_keep_docs(
-                conn, [entry[0] for entry in docs]
-            )
-
-        _emit(
-            "materialise_start",
-            total_docs=len(docs),
-            total_chunks=total_scanned_chunks,
-        )
-        # Deferred UPSERTs collected across pass 2; flushed after the loop.
-        kw_docs_rows: List[Tuple[int, int, int, int, int]] = []
-        # v9.1 (2026-07-13): pair aggregation returns to SQL self-join over
-        # a build-local TEMP TABLE. Pre-v9 used a persistent ``keyword_chunks``
-        # table; v9 dropped it and moved pair aggregation into a Python
-        # ``pair_delta`` Counter + ``touched_pair_keys`` set. That caused two
-        # regressions on large corpora (see ``_finalize_pairs_from_temp``):
-        #   * ``touched_pair_keys`` grew unbounded (2-3 GB on a 22 MB novel).
-        #   * every pair (incl. count=1) got UPSERTed into keyword_pairs
-        #     BEFORE the min_pair_count filter — GB-scale disk churn.
-        # The TEMP TABLE keeps the v9 read-path shape (no permanent
-        # ``keyword_chunks`` asset) while restoring SQLite's hash-aggregate
-        # to compute + filter pair counts in one pass. Dropped at end.
-        conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS _build_chunk_kws ("
-            "  doc_id INTEGER NOT NULL, "
-            "  chunk_id INTEGER NOT NULL, "
-            "  kw_id INTEGER NOT NULL"
-            ")"
-        )
-        conn.execute("DELETE FROM _build_chunk_kws")  # in case of prior aborted run
-        chunk_kw_temp_batch: List[Tuple[int, int, int]] = []
-        CHUNK_KW_TEMP_FLUSH = 200_000  # rows per batch INSERT
-        touched_kw_ids: set = set()
-        # Chunk-level progress throttling: emit at most ~500 updates across
-        # the whole materialise phase, so a corpus with millions of chunks
-        # does not drown the CLI progress bar in redraw work. Falls back to
-        # "every chunk" for tiny corpora so short builds still animate.
-        chunks_done_total = 0
-        chunk_progress_step = max(1, total_scanned_chunks // 500) if total_scanned_chunks else 1
-        next_progress_emit = chunk_progress_step
-        for doc_index, entry in enumerate(docs, start=1):
-            doc_id, rel_path, path, is_md, chunks = entry[:5]
-            _, st_size, st_mtime, new_hash = entry[5:]
-            per_chunk_kw: List[Tuple[int, Dict[str, int]]] = []
-            file_distinct_kws: set = set()
-            for chunk in chunks:
-                # PR-4: re-tokenise on the fly with the finalised tokeniser
-                # (same ``jieba_tok`` + ``phrase_set`` as Phase B; jieba
-                # tokenisation is deterministic, so this is bit-exact
-                # against the pre-refactor ``chunk_tokens.get(...)`` read).
-                toks = _tokenise_chunk(
-                    chunk.text, jieba_tok, phrase_set, max_ngram_n
-                )
-                kw_counts = _keywords_from_tokens(toks) if toks else Counter()
-                if kw_counts:
-                    per_chunk_kw.append((chunk.chunk_id, kw_counts))
-                    file_distinct_kws.update(kw_counts.keys())
-                else:
-                    per_chunk_kw.append((chunk.chunk_id, {}))
-            kw_id_map = (
-                interner.kw_ids(sorted(file_distinct_kws))
-                if file_distinct_kws else {}
-            )
-
-            # Aggregate to (kw_id, doc_id) → (occurrence_count, chunk_count)
-            # and stage (doc_id, chunk_id, kw_id) rows into the TEMP TABLE.
-            per_doc_kw_agg: Dict[int, Tuple[int, int]] = {}
-            n_chunks_with_kw_for_doc = 0
-            file_had_keywords = False
-            for _chunk_id, kw_counts in per_chunk_kw:
-                chunks_done_total += 1
-                if kw_counts:
-                    file_had_keywords = True
-                    n_chunks_with_kw_for_doc += 1
-                    # Per-doc aggregation (raw kw_counts — keyword_stats is
-                    # never gated by the 3a/3b filter, only pair enumeration is).
-                    for kw, occ in kw_counts.items():
-                        kid = kw_id_map[kw]
-                        prev_occ, prev_chunks = per_doc_kw_agg.get(kid, (0, 0))
-                        per_doc_kw_agg[kid] = (prev_occ + int(occ), prev_chunks + 1)
-                    # 3b containment filter over kw *strings*, then map to
-                    # ids and stage into the TEMP TABLE for the pass-3
-                    # self-join. Substring-contained candidates like 者 vs
-                    # 面壁者 are dropped from *pair* eligibility only.
-                    pair_kws = _filter_chunk_kws_for_pairs(
-                        list(kw_counts.keys()),
-                        stopword_candidates=scope_stopword_candidates,
-                    )
-                    if pair_kws:
-                        distinct_ids = {kw_id_map[k] for k in pair_kws}
-                        for kid in distinct_ids:
-                            chunk_kw_temp_batch.append((doc_id, _chunk_id, kid))
-                        if len(chunk_kw_temp_batch) >= CHUNK_KW_TEMP_FLUSH:
-                            conn.executemany(
-                                "INSERT INTO _build_chunk_kws "
-                                "(doc_id, chunk_id, kw_id) VALUES (?, ?, ?)",
-                                chunk_kw_temp_batch,
-                            )
-                            chunk_kw_temp_batch.clear()
-
-                # Chunk-level progress: throttle emits. Counter increments
-                # for *every* chunk (including empty / no-keyword ones) so
-                # the completion guard reaches total_scanned_chunks — the
-                # doc-side denominator counts split_chunks output uniformly.
-                if chunks_done_total >= next_progress_emit or chunks_done_total == total_scanned_chunks:
-                    _emit(
-                        "materialise_advance",
-                        current=doc_index,
-                        total=len(docs),
-                        chunks_done=chunks_done_total,
-                        total_chunks=total_scanned_chunks,
-                        path=str(path),
-                    )
-                    next_progress_emit = chunks_done_total + chunk_progress_step
-
-            for kid, (occ_sum, chunk_cnt) in per_doc_kw_agg.items():
-                kw_docs_rows.append(
-                    (scope_id, kid, doc_id, occ_sum, chunk_cnt)
-                )
-                touched_kw_ids.add(kid)
-
-            # Update per-doc chunk count for scope_stats.n_chunks accounting.
-            conn.execute(
-                "UPDATE docs SET n_chunks_with_kw = ? WHERE id = ?",
-                (int(n_chunks_with_kw_for_doc), int(doc_id)),
-            )
-
-            if file_had_keywords:
-                stats.files_indexed += 1
-            else:
-                stats.files_skipped += 1
-                stats.bump_reason("no_keywords")
-
-            structure = _load_structure(path)
-            if structure is not None and structure.chapters:
-                head_rows = []
-                for chapter in structure.chapters:
-                    heading_path_key = " > ".join(chapter.heading_path)
-                    head_rows.append(
-                        (doc_id, heading_path_key, chapter.chapter_id,
-                         int(chapter.start_line), int(chapter.end_line), now)
-                    )
-                if head_rows:
-                    conn.executemany(
-                        """
-                        INSERT INTO heading_docs
-                            (doc_id, heading_path, chapter_id,
-                             start_line, end_line, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(doc_id, heading_path, chapter_id)
-                        DO UPDATE SET
-                            start_line = excluded.start_line,
-                            end_line = excluded.end_line,
-                            updated_at = excluded.updated_at
-                        """,
-                        head_rows,
-                    )
-                    stats.heading_docs_written += len(head_rows)
-                    stats.md_files_indexed += 1
-
-            # v7 metadata: refresh docs.size/mtime/content_hash so the
-            # next incremental build's Level 1 check can skip this file.
-            _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
-
-            if progress is not None and stats.files_indexed % 25 == 0 and stats.files_indexed:
-                progress(
-                    f"materialised {stats.files_indexed} files "
-                    f"({len(kw_docs_rows)} kw-doc rows)"
-                )
             _emit(
-                "materialise_advance",
-                current=doc_index,
-                total=len(docs),
-                chunks_done=chunks_done_total,
+                "stopword_derived",
+                count=len(scope_stopword_candidates),
+                chars=sorted(scope_stopword_candidates),
+                threshold=STOPWORD_DF_THRESHOLD,
+            )
+
+            # ------------------------------------------------------------------
+            # Pass 2 (v9.1 keyword-primary): tokenise chunks in RAM and derive
+            # the doc-level inverted index (``keyword_docs``) + per-doc
+            # ``n_chunks_with_kw`` directly from ``chunk_tokens``, while staging
+            # (doc_id, chunk_id, kw_id) triples into the ``_build_chunk_kws``
+            # TEMP TABLE for pass 3's self-join. The deprecated ``chunks`` /
+            # ``keyword_chunks`` permanent tables no longer exist (dropped by
+            # v8→v9 migration); their signal is replaced by
+            # ``keyword_docs.chunk_count`` + ``docs.n_chunks_with_kw``.
+            #
+            # Pairs are NOT enumerated in Python here (that was the v9 approach
+            # whose ``pair_delta`` Counter / ``touched_pair_keys`` set ballooned
+            # to GB-scale RAM on large corpora). Instead the raw chunk-kw
+            # membership goes to the TEMP TABLE and SQLite's hash-aggregate does
+            # the pair counting + min_pair_count filter in one pass (design D6
+            # accumulate semantics preserved via UPSERT-add). See
+            # :func:`_finalize_pairs_from_temp`.
+            # ------------------------------------------------------------------
+            if mode == "build" and docs:
+                _delete_doc_index_rows_keep_docs(
+                    conn, [entry[0] for entry in docs]
+                )
+
+            _emit(
+                "materialise_start",
+                total_docs=len(docs),
                 total_chunks=total_scanned_chunks,
-                path=str(path),
             )
-
-        # Flush the deferred keyword_docs INSERTs in one batch. UPSERT-shape
-        # so a rebuild path (where DELETE FROM keyword_docs WHERE scope_id=?
-        # already ran) or an incremental path (where DELETE for docs list
-        # already ran in _delete_doc_index_rows_keep_docs above) both land
-        # on clean rows.
-        if kw_docs_rows:
-            conn.executemany(
-                """
-                INSERT INTO keyword_docs
-                    (scope_id, kw_id, doc_id, occurrence_count, chunk_count)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(kw_id, doc_id) DO UPDATE SET
-                    occurrence_count = excluded.occurrence_count,
-                    chunk_count = excluded.chunk_count
-                """,
-                kw_docs_rows,
+            # Deferred UPSERTs collected across pass 2; flushed after the loop.
+            kw_docs_rows: List[Tuple[int, int, int, int, int]] = []
+            # v9.1 (2026-07-13): pair aggregation returns to SQL self-join over
+            # a build-local TEMP TABLE. Pre-v9 used a persistent ``keyword_chunks``
+            # table; v9 dropped it and moved pair aggregation into a Python
+            # ``pair_delta`` Counter + ``touched_pair_keys`` set. That caused two
+            # regressions on large corpora (see ``_finalize_pairs_from_temp``):
+            #   * ``touched_pair_keys`` grew unbounded (2-3 GB on a 22 MB novel).
+            #   * every pair (incl. count=1) got UPSERTed into keyword_pairs
+            #     BEFORE the min_pair_count filter — GB-scale disk churn.
+            # The TEMP TABLE keeps the v9 read-path shape (no permanent
+            # ``keyword_chunks`` asset) while restoring SQLite's hash-aggregate
+            # to compute + filter pair counts in one pass. Dropped at end.
+            conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS _build_chunk_kws ("
+                "  doc_id INTEGER NOT NULL, "
+                "  chunk_id INTEGER NOT NULL, "
+                "  kw_id INTEGER NOT NULL"
+                ")"
             )
-        # Flush the remaining TEMP TABLE batch (the tail below CHUNK_KW_TEMP_FLUSH).
-        if chunk_kw_temp_batch:
-            conn.executemany(
-                "INSERT INTO _build_chunk_kws (doc_id, chunk_id, kw_id) "
-                "VALUES (?, ?, ?)",
-                chunk_kw_temp_batch,
-            )
-            chunk_kw_temp_batch.clear()
-        # ``stats.keyword_chunks_written`` is kept as a deprecated field
-        # for JSON output back-compat and reports the doc-level row count
-        # (30× smaller than the pre-v9 chunk-level count).
-        stats.keyword_chunks_written = len(kw_docs_rows)
+            conn.execute("DELETE FROM _build_chunk_kws")  # in case of prior aborted run
+            chunk_kw_temp_batch: List[Tuple[int, int, int]] = []
+            CHUNK_KW_TEMP_FLUSH = 200_000  # rows per batch INSERT
+            touched_kw_ids: set = set()
+            # Chunk-level progress throttling: emit at most ~500 updates across
+            # the whole materialise phase, so a corpus with millions of chunks
+            # does not drown the CLI progress bar in redraw work. Falls back to
+            # "every chunk" for tiny corpora so short builds still animate.
+            chunks_done_total = 0
+            chunk_progress_step = max(1, total_scanned_chunks // 500) if total_scanned_chunks else 1
+            next_progress_emit = chunk_progress_step
+            for doc_index, entry in enumerate(docs, start=1):
+                doc_id, rel_path, path, is_md, chunks = entry[:5]
+                _, st_size, st_mtime, new_hash = entry[5:]
+                per_chunk_kw: List[Tuple[int, Dict[str, int]]] = []
+                file_distinct_kws: set = set()
+                for chunk in chunks:
+                    # PR-4: re-tokenise on the fly with the finalised tokeniser
+                    # (same ``jieba_tok`` + ``phrase_set`` as Phase B; jieba
+                    # tokenisation is deterministic, so this is bit-exact
+                    # against the pre-refactor ``chunk_tokens.get(...)`` read).
+                    toks = _tokenise_chunk(
+                        chunk.text, jieba_tok, phrase_set, max_ngram_n
+                    )
+                    kw_counts = _keywords_from_tokens(toks) if toks else Counter()
+                    if kw_counts:
+                        per_chunk_kw.append((chunk.chunk_id, kw_counts))
+                        file_distinct_kws.update(kw_counts.keys())
+                    else:
+                        per_chunk_kw.append((chunk.chunk_id, {}))
+                kw_id_map = (
+                    interner.kw_ids(sorted(file_distinct_kws))
+                    if file_distinct_kws else {}
+                )
 
-        # Metadata-only refresh (touch / stable rga output).
-        for doc_id, st_size, st_mtime, new_hash in metadata_only_updates:
-            _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
+                # Aggregate to (kw_id, doc_id) → (occurrence_count, chunk_count)
+                # and stage (doc_id, chunk_id, kw_id) rows into the TEMP TABLE.
+                per_doc_kw_agg: Dict[int, Tuple[int, int]] = {}
+                n_chunks_with_kw_for_doc = 0
+                file_had_keywords = False
+                for _chunk_id, kw_counts in per_chunk_kw:
+                    chunks_done_total += 1
+                    if kw_counts:
+                        file_had_keywords = True
+                        n_chunks_with_kw_for_doc += 1
+                        # Per-doc aggregation (raw kw_counts — keyword_stats is
+                        # never gated by the 3a/3b filter, only pair enumeration is).
+                        for kw, occ in kw_counts.items():
+                            kid = kw_id_map[kw]
+                            prev_occ, prev_chunks = per_doc_kw_agg.get(kid, (0, 0))
+                            per_doc_kw_agg[kid] = (prev_occ + int(occ), prev_chunks + 1)
+                        # 3b containment filter over kw *strings*, then map to
+                        # ids and stage into the TEMP TABLE for the pass-3
+                        # self-join. Substring-contained candidates like 者 vs
+                        # 面壁者 are dropped from *pair* eligibility only.
+                        pair_kws = _filter_chunk_kws_for_pairs(
+                            list(kw_counts.keys()),
+                            stopword_candidates=scope_stopword_candidates,
+                        )
+                        if pair_kws:
+                            distinct_ids = {kw_id_map[k] for k in pair_kws}
+                            for kid in distinct_ids:
+                                chunk_kw_temp_batch.append((doc_id, _chunk_id, kid))
+                            if len(chunk_kw_temp_batch) >= CHUNK_KW_TEMP_FLUSH:
+                                conn.executemany(
+                                    "INSERT INTO _build_chunk_kws "
+                                    "(doc_id, chunk_id, kw_id) VALUES (?, ?, ?)",
+                                    chunk_kw_temp_batch,
+                                )
+                                chunk_kw_temp_batch.clear()
 
-        # Remove docs that disappeared from disk.
-        if removed_doc_ids:
-            _delete_doc_index_rows(conn, removed_doc_ids)
+                    # Chunk-level progress: throttle emits. Counter increments
+                    # for *every* chunk (including empty / no-keyword ones) so
+                    # the completion guard reaches total_scanned_chunks — the
+                    # doc-side denominator counts split_chunks output uniformly.
+                    if chunks_done_total >= next_progress_emit or chunks_done_total == total_scanned_chunks:
+                        _emit(
+                            "materialise_advance",
+                            current=doc_index,
+                            total=len(docs),
+                            chunks_done=chunks_done_total,
+                            total_chunks=total_scanned_chunks,
+                            path=str(path),
+                        )
+                        next_progress_emit = chunks_done_total + chunk_progress_step
+
+                for kid, (occ_sum, chunk_cnt) in per_doc_kw_agg.items():
+                    kw_docs_rows.append(
+                        (scope_id, kid, doc_id, occ_sum, chunk_cnt)
+                    )
+                    touched_kw_ids.add(kid)
+
+                # Update per-doc chunk count for scope_stats.n_chunks accounting.
+                conn.execute(
+                    "UPDATE docs SET n_chunks_with_kw = ? WHERE id = ?",
+                    (int(n_chunks_with_kw_for_doc), int(doc_id)),
+                )
+
+                if file_had_keywords:
+                    stats.files_indexed += 1
+                else:
+                    stats.files_skipped += 1
+                    stats.bump_reason("no_keywords")
+
+                structure = _load_structure(path)
+                if structure is not None and structure.chapters:
+                    head_rows = []
+                    for chapter in structure.chapters:
+                        heading_path_key = " > ".join(chapter.heading_path)
+                        head_rows.append(
+                            (doc_id, heading_path_key, chapter.chapter_id,
+                             int(chapter.start_line), int(chapter.end_line), now)
+                        )
+                    if head_rows:
+                        conn.executemany(
+                            """
+                            INSERT INTO heading_docs
+                                (doc_id, heading_path, chapter_id,
+                                 start_line, end_line, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(doc_id, heading_path, chapter_id)
+                            DO UPDATE SET
+                                start_line = excluded.start_line,
+                                end_line = excluded.end_line,
+                                updated_at = excluded.updated_at
+                            """,
+                            head_rows,
+                        )
+                        stats.heading_docs_written += len(head_rows)
+                        stats.md_files_indexed += 1
+
+                # v7 metadata: refresh docs.size/mtime/content_hash so the
+                # next incremental build's Level 1 check can skip this file.
+                _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
+
+                if progress is not None and stats.files_indexed % 25 == 0 and stats.files_indexed:
+                    progress(
+                        f"materialised {stats.files_indexed} files "
+                        f"({len(kw_docs_rows)} kw-doc rows)"
+                    )
+                _emit(
+                    "materialise_advance",
+                    current=doc_index,
+                    total=len(docs),
+                    chunks_done=chunks_done_total,
+                    total_chunks=total_scanned_chunks,
+                    path=str(path),
+                )
+
+            # Flush the deferred keyword_docs INSERTs in one batch. UPSERT-shape
+            # so a rebuild path (where DELETE FROM keyword_docs WHERE scope_id=?
+            # already ran) or an incremental path (where DELETE for docs list
+            # already ran in _delete_doc_index_rows_keep_docs above) both land
+            # on clean rows.
+            if kw_docs_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO keyword_docs
+                        (scope_id, kw_id, doc_id, occurrence_count, chunk_count)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(kw_id, doc_id) DO UPDATE SET
+                        occurrence_count = excluded.occurrence_count,
+                        chunk_count = excluded.chunk_count
+                    """,
+                    kw_docs_rows,
+                )
+            # Flush the remaining TEMP TABLE batch (the tail below CHUNK_KW_TEMP_FLUSH).
+            if chunk_kw_temp_batch:
+                conn.executemany(
+                    "INSERT INTO _build_chunk_kws (doc_id, chunk_id, kw_id) "
+                    "VALUES (?, ?, ?)",
+                    chunk_kw_temp_batch,
+                )
+                chunk_kw_temp_batch.clear()
+            # ``stats.keyword_chunks_written`` is kept as a deprecated field
+            # for JSON output back-compat and reports the doc-level row count
+            # (30× smaller than the pre-v9 chunk-level count).
+            stats.keyword_chunks_written = len(kw_docs_rows)
+
+            # Metadata-only refresh (touch / stable rga output).
+            for doc_id, st_size, st_mtime, new_hash in metadata_only_updates:
+                _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
+
+            # Remove docs that disappeared from disk.
+            if removed_doc_ids:
+                _delete_doc_index_rows(conn, removed_doc_ids)
 
         # ------------------------------------------------------------------
         # Pass 3 (v9.1): derive pairs from the TEMP TABLE self-join.

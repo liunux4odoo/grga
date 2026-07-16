@@ -103,6 +103,7 @@ grga 的缓存与配置位置。
 | `GRGA_PPR_MIN_NPMI` | `0.2` | `related --mode graph` 读侧的 pair NPMI 下限。**只能收紧**写入期 v8 门槛（0.2），设置更低值会被忽略。命令行 `--min-npmi` 优先 |
 | `GRGA_BUILD_CACHE_MB` | `256` | `index build` 期间 SQLite 页缓存预算 (**MB**, 内部换算为 `PRAGMA cache_size = -MB*1024` KiB). 默认 256 MB, 300万+ chunks 建议 512 MB 或更高 (须 <= 系统内存 - build 峰值). 非正值/非数字回落到 256; 上限 clamp 到 8192 MB 防误配爆内存 |
 | `GRGA_BUILD_NPMI_BATCH` | `50000` | `index build` pair npmi 重算的 fallback 分批游标批大小（仅当 SQLite 无 `ln()` 时走此路径）。控制该分支的峰值 Python 内存；有 `ln()` 的环境走纯 SQL、此值不生效。见 `docs/design/plan-2026-07-15-build-memory-oom.md` §4 |
+| `GRGA_BATCH_TOP_N` | `64` | `grga index rebuild --batch-chunks N` 分批构建时，每 chunk 保留的关键字上限（用于共现对枚举）。数值越大 → 发现的 pair 越多、内存越高。命令行 `--top-n-kw` 优先。见 `experiments/batched_build_2026_07_16/FINDINGS.md` |
 | `GRGA_QUIET_MIGRATION` | `0` | 置 `1` 静音 schema 迁移日志，主要用于 CI / 测试降噪 |
 
 ## 桌面 GUI
