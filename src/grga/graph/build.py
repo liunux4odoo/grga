@@ -1967,6 +1967,7 @@ def _run_batched_pipeline(
     *,
     scope_id: int,
     docs: List[tuple],
+    refresh_ngram: str = "replace",
     total_scanned_chunks: int,
     batch_target_chunks: int,
     top_n_kw: int,
@@ -2063,9 +2064,14 @@ def _run_batched_pipeline(
                     line_tokens_for_detect.append(toks)
 
         # 2/3. Detect phrases for this batch, UPSERT-add into auto_dict + DB.
-        new_phrases = detect_ngram_phrases(
-            line_tokens_for_detect, max_n=max_ngram_n, conn=conn,
-        )
+        # ``refresh_ngram="never"`` skips detection entirely and reuses the
+        # loaded auto_dict as-is (still re-tokenises + stages triples below).
+        if refresh_ngram == "never":
+            new_phrases = []
+        else:
+            new_phrases = detect_ngram_phrases(
+                line_tokens_for_detect, max_n=max_ngram_n, conn=conn,
+            )
         del line_tokens_for_detect
         added_any = False
         for pdata in new_phrases:
@@ -2436,15 +2442,14 @@ def build_graph_index(
     # exact configuration the M10 experiment validated. Incremental
     # support (Q1 grow-and-refine batches) is a follow-up.
     if batch_chunks > 0:
-        if mode != "rebuild":
+        # Batched now supports both rebuild and incremental (build) modes.
+        # The only genuinely-invalid combo is mode='build' + refresh='replace'
+        # (replace clears the whole dict — meaningless on incremental), and
+        # that is already rejected by the shared guard below (line ~2425).
+        if mode not in ("rebuild", "build"):
             raise ValueError(
-                "batch_chunks > 0 requires mode='rebuild' "
-                "(batched build is a rebuild-only path currently; "
-                "incremental support TBD)"
-            )
-        if refresh_ngram != "replace":
-            raise ValueError(
-                "batch_chunks > 0 requires refresh_ngram='replace'"
+                f"batch_chunks > 0: unknown mode {mode!r} "
+                "(expected 'rebuild' or 'build')"
             )
 
     from grga.deep_search import DEFAULT_DB_PATH
@@ -2631,10 +2636,12 @@ def build_graph_index(
         # scope_stats stamp, toolchain fingerprint) is shared.
         # ------------------------------------------------------------------
         if batch_chunks > 0:
-            # ``refresh_ngram="replace"`` already wiped the scope's
-            # auto_ngram_dict rows above, so start with an empty working
-            # dict (seed_ngram_from can layer under the empty dict).
-            auto_dict: Dict[str, dict] = {}
+            # ``refresh_ngram="replace"`` wiped the scope's auto_ngram_dict
+            # rows above → loads empty. ``append``/``never`` (incremental
+            # or additive rebuild) load the accumulated dict so per-batch
+            # detection UPSERT-adds onto prior phrases (and ``never`` reuses
+            # them without any detection).
+            auto_dict: Dict[str, dict] = _load_auto_dict(conn, scope_id)
             if seed_ngram_from:
                 seed_dict = _load_seed_auto_dict(
                     conn, scope_id, seed_ngram_from,
@@ -2651,11 +2658,20 @@ def build_graph_index(
                         phrases_seeded=seeded,
                         phrases_skipped=len(seed_dict) - seeded,
                     )
+            # Incremental: clear changed docs' stale index rows (keyword_docs
+            # / heading_docs / n_chunks_with_kw) before re-materialising them,
+            # exactly as the single-pass Pass 2 does. Rebuild already wiped
+            # the whole scope above, so this is a no-op there.
+            if mode == "build" and docs:
+                _delete_doc_index_rows_keep_docs(
+                    conn, [entry[0] for entry in docs]
+                )
             resolved_top_n = _resolve_top_n_kw(top_n_kw)
             _run_batched_pipeline(
                 conn,
                 scope_id=scope_id,
                 docs=docs,
+                refresh_ngram=refresh_ngram,
                 total_scanned_chunks=total_scanned_chunks,
                 batch_target_chunks=int(batch_chunks),
                 top_n_kw=resolved_top_n,

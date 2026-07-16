@@ -1133,8 +1133,8 @@ def index_build_command(
     tags: List[str] = typer.Option([], "--tag", "-t", help="Attach a multi-value scope tag (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Written to `scope_tags` (knowledge layer, portable across machines). Accumulate-only: existing tags survive; remove with `grga scope tag rm`."),
     append: bool = typer.Option(False, "--append", help="[deprecated] Same effect as the new default (`build` is incremental and never clears the vocabulary). Prints a deprecation warning."),
     replace: bool = typer.Option(False, "--replace", help="[deprecated] Wipe the scope's asset + index + derived layers and rebuild from scratch. Use `grga index forget --all` followed by `grga index build`, or `grga index rebuild --refresh-ngram=replace` instead."),
-    batch_chunks: int = typer.Option(0, "--batch-chunks", help="[not supported on `grga index build`] Present for CLI symmetry — passing >0 exits with an error pointing to `grga index rebuild --batch-chunks`."),
-    top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="[not supported on `grga index build`] Present for CLI symmetry."),
+    batch_chunks: int = typer.Option(0, "--batch-chunks", help="Enable batched incremental build with target N chunks per batch (0 = disabled = default single-pass, unchanged). >0 processes changed/new files in RAM-bounded batches with per-batch phrase detection + top-N per-chunk kw cap (see --top-n-kw). refresh_ngram=append (default) unions new phrases; =never reuses the dict as-is. See experiments/batched_build_2026_07_16/FINDINGS.md."),
+    top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="Only used with --batch-chunks>0. Per-chunk keyword cap for pair enumeration (higher=more pairs, more RAM). Default via env GRGA_BATCH_TOP_N (default 64)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Incrementally update the graph index for a scope.
@@ -1168,14 +1168,6 @@ def index_build_command(
         raise typer.Exit(2)
     if max_ngram_n < 2:
         typer.echo("--max-ngram-n must be >= 2", err=True)
-        raise typer.Exit(2)
-
-    if batch_chunks > 0:
-        typer.echo(
-            "--batch-chunks is not supported with `grga index build`. "
-            "Use `grga index rebuild --batch-chunks N` instead.",
-            err=True,
-        )
         raise typer.Exit(2)
 
     # Deprecated flag translation.
