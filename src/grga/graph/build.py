@@ -2248,6 +2248,14 @@ def _run_batched_pipeline(
 
             _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
 
+        # 10. Per-batch self-join  UPSERT-add into keyword_pairs.
+        _run_self_join(
+            conn, scope_id=scope_id,
+            min_pair_count=resolve_min_pair_count(batch_n_chunks),
+            now=now,
+        )
+        conn.execute("DELETE FROM _build_chunk_kws")
+
         # Flush this batch's keyword_docs rows so peak Python heap stays
         # bounded by one batch instead of the whole corpus.
         if kw_docs_rows:
@@ -3291,11 +3299,14 @@ def build_graph_index(
                 (scope_id, n_chunks, n_docs, vocab_size, now),
             )
 
-            # 4. Derive pairs from the TEMP TABLE self-join. In ``rebuild``
-            #    mode the scope's chunk_cooccur rows were wiped upstream
-            #    (see the mode dispatch above), so the UPSERT lands on empty
-            #    rows. In ``build`` mode existing pairs accumulate (design
-            #    D6: pairs grow-only across add/update).
+            # 4. Derive pairs from the TEMP TABLE self-join.
+            #    Single-pass path: one global self-join via
+            #    ``_finalize_pairs_from_temp`` (which also runs step 3
+            #    global floor DELETE + step 4 npmi recompute).
+            #    Batched path: each batch already ran its own self-join
+            #    inside ``_run_batched_pipeline``, so we skip the
+            #    self-join and go directly to the global floor DELETE
+            #    + npmi recompute (steps 3-4 of``_finalize_pairs_from_temp``).
             #    ``min_pair_count=None`` (the default) resolves the write
             #    floor from this scope's n_chunks (:func:`resolve_min_pair_count`);
             #    an explicit value overrides the adaptive ladder.
@@ -3305,15 +3316,41 @@ def build_graph_index(
                 else int(min_pair_count)
             )
             _emit("pairs_start", candidate_pairs=0, surviving_pairs=0)
-            surviving = _finalize_pairs_from_temp(
-                conn,
-                scope_id=scope_id,
-                min_pair_count=effective_min_pair_count,
-                min_npmi=float(min_npmi),
-                n_chunks=n_chunks,
-                now=now,
-                on_event=on_event,
-            )
+            if batch_chunks > 0:
+                # Batched path: per-batch self-join already ran. Apply
+                # global floor DELETE + npmi recompute (steps 3-4 of
+                # ``_finalize_pairs_from_temp``).
+                conn.execute(
+                    "DELETE FROM keyword_pairs WHERE scope_id = ? AND source = ? "
+                    "AND cooccur_count < ?",
+                    (scope_id, CHUNK_COOCCUR_SOURCE, int(effective_min_pair_count)),
+                )
+                if _sqlite_has_ln(conn):
+                    _step4_sql(
+                        conn, scope_id=scope_id, min_npmi=float(min_npmi),
+                        n_chunks=n_chunks, on_event=on_event,
+                    )
+                else:
+                    _step4_batch(
+                        conn, scope_id=scope_id, min_npmi=float(min_npmi),
+                        n_chunks=n_chunks, on_event=on_event,
+                        batch_size=_NPMI_BATCH_SIZE,
+                    )
+                surviving = int(conn.execute(
+                    "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+                    (scope_id, CHUNK_COOCCUR_SOURCE),
+                ).fetchone()[0])
+                _emit("pairs_scan_end", surviving=surviving)
+            else:
+                surviving = _finalize_pairs_from_temp(
+                    conn,
+                    scope_id=scope_id,
+                    min_pair_count=effective_min_pair_count,
+                    min_npmi=float(min_npmi),
+                    n_chunks=n_chunks,
+                    now=now,
+                    on_event=on_event,
+                )
             stats.pairs_written = surviving
         else:
             # No index-layer change: everything already sits in the tables
@@ -3397,6 +3434,47 @@ def build_graph_index(
 # a scope-wide ``DELETE ... WHERE cooccur_count < min_pair_count`` re-applies
 # the write-time floor to any legacy rows that dropped below threshold.
 # ---------------------------------------------------------------------------
+
+
+def _run_self_join(
+    conn,
+    *,
+    scope_id: int,
+    min_pair_count: int,
+    now: str,
+) -> None:
+    """Self-join ``_build_chunk_kws``  ``keyword_pairs`` UPSERT-add.
+
+    The self-join ``SELECT a.kw_id, b.kw_id, COUNT(*) FROM _build_chunk_kws
+    a JOIN _build_chunk_kws b ON a.doc_id=b.doc_id AND a.chunk_id=b.chunk_id
+    AND a.kw_id<b.kw_id GROUP BY a.kw_id, b.kw_id HAVING COUNT(*) >= ?``
+    is the core pair-aggregation primitive. Called per-batch in the
+    batched pipeline and once globally in the single-pass path.
+    """
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS _idx_bcki_chunk "
+        "ON _build_chunk_kws (doc_id, chunk_id)"
+    )
+    conn.execute(
+        """
+        INSERT INTO keyword_pairs
+            (scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at)
+        SELECT ?, a.kw_id, b.kw_id, ?, COUNT(*), NULL, ?
+        FROM _build_chunk_kws a
+        JOIN _build_chunk_kws b
+          ON a.doc_id = b.doc_id
+         AND a.chunk_id = b.chunk_id
+         AND a.kw_id < b.kw_id
+        GROUP BY a.kw_id, b.kw_id
+        HAVING COUNT(*) >= ?
+        ON CONFLICT(scope_id, kw_a_id, kw_b_id, source) DO UPDATE SET
+            cooccur_count = cooccur_count + excluded.cooccur_count,
+            npmi = NULL,
+            updated_at = excluded.updated_at
+        """,
+        (scope_id, CHUNK_COOCCUR_SOURCE, now, int(min_pair_count)),
+    )
+
 
 
 def _finalize_pairs_from_temp(
