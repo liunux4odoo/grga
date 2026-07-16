@@ -2045,6 +2045,7 @@ def _run_batched_pipeline(
             total=n_batches,
             batch_files=len(batch),
         )
+        _t0 = _t_last = time.perf_counter()
         _emit(
             "ngram_iter_start",
             iter=1, iters=1,
@@ -2056,6 +2057,7 @@ def _run_batched_pipeline(
         jieba_tok = _new_jieba_tokenizer(auto_dict.keys())
         phrase_set = set(auto_dict.keys())
         batch_chunk_meta: List[Tuple[int, int, str, bool]] = []
+        _t_read = time.perf_counter()
         line_tokens_for_detect: List[List[str]] = []
         for entry in batch:
             doc_id, rel_path, path, is_md, chunks = entry[:5]
@@ -2080,6 +2082,7 @@ def _run_batched_pipeline(
             new_phrases = detect_ngram_phrases(
                 line_tokens_for_detect, max_n=max_ngram_n, conn=conn,
             )
+        _t_ngram = time.perf_counter()
         del line_tokens_for_detect
         added_any = False
         for pdata in new_phrases:
@@ -2256,11 +2259,23 @@ def _run_batched_pipeline(
 
             _update_doc_metadata(conn, doc_id, st_size, st_mtime, new_hash)
 
+        _t_write = time.perf_counter()
         # 10. Per-batch self-join  UPSERT-add into keyword_pairs.
         _run_self_join(
             conn, scope_id=scope_id,
             min_pair_count=resolve_min_pair_count(batch_n_chunks),
             now=now,
+        )
+        _t_pairs = time.perf_counter()
+        cumulative_pairs = int(conn.execute(
+            "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+            (scope_id, CHUNK_COOCCUR_SOURCE),
+        ).fetchone()[0])
+        _emit(
+            "pairs_batch_advance",
+            batch=bi + 1, n_batches=n_batches,
+            cumulative_pairs=cumulative_pairs,
+            current=bi + 1, total=n_batches,
         )
         conn.execute("DELETE FROM _build_chunk_kws")
 
@@ -2318,6 +2333,12 @@ def _run_batched_pipeline(
             new_phrases_this_batch=len(new_phrases),
             dict_size=len(auto_dict),
         )
+        _emit("debug_timing", batch=bi+1, n_batches=n_batches,
+              wall_read_ms=round((_t_ngram - _t0) * 1000),
+              wall_ngram_ms=round((_t_write - _t_ngram) * 1000),
+              wall_write_ms=round((_t_pairs - _t_write) * 1000),
+              wall_pairs_ms=round((time.perf_counter() - _t_pairs) * 1000),
+              wall_batch_ms=round((time.perf_counter() - _t0) * 1000))
         del chunk_tokens, kw_id_map, global_chunk_df, prior_kw_seen
         del prior_kw_npmi, phrase_id_set, per_doc_agg, batch_chunk_meta
 
