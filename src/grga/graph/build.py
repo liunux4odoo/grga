@@ -1751,6 +1751,33 @@ VALID_REFRESH_NGRAM = ("never", "append", "replace")
 _BUILD_TEMP_ROOT_NAME = "db-temp"
 
 
+def _resolve_cache_mb() -> int:
+    """Resolve SQLite page cache budget in MB.
+
+    Priority:
+    1. ``GRGA_BUILD_CACHE_MB`` env var — explicit override, clamped to [1, 8192].
+    2. **Adaptive** (default): 1/4 of available system RAM, floor 512 MB,
+       ceiling 4096 MB. Uses ``psutil.virtual_memory().available``.
+    3. Fallback (psutil unavailable): 256 MB.
+    """
+    env_val = os.environ.get("GRGA_BUILD_CACHE_MB")
+    if env_val is not None:
+        try:
+            cache_mb = int(env_val)
+            if cache_mb <= 0:
+                raise ValueError
+            return min(8192, cache_mb)
+        except (TypeError, ValueError):
+            pass
+    try:
+        import psutil  # noqa: PLC0415
+        avail_mb = psutil.virtual_memory().available / (1024 * 1024)
+        cache_mb = max(512, min(int(avail_mb / 4), 4096))
+        return cache_mb
+    except ImportError:
+        return 256
+
+
 def _setup_build_temp_dir(conn: "sqlite3.Connection", main_db_path: Path) -> Path:
     """Create ``<main_db.parent>/db-temp/<uniq>/`` and point ``conn`` there.
 
@@ -1770,29 +1797,10 @@ def _setup_build_temp_dir(conn: "sqlite3.Connection", main_db_path: Path) -> Pat
     escaped = str(build_dir).replace("'", "''")
     conn.execute("PRAGMA temp_store = FILE")
     conn.execute(f"PRAGMA temp_store_directory = '{escaped}'")
-    # PR-8: enlarge the page cache. The default 2 MB thrashes badly on
-    # multi-million-chunk corpora — every big aggregate (Stage 2 _ng_freq
-    # GROUP BY, Stage 4 neighbour UNION, the pair self-join) spills its
-    # working pages to the temp file and re-reads them. A generous cache
-    # (default 256 MB, override via GRGA_BUILD_CACHE_MB) keeps hot pages
-    # resident. Negative value = KiB budget (decoupled from page_size).
-    # Clamped to [1, 8192] MB: a typo (e.g. 25600 for 256) must not blow
-    # the SQLite page cache past the very RSS ceiling this whole effort
-    # protects. Non-positive / non-numeric → default 256.
-    #
-    # NOTE: we deliberately do NOT touch ``synchronous`` here. The build
-    # connection points at the *shared* library DB (all scopes); in the
-    # default rollback-journal (DELETE) mode ``synchronous=NORMAL`` carries
-    # a small OS-crash corruption risk that could damage *sibling* scopes,
-    # not just the one building. cache_size alone gives the bulk of the win.
-    try:
-        cache_mb = int(os.environ.get("GRGA_BUILD_CACHE_MB", "256"))
-        if cache_mb <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        cache_mb = 256
-    if cache_mb > 8192:
-        cache_mb = 8192
+    # PR-8: enlarge the page cache. Default is **adaptive**:
+    # 1/4 of available RAM, floor 512 MB, ceiling 4096 MB.
+    # Override via ``GRGA_BUILD_CACHE_MB`` env var.
+    cache_mb = _resolve_cache_mb()
     conn.execute(f"PRAGMA cache_size = {-cache_mb * 1024}")
     return build_dir
 
@@ -4160,4 +4168,3 @@ def _write_meta(conn, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
-
