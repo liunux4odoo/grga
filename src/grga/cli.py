@@ -927,6 +927,23 @@ def _make_index_build_progress():
                     completed=event["total_docs"],
                     note=f"{event['total_chunks']} chunks",
                 )
+        elif phase == "batch_start":
+            key = "batch_progress"
+            if key not in state:
+                state[key] = progress.add_task(
+                    "[cyan]批量处理", total=event.get("total"), note=""
+                )
+            progress.update(
+                state[key], total=event.get("total"), completed=event.get("batch", 0),
+                note=f"批 {event['batch']}/{event['total']}  · {event.get('batch_files', 0)} 文件",
+            )
+        elif phase == "batch_end":
+            task = state.get("batch_progress")
+            if task is not None:
+                progress.update(
+                    task, completed=event.get("batch", 0),
+                    note=f"批 {event['batch']}/{event['total']}  · 完成",
+                )
         elif phase == "ngram_iter_start":
             key = "ngram"
             if key not in state:
@@ -946,8 +963,7 @@ def _make_index_build_progress():
                     task,
                     total=event["total"] or None,
                     completed=event["current"],
-                    note=f"第 {event['iter']}/{event['iters']} 轮 · "
-                         f"{event['current']}/{event['total']} chunks",
+                    note=f"ngram {event['current']}/{event['total']}",
                 )
         elif phase == "ngram_iter_end":
             task = state.get("ngram")
@@ -955,7 +971,7 @@ def _make_index_build_progress():
                 progress.update(
                     task,
                     completed=event["chunks"],
-                    note=f"第 {event['iter']}/{event['iters']} 轮 · {event['phrases']} 短语",
+                    note=f"ngram 完成 · {event['phrases']} 短语",
                 )
         elif phase == "ngram_detect":
             # Detector internal phases: unigram / window / filter / sort.
@@ -970,14 +986,13 @@ def _make_index_build_progress():
                 it = event.get("iter", 0)
                 its = event.get("iters", 0)
                 _labels = {
-                    "unigram": "统计词频",
-                    "window": "枚举 n-gram 窗口",
-                    "filter": "过滤候选短语",
-                    "salvage": "打捞子串短语",
+                    "unigram": "词频",
+                    "window": "ngram 枚举",
+                    "filter": "过滤",
+                    "salvage": "打捞",
                     "sort": "排序",
-                    # PR-8 SQL-progress heartbeats between phases.
-                    "agg_freq": "聚合频次",
-                    "agg_neighbors": "聚合邻居",
+                    "agg_freq": "聚合",
+                    "agg_neighbors": "邻居",
                 }
                 base = sub.rsplit("_", 1)[0]
                 label = _labels.get(base, base)
@@ -1095,11 +1110,18 @@ def _make_index_build_progress():
             if task is not None:
                 tot = event.get("total")
                 cur = event.get("current", 0)
-                # ``total`` is None during the PR-8 self-join heartbeat
-                # (indeterminate) and an int during NPMI recompute.
-                note = f"{cur}/{tot} 对" if tot else f"扫描自连接… ({cur})"
+                note = f"{cur}/{tot} 对" if tot else f"自连接… ({cur})"
                 progress.update(
                     task, total=tot or None, completed=cur, note=note,
+                )
+        elif phase == "pairs_batch_advance":
+            task = state.get("pairs")
+            if task is not None:
+                progress.update(
+                    task,
+                    total=event.get("total") or None,
+                    completed=event.get("current", 0),
+                    note=f"批 {event['batch']}/{event['n_batches']} · 累积 {event['cumulative_pairs']} 对",
                 )
         elif phase == "pairs_done":
             task = state.get("pairs")
