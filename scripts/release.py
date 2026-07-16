@@ -218,6 +218,10 @@ def _dist_files() -> List[str]:
     return [str(p) for p in sorted((REPO_ROOT / "dist").glob("*")) if p.is_file()]
 
 
+def _wheel_files() -> List[str]:
+    return [str(p) for p in sorted((REPO_ROOT / "dist").glob("*.whl")) if p.is_file()]
+
+
 def _twine_check(dry: bool) -> None:
     files = _dist_files()
     if not files and not dry:
@@ -226,9 +230,9 @@ def _twine_check(dry: bool) -> None:
 
 
 def _twine_upload(dry: bool, *, testpypi: bool) -> None:
-    files = _dist_files()
+    files = _wheel_files()
     if not files and not dry:
-        _die("no artifacts in dist/ to upload")
+        _die("no wheel (*.whl) in dist/ to upload")
     cmd = [PYTHON, "-m", "twine", "upload"]
     if testpypi:
         cmd += ["--repository", "testpypi"]

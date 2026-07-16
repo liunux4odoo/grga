@@ -215,6 +215,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `AGENTS.md` | 硬规则、路径约定、工作流偏好 |
 | `docs/install-and-usage.md` | 完整安装、工具下载、镜像/打包构建、面向 AI Agent 的进阶说明（README 的详细版） |
 | `docs/env-vars.md` | 所有可识别的环境变量清单（LLM 凭据、工具缓存、图查询阈值、GUI 缩放） |
+| `docs/build-tuning.md` | **build 调优指南**：`--min-npmi-build` / `--batch-chunks` / `--top-n-kw` 的取舍、存储与内存权衡、常见场景配方 |
 
 ---
 

@@ -15,7 +15,7 @@ grga 侧的具体命令与依赖：
 | 能力 | grep | `rg` | `rga` | grga 命令 / 用法 | 依赖 / 配置 |
 |---|:---:|:---:|:---:|---|---|
 | 纯文本 / 源码搜索 | ✅ | ✅ | ✅ | `grga search 关键词` | 无 |
-| 大仓库速度（并发 + `.gitignore`） | ❌ 单线程 | ✅ 多线程 | ✅ 继承 rg | 同上，自动透传 `rg` | `rg`（首次 `grga tools install` 自动下载） |
+| 大文档集速度（并发 + `.gitignore`） | ❌ 单线程 | ✅ 多线程 | ✅ 继承 rg | 同上，自动透传 `rg` | `rg`（首次 `grga tools install` 自动下载） |
 | PDF / Office / EPUB / 归档 / sqlite | ❌ | ❌ | ✅ 内建适配器 | 同上，自动透传 `rga` | `rga` + `rga-preproc` + `pandoc` + `pdftotext`（自动下载） |
 | 查询表达式（短语 / 正则 / glob / `\|\|` / `&&` / 括号） | ⚠️ 仅正则 | ⚠️ 仅正则 | ⚠️ 仅正则 | 默认多词 **AND**，`--implicit-or` 恢复 v1 OR 语义 | 无 |
 | 路径搜索（只匹配文件名，不读内容） | ⚠️ 需配合 `find` | ⚠️ 需 `--files \| rg` | ⚠️ 同 rg | `grga search --path-only` | 无 |
@@ -23,7 +23,6 @@ grga 侧的具体命令与依赖：
 | Markdown / PDF 的段落 / 章节上下文扩展 | ❌ | ❌ | ❌ | `grga expand`（按行 / 段落 / 章节逐级） |  |
 | 关键词共现关系图（离线索引 + 亚毫秒查询） | ❌ | ❌ | ❌ | `grga index build --scope <name>` → `grga related` / `grga graph inspect` | |
 | LLM 深度搜索、查询改写、结果重排 | ❌ | ❌ | ❌ | `grga deep-search` / `grga suggest` | OpenAI 兼容 API；至少 `GRGA_OPENAI_API_KEY` + `GRGA_OPENAI_MODEL`（详见 [docs/env-vars.md](docs/env-vars.md)） |
-| Tk 图形界面 | ❌ | ❌ | ❌ | `grga gui` 或 `grga-gui` | 系统自带 Tk |
 | Agent 友好（`--json` + 稳定退出码契约） | ❌ | ⚠️ 部分 | ⚠️ 部分 | `grga skill install` 分发内置 agent 技能包 | 错误契约见 [docs/exit-codes.md](docs/exit-codes.md) |
 
 所有环境变量都可以写进 `$XDG_CONFIG_HOME/grga/.env`（首次运行会自动生成
@@ -100,6 +99,12 @@ grga related 面壁计划 --tag 科幻 --tag 小说 --tag-logic and   # 按标�
 grga graph inspect 面壁计划
 ```
 
+> **索引构建的参数调优**：大语料下 build 的存储（`keyword_pairs` 往往占
+> DB 的 90%+）、内存与耗时对参数很敏感。核心权衡——`--min-npmi-build`
+> 是**不可逆**的写入门槛（读侧 `related --min-npmi` 只能收紧不能放宽）、
+> `--batch-chunks` 用 recall 换低内存、长期存储靠拆 scope + 知识包归档
+> ——完整决策表与场景配方见 **[docs/build-tuning.md](docs/build-tuning.md)**。
+
 **LLM 深度搜索**（需配置 OpenAI 兼容凭据，见 [docs/env-vars.md](docs/env-vars.md)）：
 
 ```bash
@@ -110,7 +115,7 @@ export GRGA_OPENAI_MODEL=gpt-4o-mini
 grga deep-search "面壁计划"
 ```
 
-> 注：作者到现在还没用过深度搜索功能，基本靠文本检索+图扩展就解决问题了。
+> 注：作者到现在还没用过深度搜索功能，基本靠文本检索+图扩展就解决问题了。这个功能主要是在未接入 Code Agent 时手动搜索的替代。
 
 
 **打包成可执行文件 / 离线部署 / 作为 agent 原语接入** —— 见
