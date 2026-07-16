@@ -427,6 +427,9 @@ def _complete_scope_sets(
         scope_filter = " AND scope_id = ?"
         scope_params = [scope_ids[0]]
     elif len(scope_ids) >= 2:
+        # No ORDER BY here, so ``scope_id IN (...)`` still uses the
+        # composite index (a-side / b-side PK prefix) without a temp
+        # sort. Safe to keep the IN form; per-scope loop is not needed.
         sp = ",".join("?" for _ in scope_ids)
         scope_filter = f" AND scope_id IN ({sp})"
         scope_params = list(scope_ids)
@@ -563,30 +566,35 @@ def _related_keywords_impl(
     if not seed_ids:
         return RelatedKeywordsResult(results=[], resolved_seeds=resolved_seeds)
 
-    # Scope-filter shape. The composite index
-    # ``idx_kp_a_npmi (scope_id, kw_a_id, npmi DESC)`` supports an
-    # ordered-LIMIT walk ONLY when the leading column is an equality
-    # predicate. ``scope_id IN (a, b, ...)`` forces SQLite to materialise
-    # every matching row across the listed scopes into a temp b-tree and
-    # sort before applying LIMIT — losing the sub-millisecond fast path
-    # for the very common single-scope call. Therefore:
+    # Perf: the composite indexes ``idx_kp_{a,b}_npmi (scope_id, kw_?_id,
+    # npmi DESC)`` support an ordered-LIMIT walk ONLY when ``scope_id`` is
+    # an equality predicate on a single value. Two patterns lose that
+    # fast path:
     #
-    #   * len == 1  → ``scope_id = ?`` (index-ordered LIMIT preserved)
-    #   * len >= 2  → ``scope_id IN (...)`` (accepts the temp-sort cost)
-    #   * scope_ids empty (cross-scope) → no clause (full-index scan)
-    scope_filter = ""
-    scope_params: List = []
-    if len(scope_ids) == 1:
-        scope_filter = "scope_id = ? AND "
-        scope_params = [scope_ids[0]]
-    elif len(scope_ids) >= 2:
-        sp = ",".join("?" for _ in scope_ids)
-        scope_filter = f"scope_id IN ({sp}) AND "
-        scope_params = list(scope_ids)
-    # TODO(perf): cross-scope path (scope_names is None) full-scans
-    # idx_kp_b_npmi because the (scope_id, kw_a_id, npmi DESC) composite
-    # cannot be used without a scope_id prefix. Acceptable for the rare
-    # cross-scope case (see plan-2026-07-12-related-perf).
+    #   * ``scope_id IN (a, b, ...)``: SQLite index-searches each scope
+    #     but must materialise every matching row into a temp b-tree and
+    #     sort before applying LIMIT (a few ms per scope but grows with
+    #     matched-row count).
+    #   * no ``scope_id`` clause at all (cross-scope): SQLite falls back
+    #     to a full index scan over ``idx_kp_b_npmi`` and a temp-sort,
+    #     which on a ~76M-row ``keyword_pairs`` table wedges the query
+    #     for tens of seconds (regression report 2026-07-16).
+    #
+    # Fix: always resolve the query to a concrete list of scope ids
+    # (populate from ``scopes`` table on the cross-scope path), then run
+    # per-scope ``scope_id = ?`` queries in a Python loop and merge in
+    # ``merged`` below. N queries of O(limit_per_seed) index-ordered rows
+    # beat one query of O(pairs-touching-seed) even at N ≈ dozens of
+    # scopes, and preserves index-ordered LIMIT semantics for the write
+    # side of the pair invariant.
+    if not scope_ids:
+        scope_ids = [
+            int(r[0]) for r in conn.execute("SELECT id FROM scopes")
+        ]
+        if not scope_ids:
+            return RelatedKeywordsResult(
+                results=[], resolved_seeds=resolved_seeds,
+            )
 
     seen_kw_ids: set = set()
     # Per-seed candidate rows: (nbr_id, source, npmi, cooccur, scope_ids set).
@@ -598,35 +606,51 @@ def _related_keywords_impl(
     hit_scope_ids: set = set()
 
     for (seed_id, seed_text) in seed_ids:
-        rows_a = conn.execute(
-            f"SELECT kw_b_id, npmi, cooccur_count, source, scope_id "
-            f"FROM keyword_pairs "
-            f"WHERE {scope_filter}kw_a_id = ? AND source = ? AND npmi >= ? "
-            f"ORDER BY npmi DESC LIMIT ?",
-            (*scope_params, seed_id, CHUNK_COOCCUR_SOURCE,
-             float(min_npmi), int(limit_per_seed)),
-        ).fetchall()
-        rows_b = conn.execute(
-            f"SELECT kw_a_id, npmi, cooccur_count, source, scope_id "
-            f"FROM keyword_pairs "
-            f"WHERE {scope_filter}kw_b_id = ? AND source = ? AND npmi >= ? "
-            f"ORDER BY npmi DESC LIMIT ?",
-            (*scope_params, seed_id, CHUNK_COOCCUR_SOURCE,
-             float(min_npmi), int(limit_per_seed)),
-        ).fetchall()
-        # llm_promoted: no npmi filter (may be NULL).
-        rows_llm_a = conn.execute(
-            f"SELECT kw_b_id, npmi, cooccur_count, source, scope_id "
-            f"FROM keyword_pairs "
-            f"WHERE {scope_filter}kw_a_id = ? AND source = ?",
-            (*scope_params, seed_id, "llm_promoted"),
-        ).fetchall()
-        rows_llm_b = conn.execute(
-            f"SELECT kw_a_id, npmi, cooccur_count, source, scope_id "
-            f"FROM keyword_pairs "
-            f"WHERE {scope_filter}kw_b_id = ? AND source = ?",
-            (*scope_params, seed_id, "llm_promoted"),
-        ).fetchall()
+        rows_a: List = []
+        rows_b: List = []
+        rows_llm_a: List = []
+        rows_llm_b: List = []
+        for sid in scope_ids:
+            rows_a.extend(conn.execute(
+                "SELECT kw_b_id, npmi, cooccur_count, source, scope_id "
+                "FROM keyword_pairs "
+                "WHERE scope_id = ? AND kw_a_id = ? AND source = ? "
+                "AND npmi >= ? "
+                "ORDER BY npmi DESC LIMIT ?",
+                (sid, seed_id, CHUNK_COOCCUR_SOURCE,
+                 float(min_npmi), int(limit_per_seed)),
+            ).fetchall())
+            rows_b.extend(conn.execute(
+                "SELECT kw_a_id, npmi, cooccur_count, source, scope_id "
+                "FROM keyword_pairs "
+                "WHERE scope_id = ? AND kw_b_id = ? AND source = ? "
+                "AND npmi >= ? "
+                "ORDER BY npmi DESC LIMIT ?",
+                (sid, seed_id, CHUNK_COOCCUR_SOURCE,
+                 float(min_npmi), int(limit_per_seed)),
+            ).fetchall())
+            # llm_promoted: no npmi filter (may be NULL). Small set, no LIMIT.
+            # Without ANALYZE stats, SQLite picks the composite PK
+            # ``(scope_id, kw_a_id, kw_b_id, source)`` for the b-side query
+            # and scans the whole (scope_id=?) partition — pathological on
+            # a 76M-row table (5s+ on the ``工作`` scope, 2026-07-16). The
+            # a-side query uses the PK's ``kw_a_id`` prefix and is fine;
+            # only the b-side needs the ``INDEXED BY`` hint to force
+            # ``idx_kp_b_npmi (scope_id, kw_b_id, ...)``, which narrows to
+            # the seed's b-side rows in one covering-index seek before
+            # the tiny source filter.
+            rows_llm_a.extend(conn.execute(
+                "SELECT kw_b_id, npmi, cooccur_count, source, scope_id "
+                "FROM keyword_pairs "
+                "WHERE scope_id = ? AND kw_a_id = ? AND source = ?",
+                (sid, seed_id, "llm_promoted"),
+            ).fetchall())
+            rows_llm_b.extend(conn.execute(
+                "SELECT kw_a_id, npmi, cooccur_count, source, scope_id "
+                "FROM keyword_pairs INDEXED BY idx_kp_b_npmi "
+                "WHERE scope_id = ? AND kw_b_id = ? AND source = ?",
+                (sid, seed_id, "llm_promoted"),
+            ).fetchall())
 
         # Merge + dedupe within one seed. A pair with the same (kw_a, kw_b)
         # but different ``source`` values keeps both provenance rows.
@@ -685,6 +709,13 @@ def _related_keywords_impl(
     chunk_df_map: Dict[int, int] = {}
     id_list = list(seen_kw_ids)
     chunk = 900
+    # ``scope_ids`` is guaranteed non-empty at this point — the cross-scope
+    # path populated it from ``scopes`` above, and an empty ``scopes``
+    # table returned early. No fallback branch is needed; the
+    # ``scope_id IN (...)`` predicate keeps ``keyword_stats`` restricted
+    # to the caller's query range, which matters for the hub-word
+    # ``chunk_df`` signal (plan-2026-07-14 §4.2).
+    sp = ",".join("?" for _ in scope_ids)
     for i in range(0, len(id_list), chunk):
         piece = id_list[i:i + chunk]
         ph = ",".join("?" for _ in piece)
@@ -692,22 +723,13 @@ def _related_keywords_impl(
             f"SELECT id, kw FROM keywords WHERE id IN ({ph})", piece
         ):
             kw_text[int(r[0])] = str(r[1])
-        if scope_ids:
-            sp = ",".join("?" for _ in scope_ids)
-            for r in conn.execute(
-                f"SELECT kw_id, SUM(chunk_df) FROM keyword_stats "
-                f"WHERE kw_id IN ({ph}) AND scope_id IN ({sp}) "
-                f"GROUP BY kw_id",
-                (*piece, *scope_ids),
-            ):
-                chunk_df_map[int(r[0])] = int(r[1] or 0)
-        else:
-            for r in conn.execute(
-                f"SELECT kw_id, SUM(chunk_df) FROM keyword_stats "
-                f"WHERE kw_id IN ({ph}) GROUP BY kw_id",
-                piece,
-            ):
-                chunk_df_map[int(r[0])] = int(r[1] or 0)
+        for r in conn.execute(
+            f"SELECT kw_id, SUM(chunk_df) FROM keyword_stats "
+            f"WHERE kw_id IN ({ph}) AND scope_id IN ({sp}) "
+            f"GROUP BY kw_id",
+            (*piece, *scope_ids),
+        ):
+            chunk_df_map[int(r[0])] = int(r[1] or 0)
 
     # v3.1: batch-resolve scope_id → name for every scope that carried at
     # least one returned edge. One query per DB call regardless of how

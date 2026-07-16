@@ -33,11 +33,11 @@ classifiers = [
 dependencies = ["typer>=0.9", "openai>=1.0", "jieba>=0.42", "markdown-it-py>=3.0"]
 
 [project.urls]
-Homepage = "https://github.com/grga-tools/grga"
-Repository = "https://github.com/grga-tools/grga"
-Documentation = "https://github.com/grga-tools/grga#readme"
-Changelog = "https://github.com/grga-tools/grga/blob/main/CHANGELOG.md"
-Issues = "https://github.com/grga-tools/grga/issues"
+Homepage = "https://github.com/liunux4odoo/grga"
+Repository = "https://github.com/liunux4odoo/grga"
+Documentation = "https://github.com/liunux4odoo/grga#readme"
+Changelog = "https://github.com/liunux4odoo/grga/blob/main/CHANGELOG.md"
+Issues = "https://github.com/liunux4odoo/grga/issues"
 
 [project.optional-dependencies]
 standalone = ["pyinstaller>=6.0"]

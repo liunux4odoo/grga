@@ -3414,6 +3414,37 @@ def build_graph_index(
             )
         _write_meta(conn, "toolchain_fingerprint", current_fp)
 
+        # ------------------------------------------------------------------
+        # Refresh query-planner statistics. Without ``sqlite_stat1`` SQLite
+        # falls back to heuristics; on this table set the pathological
+        # example (2026-07-16) was ``related --mode graph`` with no
+        # ``--scope`` — the b-side ``llm_promoted`` query picked the
+        # composite PK over ``idx_kp_b_npmi`` and scanned an entire scope
+        # partition (5s+ on a 76M-row ``keyword_pairs``).
+        #
+        # We use the SQLite-recommended ``PRAGMA analysis_limit`` +
+        # ``PRAGMA optimize`` pair instead of a bare ``ANALYZE``:
+        #
+        # * A bare ``ANALYZE`` is a **full per-index b-tree scan** (cost
+        #   ≈ index_count × table_size); on a 9.6G DB that is ~1 minute,
+        #   which would be an unacceptable tax on the no-op incremental
+        #   branch (``build.py`` ``else`` at ~3384, no index-layer change).
+        # * ``PRAGMA analysis_limit=400`` caps each per-index scan at
+        #   ~400 sampled pages — sub-second, still statistically sound
+        #   (SQLite docs § 8.3).
+        # * ``PRAGMA optimize`` only re-ANALYZEs tables whose row-count
+        #   changed materially since the last stats snapshot, so no-op
+        #   incremental builds pay effectively nothing.
+        #
+        # If ``sqlite_stat1`` is missing entirely (first-ever build or
+        # DB from a pre-fix release), ``PRAGMA optimize`` will run its
+        # sampled ANALYZE once to seed it, then converge on the cheap
+        # incremental refresh path.
+        _emit("analyze_start")
+        conn.execute("PRAGMA analysis_limit=400")
+        conn.execute("PRAGMA optimize")
+        _emit("analyze_done")
+
         conn.commit()
     finally:
         conn.close()
