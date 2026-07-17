@@ -4,6 +4,38 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
+### `grga graph inspect` 契约扩展 · `top_docs` 定位捷径 + `--scope` / `--tag` 过滤
+
+`grga graph inspect <keyword>` 之前只回聚合计数（`docs_by_scope`），caller
+想定位"哪几个文件持有这个词"必须再跑一次 `grga search` 全文扫描。数据库
+里 `keyword_docs` 已经存了 doc 级倒排索引 + `occurrence_count` /
+`chunk_count`，暴露给 caller 零额外成本；同时 `--scope` / `--tag` 只有
+`related` 有、`inspect` 缺失，跨 scope DB 上做单词诊断时得先跑
+`grga scope list` 手动挑 DB，杠杆方向反了。两件事一次修齐：
+
+- **新增** `top_docs`（indexed 分支专属）：`{scope, doc_path,
+  occurrence_count, chunk_count}` 行数组，跨 scope 全局按
+  `(-occurrence_count, -chunk_count, scope, doc_path)` 排序。每行带
+  `scope` 便于 caller 路由回 `scope_directories` 绑定。`--docs-limit`
+  默认 5、`0` 关闭；`top_docs_truncated` 在 `total_docs > docs_limit`
+  时为 `true`。not-indexed / knowledge-only 分支不发（没本地证据）。
+- **新增** `--scope <name>`（可重复）/ `--tag <label>` / `--tag-logic
+  and|or`，与 `grga related` 同款语义：name ∩ tag、两者皆空 = cross-scope
+  union、显式过滤命中零 scope 返回 `scope_filter_hint`（区别于 not-indexed
+  的 `index_hint`——关键字本身可能已索引，只是不在过滤范围内）。四个 SQL
+  助手（`_seed_docs` / `_cooccurrences_batch` / `_knowledge_only_scopes` /
+  `_similar_keywords`）经 `_scope_filter_clause` 统一构造 `AND col IN (…)`
+  片段，杜绝分支漂移。
+- **API**：`inspect_keyword(..., scope_names=None, tag_names=None,
+  tag_logic="or", docs_limit=5)`；旧签名调用向后兼容。
+- **契约**：新增 `top_docs` / `top_docs_truncated` / `scope_filter_hint`
+  三个字段，皆为附加信号；已有字段无变化。属于 MINOR。
+
+契约与设计取舍详情见 `docs/api.md#grga-graph-inspect`。测试
+`tests/graph/test_inspect.py` 覆盖 22 用例（top_docs 排序 / 截断 / 关闭 /
+非索引分支不发；`--scope` 单选/多选/零命中；`--tag` + `--tag-logic
+and|or`；`--scope` ∩ `--tag`；非法 `tag_logic` 早报错）。
+
 ### 依赖清理 · 删除已死的 `perf` extra + `markdown-it-py` 提升为核心依赖
 
 - **删除** `pyproject.toml` 的 `[project.optional-dependencies].perf =

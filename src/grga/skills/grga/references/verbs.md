@@ -217,9 +217,20 @@ skill.
 
 ```
 grga graph inspect <keyword> [--db <path>] [--json]
+                             [--scope <name> ...] [--tag <label> ...]
+                             [--tag-logic and|or] [--docs-limit N]
 ```
 
-Reports a keyword's `docs_by_scope` spread, `top_cooccurring_keywords`,
-and a `suspected_polysemy` warning. Run it on a bridge keyword before
-扩大 seed 集或跨 scope 查询。Empty (`total_docs == 0`) means the keyword
-is not in the offline index — treat as "no signal" and skip.
+Reports a keyword's `docs_by_scope` spread, `top_docs` (the documents
+holding the keyword, sorted by occurrence density — a locate-me shortcut
+that saves a `search` round-trip), `top_cooccurring_keywords`, and a
+`suspected_polysemy` warning. Run it on a bridge keyword before 扩大 seed
+集或跨 scope 查询。Empty (`total_docs == 0`) means the keyword is not in
+the offline index — treat as "no signal" and skip.
+
+`--scope` / `--tag` / `--tag-logic` narrow the report to specific corpora
+(same filter semantics as `related`: name ∩ tag; both empty = cross-scope
+union). An explicit filter that matches no scope returns a
+`scope_filter_hint` instead of falling back to cross-scope. `--docs-limit`
+caps `top_docs` (default 5, `0` disables the field); `top_docs_truncated`
+flags when `total_docs` exceeds the cap.

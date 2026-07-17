@@ -206,3 +206,148 @@ def test_inspect_missing_keyword_gives_hint(polysemy_db):
     assert hint, "empty-result hint must be actionable, not blank"
     assert "grga search" in hint
     assert "attention-not-indexed-xyz" in hint
+
+
+def test_top_docs_locates_files_for_indexed_keyword(polysemy_db):
+    """Indexed branch surfaces the documents holding the keyword.
+
+    ``top_docs`` is the locate-me shortcut: each row carries the scope,
+    the doc_path, and the occurrence/chunk counts so a caller can jump
+    straight to the file without a separate ``search`` round-trip.
+    """
+    report = inspect_keyword("attention", db_path=polysemy_db["db"])
+    assert "top_docs" in report
+    assert report["top_docs"], "indexed keyword must surface locating docs"
+    for entry in report["top_docs"]:
+        assert set(entry) == {"scope", "doc_path", "occurrence_count", "chunk_count"}
+        assert entry["occurrence_count"] >= 1
+    # attention lives in both nlp and psych — both scopes must be routable.
+    scopes = {e["scope"] for e in report["top_docs"]}
+    assert scopes == {"nlp", "psych"}
+    # Sorted by occurrence density (descending) across scopes.
+    occ = [e["occurrence_count"] for e in report["top_docs"]]
+    assert occ == sorted(occ, reverse=True)
+
+
+def test_top_docs_respects_limit_and_truncation_flag(polysemy_db):
+    """``docs_limit`` caps the list and sets the truncation flag."""
+    report = inspect_keyword("attention", db_path=polysemy_db["db"], docs_limit=1)
+    assert len(report["top_docs"]) == 1
+    assert report["top_docs_truncated"] is True
+
+
+def test_top_docs_disabled_when_limit_zero(polysemy_db):
+    """``docs_limit=0`` suppresses the field for JSON-size-sensitive callers."""
+    report = inspect_keyword("attention", db_path=polysemy_db["db"], docs_limit=0)
+    assert "top_docs" not in report
+    assert "top_docs_truncated" not in report
+
+
+def test_top_docs_absent_on_not_indexed_branch(polysemy_db):
+    """The not-indexed branch has no local evidence, so no ``top_docs``."""
+    report = inspect_keyword("totally-unknown-token", db_path=polysemy_db["db"])
+    assert report["total_docs"] == 0
+    assert "top_docs" not in report
+
+
+# ---------------------------------------------------------------------------
+# --scope / --tag / --tag-logic filter
+# ---------------------------------------------------------------------------
+
+
+def test_scope_filter_narrows_docs_by_scope(polysemy_db):
+    """``scope_names`` restricts every scope-scoped field to the named scopes."""
+    report = inspect_keyword(
+        "attention", db_path=polysemy_db["db"], scope_names=["nlp"]
+    )
+    assert set(report["docs_by_scope"]) == {"nlp"}
+    scopes = {e["scope"] for e in report["top_docs"]}
+    assert scopes == {"nlp"}
+    for entry in report["top_cooccurring_keywords"]:
+        assert set(entry["shared_scopes"]) <= {"nlp"}
+    # Only one scope in view — polysemy flag must never trigger.
+    assert report["suspected_polysemy"] is False
+
+
+def test_scope_filter_repeatable_intersects_union(polysemy_db):
+    """Multiple ``--scope`` values union across the named scopes."""
+    report = inspect_keyword(
+        "attention", db_path=polysemy_db["db"],
+        scope_names=["nlp", "psych"],
+    )
+    assert set(report["docs_by_scope"]) == {"nlp", "psych"}
+
+
+def test_scope_filter_no_match_returns_hint(polysemy_db):
+    """An explicit --scope that resolves to no scope IDs bails out."""
+    report = inspect_keyword(
+        "attention", db_path=polysemy_db["db"],
+        scope_names=["no-such-scope"],
+    )
+    assert report["total_docs"] == 0
+    assert report["docs_by_scope"] == {}
+    assert "scope_filter_hint" in report
+    # Distinct from index_hint — the keyword itself is indexed, only the
+    # filter didn't match.
+    assert "index_hint" not in report
+
+
+def test_tag_filter_narrows_by_scope_tags(polysemy_db, tmp_path):
+    """``tag_names`` uses scope_tags to resolve the scope filter."""
+    from grga.graph.scope import add_tags
+    add_tags("nlp", ["ml"], db_path=polysemy_db["db"])
+    add_tags("psych", ["cog"], db_path=polysemy_db["db"])
+
+    report = inspect_keyword(
+        "attention", db_path=polysemy_db["db"], tag_names=["ml"]
+    )
+    assert set(report["docs_by_scope"]) == {"nlp"}
+
+
+def test_scope_and_tag_intersect(polysemy_db):
+    """--scope and --tag together must intersect."""
+    from grga.graph.scope import add_tags
+    add_tags("nlp", ["ml"], db_path=polysemy_db["db"])
+    add_tags("psych", ["ml"], db_path=polysemy_db["db"])
+
+    # --scope=nlp AND --tag=ml => only nlp
+    report = inspect_keyword(
+        "attention", db_path=polysemy_db["db"],
+        scope_names=["nlp"], tag_names=["ml"],
+    )
+    assert set(report["docs_by_scope"]) == {"nlp"}
+
+    # --scope=nlp AND --tag=non-existent => empty match
+    report = inspect_keyword(
+        "attention", db_path=polysemy_db["db"],
+        scope_names=["nlp"], tag_names=["no-such-tag"],
+    )
+    assert "scope_filter_hint" in report
+
+
+def test_tag_logic_and_requires_every_tag(polysemy_db):
+    """``tag_logic='and'`` matches only scopes carrying every listed tag."""
+    from grga.graph.scope import add_tags
+    add_tags("nlp", ["ml", "papers"], db_path=polysemy_db["db"])
+    add_tags("psych", ["papers"], db_path=polysemy_db["db"])
+
+    # or = union (both scopes match at least one)
+    r_or = inspect_keyword(
+        "attention", db_path=polysemy_db["db"],
+        tag_names=["ml", "papers"], tag_logic="or",
+    )
+    assert set(r_or["docs_by_scope"]) == {"nlp", "psych"}
+
+    # and = intersection (only nlp carries both)
+    r_and = inspect_keyword(
+        "attention", db_path=polysemy_db["db"],
+        tag_names=["ml", "papers"], tag_logic="and",
+    )
+    assert set(r_and["docs_by_scope"]) == {"nlp"}
+
+
+def test_invalid_tag_logic_raises():
+    """Unknown ``tag_logic`` value must be rejected early."""
+    import pytest
+    with pytest.raises(ValueError):
+        inspect_keyword("x", db_path="/tmp/does-not-exist.db", tag_logic="xor")

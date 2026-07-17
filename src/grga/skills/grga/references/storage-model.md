@@ -126,6 +126,14 @@ Building the local evidence is a user-side action (outside this skill).
 
 * `docs_by_scope`: the keyword's doc distribution grouped by **logical
   scope name**. Empty on a knowledge-only scope (see previous section).
+* `top_docs`: **locate-me shortcut** — top documents holding the keyword
+  as `{scope, doc_path, occurrence_count, chunk_count}` rows, sorted by
+  `(-occurrence_count, -chunk_count, scope, doc_path)` across scopes.
+  Each row's `scope` routes the follow-up (`grga search` / open the file)
+  back to the right `scope_directories` binding. Capped by `--docs-limit`
+  (default 5, `0` disables); `top_docs_truncated` flags when
+  `total_docs > docs_limit`. Not emitted on the not-indexed /
+  knowledge-only branches (no local evidence available).
 * `top_cooccurring_keywords`: top co-occurrence neighbours with
   `shared_scopes` (list of scope names carrying each neighbour).
 * `suspected_polysemy` heuristic: true when the neighbour lists in
@@ -141,10 +149,19 @@ Building the local evidence is a user-side action (outside this skill).
   normal cooccurrence report. Distinguishes "genuinely unknown seed"
   from "seed known via imported knowledge, no local corpus".
 
+**Scope / tag narrowing** (same semantics as `related`): pass
+`--scope <name>` (repeatable) and/or `--tag <label> --tag-logic and|or`
+to restrict every scope-scoped field (`docs_by_scope`, `top_docs`,
+`top_cooccurring_keywords`, `knowledge_scopes`) to the matched scopes.
+`--scope` + `--tag` intersect (name ∩ tag). An explicit filter that
+matches zero scopes returns a dedicated `scope_filter_hint` and clears
+every scope-scoped field — distinct from `index_hint` (the keyword may
+be indexed, just not under the requested filter).
+
 Use it for **seed-quality assessment** (hub? rare?), **cross-scope
-distribution audit**, and **polysemy detection**. It does not replace
-`related` — see `references/reflection-loop.md` § "T2 is `related`,
-not `graph inspect`".
+distribution audit**, **polysemy detection**, and **file-level location
+lookup** (via `top_docs`). It does not replace `related` — see
+`references/reflection-loop.md` § "T2 is `related`, not `graph inspect`".
 
 ## When to override with `--db <path>`
 

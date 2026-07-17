@@ -29,6 +29,12 @@ from grga.graph.schema import connect, ensure_schema
 DEFAULT_LIMIT = 20
 DEFAULT_COOCCUR_LIMIT = 10
 DEFAULT_SIMILAR_LIMIT = 10
+# Default cap on ``top_docs`` returned in the indexed branch. Small enough
+# to keep JSON reports terse even for hub keywords (``total_docs`` in the
+# thousands), large enough to give the caller a useful "which files hold
+# this term" starting point without a round-trip to ``search``. ``0``
+# disables the field entirely.
+DEFAULT_DOCS_LIMIT = 5
 # Below this length a substring match becomes noise (e.g. seed "a" would
 # match anything containing "a"). The not-indexed vocab probe silently
 # skips shorter seeds instead of returning a firehose.
@@ -56,6 +62,10 @@ def inspect_keyword(
     limit: int = DEFAULT_LIMIT,
     cooccur_limit: int = DEFAULT_COOCCUR_LIMIT,
     similar_limit: int = DEFAULT_SIMILAR_LIMIT,
+    docs_limit: int = DEFAULT_DOCS_LIMIT,
+    scope_names: Optional[Sequence[str]] = None,
+    tag_names: Optional[Sequence[str]] = None,
+    tag_logic: str = "or",
 ) -> dict:
     """Return a scope-distribution + polysemy report for ``keyword``.
 
@@ -68,6 +78,24 @@ def inspect_keyword(
             characteristic head of each scope).
         similar_limit: cap on ``similar_keywords`` in the not-indexed branch
             (see below). Ignored on the indexed branch.
+        docs_limit: cap on ``top_docs`` in the indexed branch. ``0``
+            suppresses the field entirely. Ignored on the not-indexed /
+            knowledge-only branches (both lack local ``keyword_docs``
+            evidence — a ``top_docs`` field there would be misleading).
+        scope_names: optional list of logical scope names (``--scope``).
+            ``None`` / empty = cross-scope union. Feeds the same
+            ``keyword_pairs.scope_id IN (...)`` / ``keyword_docs`` filter
+            path as :func:`grga.related.related_keywords`.
+        tag_names: optional list of scope-tag labels (``--tag``, v11).
+            ``None`` / empty = no tag filter.
+        tag_logic: ``"or"`` (default) or ``"and"`` — how multiple ``tag_names``
+            values combine. Mirrors ``grga related --tag-logic``.
+
+    ``scope_names`` and ``tag_names`` are **intersected** when both are
+    provided (name ∩ tag), matching ``related``. An explicit filter that
+    resolves to zero scopes returns a dedicated ``scope_filter_hint`` and
+    empties every scope-scoped field — never a silent fall-back to
+    cross-scope (which would violate the caller's narrow-down intent).
 
     Returns a dict::
 
@@ -75,6 +103,12 @@ def inspect_keyword(
           "keyword": str,
           "total_docs": int,
           "docs_by_scope": {scope: count, ...},
+          "top_docs": [                       # indexed branch only
+            {"scope": str, "doc_path": str,
+             "occurrence_count": int, "chunk_count": int},
+            ...
+          ],
+          "top_docs_truncated": bool,         # indexed branch only
           "top_cooccurring_keywords": [
             {"keyword": str, "weight": float, "shared_scopes": [scope, ...]},
             ...
@@ -82,6 +116,14 @@ def inspect_keyword(
           "suspected_polysemy": bool,
           "polysemy_hint": str,
         }
+
+    ``top_docs`` is a locate-me shortcut: reads ``keyword_docs`` (already
+    scanned for the doc-count aggregate) and returns the top ``docs_limit``
+    document paths per keyword, sorted by
+    ``(-occurrence_count, -chunk_count, scope, doc_path)`` across scopes.
+    This saves the caller a round-trip to ``search`` when the intent is
+    just "which files hold this term?". ``top_docs_truncated`` is ``True``
+    when ``total_docs`` exceeds ``docs_limit``.
 
     The not-indexed branch (``total_docs == 0``) instead returns an
     ``index_hint`` field and **omits** ``polysemy_hint`` /
@@ -101,6 +143,10 @@ def inspect_keyword(
     kind: superstring}]`` → retry). Empty list when the seed is too short
     (< 2 chars) or nothing matches.
     """
+    if tag_logic not in ("and", "or"):
+        raise ValueError(
+            f"tag_logic must be 'and' or 'or', got {tag_logic!r}"
+        )
     folded = _fold(keyword)
     from grga.deep_search import DEFAULT_DB_PATH
 
@@ -108,9 +154,91 @@ def inspect_keyword(
     conn = connect(target_db)
     try:
         ensure_schema(conn)
-        return _inspect(conn, keyword, folded, limit, cooccur_limit, similar_limit)
+        scope_ids, filter_requested, filter_desc = _resolve_scope_filter(
+            conn, scope_names, tag_names, tag_logic,
+        )
+        if filter_requested and not scope_ids:
+            # Explicit --scope / --tag that matched nothing: bail out
+            # with a distinct hint rather than degrading to cross-scope.
+            return {
+                "keyword": keyword,
+                "total_docs": 0,
+                "docs_by_scope": {},
+                "top_cooccurring_keywords": [],
+                "scope_filter_hint": (
+                    f"no scope matched the requested filter ({filter_desc}). "
+                    f"Run `grga scope list` to inspect available scopes / "
+                    f"tags, or drop the filter for a cross-scope view."
+                ),
+            }
+        return _inspect(
+            conn, keyword, folded, limit, cooccur_limit, similar_limit,
+            docs_limit, scope_ids if filter_requested else None,
+        )
     finally:
         conn.close()
+
+
+def _resolve_scope_filter(
+    conn: sqlite3.Connection,
+    scope_names: Optional[Sequence[str]],
+    tag_names: Optional[Sequence[str]],
+    tag_logic: str,
+) -> tuple[List[int], bool, str]:
+    """Resolve ``--scope`` / ``--tag`` into a concrete ``scope_id`` list.
+
+    Mirrors :func:`grga.related._related_keywords_impl` so both verbs
+    agree on filter semantics:
+
+    * name-only  → ``SELECT id FROM scopes WHERE name IN (...)``
+    * tag-only   → :func:`grga.graph.scope.resolve_scope_ids_by_tags`
+    * both       → intersection (a scope must satisfy BOTH)
+    * neither    → ``(_, False, "")`` = cross-scope (no WHERE clause)
+
+    Returns ``(scope_ids, filter_requested, filter_desc)``.
+    ``filter_requested`` is ``True`` iff the caller passed at least one
+    non-empty ``--scope`` / ``--tag`` — used to distinguish "no filter"
+    (union across all scopes) from "filter that matched zero scopes"
+    (bail out with a hint). ``filter_desc`` is a compact human-readable
+    summary used in the empty-match hint (never surfaced when the filter
+    resolves to a non-empty set).
+    """
+    have_scope = scope_names is not None and any(s for s in scope_names)
+    have_tag = tag_names is not None and any(t for t in tag_names)
+    if not have_scope and not have_tag:
+        return [], False, ""
+
+    name_scope_ids: Optional[set] = None
+    tag_scope_ids: Optional[set] = None
+    parts: List[str] = []
+
+    if have_scope:
+        names = [s for s in scope_names if s]  # type: ignore[union-attr]
+        placeholders = ",".join("?" for _ in names)
+        rows = conn.execute(
+            f"SELECT id FROM scopes WHERE name IN ({placeholders})",
+            names,
+        ).fetchall()
+        name_scope_ids = {int(r[0]) for r in rows}
+        parts.append(f"scope={sorted(names)}")
+
+    if have_tag:
+        from grga.graph.scope import resolve_scope_ids_by_tags
+        tags = [t for t in tag_names if t]  # type: ignore[union-attr]
+        tag_scope_ids = set(
+            resolve_scope_ids_by_tags(conn, tags, logic=tag_logic)
+        )
+        parts.append(f"tag={sorted(tags)} logic={tag_logic}")
+
+    if name_scope_ids is not None and tag_scope_ids is not None:
+        merged = name_scope_ids & tag_scope_ids
+    elif name_scope_ids is not None:
+        merged = name_scope_ids
+    else:
+        assert tag_scope_ids is not None
+        merged = tag_scope_ids
+
+    return sorted(merged), True, ", ".join(parts)
 
 
 def _inspect(
@@ -120,6 +248,8 @@ def _inspect(
     limit: int,
     cooccur_limit: int,
     similar_limit: int,
+    docs_limit: int,
+    scope_ids: Optional[Sequence[int]],
 ) -> dict:
     # Not-indexed branch: return a dedicated ``index_hint`` and omit the
     # polysemy fields entirely (a term that never entered the graph is
@@ -144,8 +274,14 @@ def _inspect(
         empty["similar_keywords"] = []
         return empty
 
-    # Documents (per scope) that contain the keyword.
-    docs_by_scope, _seed_docs_ignored = _seed_docs(conn, folded)
+    # Documents (per scope) that contain the keyword. ``scope_ids`` is
+    # threaded into every scope-aware helper so an explicit --scope /
+    # --tag filter narrows every field consistently (docs_by_scope,
+    # top_docs, top_cooccurring_keywords, knowledge_scopes,
+    # similar_keywords). None ⇒ cross-scope.
+    docs_by_scope, _seed_docs_ignored, doc_hits = _seed_docs(
+        conn, folded, scope_ids=scope_ids
+    )
     if not docs_by_scope:
         # v10 knowledge-only branch (plan-2026-07-14 §9.4): when the seed
         # exists in ``keyword_stats`` (knowledge layer) but has zero
@@ -154,9 +290,13 @@ def _inspect(
         # on this machine. Fall back to a cooccurrence-only report so the
         # caller still gets useful graph expansion, plus a distinct
         # ``evidence_hint`` explaining why doc counts are 0.
-        knowledge_scopes = _knowledge_only_scopes(conn, folded)
+        knowledge_scopes = _knowledge_only_scopes(
+            conn, folded, scope_ids=scope_ids
+        )
         if knowledge_scopes:
-            cooccur_weight, cooccur_scopes, _ = _cooccurrences(conn, folded)
+            cooccur_weight, cooccur_scopes, _ = _cooccurrences(
+                conn, folded, scope_ids=scope_ids,
+            )
             top_cooccurring = sorted(
                 cooccur_weight.items(), key=lambda item: (-item[1], item[0])
             )[:limit]
@@ -183,7 +323,9 @@ def _inspect(
                     f"knowledge-graph expansion (evidence not required)."
                 ),
             }
-        empty["similar_keywords"] = _similar_keywords(conn, folded, similar_limit)
+        empty["similar_keywords"] = _similar_keywords(
+            conn, folded, similar_limit, scope_ids=scope_ids
+        )
         return empty
     total_docs = sum(docs_by_scope.values())
 
@@ -191,7 +333,7 @@ def _inspect(
     # graph (``keyword_pairs``, chunk-level cooccur_count materialised at
     # build time). Per-scope breakdown feeds the polysemy heuristic.
     cooccur_weight, cooccur_scopes, per_scope_cooccur = _cooccurrences(
-        conn, folded
+        conn, folded, scope_ids=scope_ids,
     )
 
     top_cooccurring = sorted(
@@ -210,7 +352,7 @@ def _inspect(
         docs_by_scope, per_scope_cooccur, cooccur_limit
     )
 
-    return {
+    result = {
         "keyword": original,
         "total_docs": total_docs,
         "docs_by_scope": dict(
@@ -220,6 +362,20 @@ def _inspect(
         "suspected_polysemy": suspected,
         "polysemy_hint": hint,
     }
+    # ``top_docs``: "which files hold this term" locate-me shortcut. Reads
+    # off the same ``keyword_docs`` scan already done above so it costs
+    # nothing extra. Sorted globally (not per-scope) by occurrence density
+    # so the caller sees the strongest hits first regardless of which
+    # corpus they live in; ``scope`` is on each row for routing back.
+    # Suppressed when ``docs_limit <= 0`` — caller opt-out for JSON size.
+    if docs_limit > 0 and doc_hits:
+        ordered = sorted(
+            doc_hits,
+            key=lambda h: (-h["occurrence_count"], -h["chunk_count"], h["scope"], h["doc_path"]),
+        )
+        result["top_docs"] = ordered[:docs_limit]
+        result["top_docs_truncated"] = len(ordered) > docs_limit
+    return result
 
 
 def _resolve_kw_ids(
@@ -244,9 +400,33 @@ def _resolve_kw_ids(
     return out
 
 
+def _scope_filter_clause(
+    column: str,
+    scope_ids: Optional[Sequence[int]],
+) -> tuple[str, List[int]]:
+    """Build a ``AND {column} IN (?, ?, ...)`` fragment and its params.
+
+    Central so every scope-aware helper here (``_seed_docs``,
+    ``_cooccurrences_batch``, ``_knowledge_only_scopes``,
+    ``_similar_keywords``) narrows on ``scope_id`` the same way and
+    survives the same escape/placeholder rules. Returns ``("", [])``
+    when ``scope_ids`` is ``None`` (cross-scope). An empty *list* is
+    treated the same as ``None`` and never surfaces as ``IN ()`` — the
+    caller upstream is responsible for handling "explicit filter, zero
+    matches" (see :func:`_resolve_scope_filter`).
+    """
+    if not scope_ids:
+        return "", []
+    ids = list(scope_ids)
+    placeholders = ",".join("?" for _ in ids)
+    return f" AND {column} IN ({placeholders})", ids
+
+
 def _cooccurrences(
     conn: sqlite3.Connection,
     folded: str,
+    *,
+    scope_ids: Optional[Sequence[int]] = None,
 ) -> tuple[Dict[str, float], Dict[str, set], Dict[str, Dict[str, float]]]:
     """Aggregate keywords co-occurring with ``folded`` via ``keyword_pairs``.
 
@@ -261,19 +441,26 @@ def _cooccurrences(
     / ``(dir_id, kw_b_id, ...)`` indexes — no more full-table scan on
     text-column OR. For batch use, see :func:`_cooccurrences_batch`.
 
+    ``scope_ids`` narrows the read to the given scope shard(s). ``None``
+    or empty = cross-scope union.
+
     Returns ``(cooccur_weight, cooccur_scopes, per_scope_cooccur)``.
     """
     kw_ids = _resolve_kw_ids(conn, [folded])
     seed_kw_id = kw_ids.get(folded)
     if seed_kw_id is None:
         return {}, {}, {}
-    batch = _cooccurrences_batch(conn, {folded: seed_kw_id})
+    batch = _cooccurrences_batch(
+        conn, {folded: seed_kw_id}, scope_ids=scope_ids
+    )
     return batch.get(folded, ({}, {}, {}))
 
 
 def _cooccurrences_batch(
     conn: sqlite3.Connection,
     seed_kw_ids: Dict[str, int],
+    *,
+    scope_ids: Optional[Sequence[int]] = None,
 ) -> Dict[str, tuple[Dict[str, float], Dict[str, set], Dict[str, Dict[str, float]]]]:
     """Batched :func:`_cooccurrences` — one scan resolves many keywords.
 
@@ -307,6 +494,7 @@ def _cooccurrences_batch(
 
     # F4: two index-friendly IN queries — a-side and b-side of the pair.
     # Chunk-partition to dodge SQLITE_MAX_VARIABLE_NUMBER.
+    scope_clause, scope_params = _scope_filter_clause("p.scope_id", scope_ids)
     for i in range(0, len(id_list), 900):
         piece = id_list[i:i + 900]
         ph = ",".join("?" for _ in piece)
@@ -322,8 +510,9 @@ def _cooccurrences_batch(
             JOIN scopes s ON s.id = p.scope_id
             WHERE p.source = 'chunk_cooccur'
               AND p.kw_a_id IN ({ph})
+            {scope_clause}
             """,
-            piece,
+            [*piece, *scope_params],
         ):
             _absorb_cooccur_row(row, id_to_folded, out)
         # b-side: seed is kw_b_id; other is kw_a_id
@@ -338,8 +527,9 @@ def _cooccurrences_batch(
             JOIN scopes s ON s.id = p.scope_id
             WHERE p.source = 'chunk_cooccur'
               AND p.kw_b_id IN ({ph})
+            {scope_clause}
             """,
-            piece,
+            [*piece, *scope_params],
         ):
             _absorb_cooccur_row(row, id_to_folded, out)
     return out
@@ -370,6 +560,8 @@ def _similar_keywords(
     conn: sqlite3.Connection,
     folded: str,
     limit: int,
+    *,
+    scope_ids: Optional[Sequence[int]] = None,
 ) -> List[dict]:
     """Vocabulary-level fallback for the not-indexed branch.
 
@@ -413,8 +605,12 @@ def _similar_keywords(
         folded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     )
     like_pattern = f"%{esc}%"
+    # ``kd.scope_id`` narrows the vocab probe to the requested scopes so
+    # a --scope-constrained "seed not found here" fallback only lists
+    # spellings that actually live in those scopes.
+    scope_clause, scope_params = _scope_filter_clause("kd.scope_id", scope_ids)
     rows = conn.execute(
-        r"""
+        rf"""
         SELECT k.kw AS kw, COALESCE(SUM(kd.chunk_count), 0) AS chunk_df
         FROM keywords k
         JOIN keyword_docs kd ON kd.kw_id = k.id
@@ -425,11 +621,12 @@ def _similar_keywords(
                                              '%', '\%'),
                                      '_', '\_') || '%' ESCAPE '\'
           )
+          {scope_clause}
         GROUP BY k.id
         ORDER BY chunk_df DESC, kw ASC
         LIMIT ?
         """,
-        (folded, like_pattern, folded, int(limit)),
+        (folded, like_pattern, folded, *scope_params, int(limit)),
     ).fetchall()
     out: List[dict] = []
     for row in rows:
@@ -451,6 +648,8 @@ def _similar_keywords(
 def _knowledge_only_scopes(
     conn: sqlite3.Connection,
     folded: str,
+    *,
+    scope_ids: Optional[Sequence[int]] = None,
 ) -> List[str]:
     """Return scope names where ``folded`` has knowledge but no evidence.
 
@@ -461,15 +660,17 @@ def _knowledge_only_scopes(
     can distinguish that from a genuinely unknown seed. Reads
     ``keyword_stats`` (the per-scope knowledge presence signal).
     """
+    scope_clause, scope_params = _scope_filter_clause("ks.scope_id", scope_ids)
     rows = conn.execute(
-        """
+        f"""
         SELECT s.name AS scope
         FROM keyword_stats ks
         JOIN keywords k ON k.id = ks.kw_id
         JOIN scopes s ON s.id = ks.scope_id
         WHERE k.kw = ?
+          {scope_clause}
         """,
-        (folded,),
+        (folded, *scope_params),
     ).fetchall()
     return [str(row["scope"]) for row in rows]
 
@@ -477,31 +678,55 @@ def _knowledge_only_scopes(
 def _seed_docs(
     conn: sqlite3.Connection,
     folded: str,
-) -> tuple[Dict[str, int], Dict[str, set]]:
-    """Return ``(docs_by_scope, seed_docs_by_scope)`` for a single keyword.
+    *,
+    scope_ids: Optional[Sequence[int]] = None,
+) -> tuple[Dict[str, int], Dict[str, set], List[dict]]:
+    """Return ``(docs_by_scope, seed_docs_by_scope, doc_hits)`` for a keyword.
 
     v9: reads the doc-level ``keyword_docs`` index. Shared by
     :func:`_inspect` and :func:`compute_suspected_polysemy` so the seed
     set is resolved identically at both entry points.
+
+    ``doc_hits`` is the flat per-document list carrying the same
+    ``occurrence_count`` / ``chunk_count`` columns that :func:`_inspect`
+    surfaces as ``top_docs``. Kept here (rather than re-queried in
+    ``_inspect``) so the single ``keyword_docs`` scan already fans out
+    all three views. Callers that only need the aggregate (e.g.
+    :func:`compute_suspected_polysemy`) simply ignore the third slot.
+
+    ``scope_ids`` narrows the read to the given scope shard(s). ``None``
+    or empty = cross-scope union.
     """
+    scope_clause, scope_params = _scope_filter_clause("kd.scope_id", scope_ids)
     seed_rows = conn.execute(
-        """
-        SELECT s.name AS scope, d.doc_path AS doc_path
+        f"""
+        SELECT s.name AS scope,
+               d.doc_path AS doc_path,
+               kd.occurrence_count AS occurrence_count,
+               kd.chunk_count AS chunk_count
         FROM keyword_docs kd
         JOIN keywords k ON k.id = kd.kw_id
         JOIN docs d ON d.id = kd.doc_id
         JOIN scopes s ON s.id = d.scope_id
         WHERE k.kw = ?
+          {scope_clause}
         """,
-        (folded,),
+        (folded, *scope_params),
     ).fetchall()
     docs_by_scope: Dict[str, int] = {}
     seed_docs_by_scope: Dict[str, set] = {}
+    doc_hits: List[dict] = []
     for row in seed_rows:
         scope = row["scope"]
         docs_by_scope[scope] = docs_by_scope.get(scope, 0) + 1
         seed_docs_by_scope.setdefault(scope, set()).add(row["doc_path"])
-    return docs_by_scope, seed_docs_by_scope
+        doc_hits.append({
+            "scope": scope,
+            "doc_path": row["doc_path"],
+            "occurrence_count": int(row["occurrence_count"] or 0),
+            "chunk_count": int(row["chunk_count"] or 0),
+        })
+    return docs_by_scope, seed_docs_by_scope, doc_hits
 
 
 def _seed_docs_batch(
@@ -554,7 +779,7 @@ def compute_suspected_polysemy(
     folded = _fold(keyword)
     if not folded:
         return False, ""
-    docs_by_scope, _ = _seed_docs(conn, folded)
+    docs_by_scope, _, _ = _seed_docs(conn, folded)
     if not docs_by_scope:
         return False, ""
     _, _, per_scope_cooccur = _cooccurrences(conn, folded)

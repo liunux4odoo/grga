@@ -113,11 +113,16 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
 
 ### Supporting commands (read-side only)
 
-- `grga graph inspect <keyword> --db <path>` — diagnostic on a keyword's
-  scope distribution, top co-occurring keywords, polysemy signal. **Not
-  a substitute for `related`** (see `references/reflection-loop.md`
-  § T2 is `related`, not `graph inspect`). Empty output means the
-  keyword is not in the offline index — treat as "no signal" and skip.
+- `grga graph inspect <keyword> --db <path> [--scope <name> …] [--tag <label> …] [--tag-logic and|or] [--docs-limit N]` —
+  diagnostic on a keyword's scope distribution, `top_docs` (the documents
+  holding it, a locate-me shortcut), top co-occurring keywords, and
+  polysemy signal. `--scope` / `--tag` narrow every field the same way as
+  `related`; an explicit filter matching zero scopes returns
+  `scope_filter_hint` (distinct from `index_hint`). **Not a substitute
+  for `related`** (see `references/reflection-loop.md` § T2 is `related`,
+  not `graph inspect`). Empty output (`total_docs == 0`, no
+  `scope_filter_hint`) means the keyword is not in the offline index —
+  treat as "no signal" and skip.
 
 > Offline index construction (`grga index build` / `index rebuild` /
 > `index promote`) is **out of scope for this skill**. The user is

@@ -1909,16 +1909,37 @@ def graph_inspect_command(
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     limit: int = typer.Option(20, "--limit", "-n", help="Cap top_cooccurring_keywords returned."),
     similar_limit: int = typer.Option(10, "--similar-limit", help="Cap similar_keywords in the not-indexed branch (vocab substring/superstring probe)."),
+    docs_limit: int = typer.Option(5, "--docs-limit", help="Cap top_docs returned in the indexed branch (documents holding the keyword, sorted by occurrence density). 0 disables the field."),
+    scopes: List[str] = typer.Option([], "--scope", "-s", help="Logical scope name (v10). Repeatable — restrict every field (docs_by_scope / top_docs / top_cooccurring_keywords / knowledge_scopes) to the given scopes. Omit for cross-scope union. Combined with --tag, the two filters intersect (name ∩ tag)."),
+    tags: List[str] = typer.Option([], "--tag", "-t", help="Scope tag label (schema v11). Repeatable. Resolves to the set of scopes whose scope_tags match under --tag-logic, then narrows the inspect the same way --scope does. Combine with --scope for name ∩ tag."),
+    tag_logic: str = typer.Option("or", "--tag-logic", help="How multiple --tag values combine: `or` (default; scopes with any listed tag) or `and` (scopes carrying every listed tag)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
 ):
-    """Inspect a keyword's distribution across scopes and polysemy signals."""
+    """Inspect a keyword's distribution across scopes and polysemy signals.
+
+    Pass ``--scope`` / ``--tag`` to narrow the report to specific corpora
+    (same filter semantics as ``grga related``); omit both for a
+    cross-scope view.
+    """
     from grga.graph.inspect import inspect_keyword
+    from grga.related import VALID_TAG_LOGIC
+
+    if tag_logic not in VALID_TAG_LOGIC:
+        typer.echo(
+            f"--tag-logic must be one of: {', '.join(VALID_TAG_LOGIC)}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     report = inspect_keyword(
         keyword,
         db_path=str(db_path) if db_path else None,
         limit=limit,
         similar_limit=similar_limit,
+        docs_limit=docs_limit,
+        scope_names=scopes or None,
+        tag_names=tags or None,
+        tag_logic=tag_logic,
     )
     if json_output:
         typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
@@ -1929,11 +1950,27 @@ def graph_inspect_command(
         typer.echo("docs_by_scope:")
         for scope, count in report["docs_by_scope"].items():
             typer.echo(f"  {count:>4}  {scope}")
+    top_docs = report.get("top_docs") or []
+    if top_docs:
+        suffix = " (truncated)" if report.get("top_docs_truncated") else ""
+        typer.echo(f"top_docs{suffix}:")
+        for entry in top_docs:
+            typer.echo(
+                f"  occ={entry['occurrence_count']:<5} "
+                f"chunks={entry['chunk_count']:<4} "
+                f"[{entry['scope']}] {entry['doc_path']}"
+            )
     if report["top_cooccurring_keywords"]:
         typer.echo("top_cooccurring_keywords:")
         for entry in report["top_cooccurring_keywords"]:
-            scopes = ", ".join(entry["shared_scopes"])
-            typer.echo(f"  {entry['weight']:8.3f}  {entry['keyword']}  [{scopes}]")
+            scopes_str = ", ".join(entry["shared_scopes"])
+            typer.echo(f"  {entry['weight']:8.3f}  {entry['keyword']}  [{scopes_str}]")
+    # An explicit --scope / --tag that matched zero scopes returns a
+    # dedicated ``scope_filter_hint`` (distinct from the not-indexed
+    # ``index_hint``): the keyword may well be indexed, just not under the
+    # requested filter.
+    if report.get("scope_filter_hint"):
+        typer.echo(f"scope_filter_hint: {report['scope_filter_hint']}", err=True)
     # The not-indexed branch (§1.5.1 naming ironclad) publishes an
     # ``index_hint`` instead of ``polysemy_hint`` and drops
     # ``suspected_polysemy`` altogether — use ``.get`` so the CLI stays

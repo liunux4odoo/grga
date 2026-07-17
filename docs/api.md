@@ -334,6 +334,15 @@ user-scoped DB, plus a heuristic same-name-different-meaning warning.
 Read this to gauge seed quality (hub? polysemy?) 之前决定是否用它做
 `related` 的 seed，或跨 scope 查询时是否可信。
 
+**Scope / tag 过滤**（与 `grga related` 同款语义）：`--scope <name>`
+（可重复）把 `docs_by_scope` / `top_docs` / `top_cooccurring_keywords` /
+`knowledge_scopes` 全部收敛到指定 scope；`--tag <label>`（可重复，schema
+v11）先经 `scope_tags` 解析成 scope 集合再套同一过滤链路，`--tag-logic
+and|or`（默认 `or`）控制多 tag 组合。`--scope` + `--tag` 同时给时取交集
+（name ∩ tag）；两者皆空 = 跨 scope union。显式过滤若命中 0 个 scope，
+返回专用的 `scope_filter_hint`（区别于 not-indexed 的 `index_hint`——
+关键字本身可能已索引，只是不在该过滤范围内），并清空所有 scope 相关字段。
+
 ```jsonc
 {
   "keyword": "attention",         // string — echoes request
@@ -343,6 +352,17 @@ Read this to gauge seed quality (hub? polysemy?) 之前决定是否用它做
     "/abs/papers/psychology":  31,
     "/abs/notes":              16
   },
+  "top_docs": [                   // 定位捷径：持有该词的文档，按出现密度降序
+    {"scope": "/abs/papers/nlp",
+     "doc_path": "transformers.md",
+     "occurrence_count": 12,
+     "chunk_count": 4},
+    {"scope": "/abs/papers/psychology",
+     "doc_path": "attention-and-memory.md",
+     "occurrence_count": 9,
+     "chunk_count": 3}
+  ],
+  "top_docs_truncated": true,      // bool — true when total_docs > --docs-limit
   "top_cooccurring_keywords": [
     {"keyword": "transformer",
      "weight": 0.71,
@@ -356,6 +376,17 @@ Read this to gauge seed quality (hub? polysemy?) 之前决定是否用它做
   "polysemy_hint": "This keyword appears in 3 scopes with largely disjoint …"
 }
 ```
+
+`top_docs` 是"哪些文件持有这个词"的定位捷径：直接读 `keyword_docs`
+（doc-count 聚合已扫过的同一张表，零额外成本），跨 scope 全局按
+`(-occurrence_count, -chunk_count, scope, doc_path)` 排序，返回前
+`--docs-limit`（默认 5，`0` 关闭）条。每行带 `scope` 便于 caller 把后续
+`grga search` / 文件打开路由回正确的 `scope_directories` 绑定，免去额外的
+全文搜索 round-trip。`top_docs_truncated` 在 `total_docs` 超过
+`--docs-limit` 时为 `true`。`doc_path` 相对于该 scope 绑定的目录。
+`top_docs` / `top_docs_truncated` 只出现在 indexed 分支——not-indexed 与
+knowledge-only（`grga index import` 后未 build）分支都无本地
+`keyword_docs` 证据，故不带此字段。
 
 `suspected_polysemy` uses the top ``--limit`` co-occurring keywords per
 scope and flags cases where different corpora keep entirely different

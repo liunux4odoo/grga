@@ -104,7 +104,7 @@ and are **not interchangeable** for T2 exploration:
 | Verb | Answers | Output | When |
 |---|---|---|---|
 | `related <seed> --mode graph` | "还有**哪些相关的关键词**能沿着这个 seed 展开？" | 候选关键字数组（`{kw, npmi, cooccur_count, via_seed, chunk_df, source}`）；caller 拿去 ripgrep 找片段 | **T2-bookend**（session-open + pre-answer, mandatory）和 **T2-escalate**（mid-session widening） |
-| `graph inspect <keyword>` | "What is this **keyword** like — scope distribution, top co-occurring words, polysemy?" | Metadata on the *keyword*, no documents | Diagnostic only: seed-quality check, cross-scope pollution audit, "why is my `related` empty?" |
+| `graph inspect <keyword>` | "What is this **keyword** like — scope distribution, top co-occurring words, polysemy, which files hold it?" | Metadata on the *keyword* + `top_docs` locate-me shortcut (documents holding the keyword, capped by `--docs-limit`) | Diagnostic only: seed-quality check, cross-scope pollution audit, "why is my `related` empty?", quick file-level location lookup |
 
 **Failure mode observed in practice**: caller runs `graph inspect` on a
 hub word (protagonist name, framework name, top-level concept) early,
