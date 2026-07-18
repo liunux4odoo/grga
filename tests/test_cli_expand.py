@@ -72,3 +72,40 @@ def test_expand_bad_line_number(docs_fixture: Path):
 def test_expand_invalid_level(docs_fixture: Path):
     result = runner.invoke(app, ["expand", "install.md:5", "--level", "galaxy", "-d", str(docs_fixture)])
     assert result.exit_code == 2
+
+
+def test_expand_toc_json(docs_fixture: Path, sidecar_env):
+    result = runner.invoke(
+        app,
+        ["expand", "install.md:7", "--level", "toc", "-d", str(docs_fixture), "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["level"] == "toc"
+    assert payload["truncated"] is False
+    # Every heading in install.md should appear in the outline text.
+    for title in ("安装指南", "macOS", "Linux", "Ubuntu", "Fedora", "Windows"):
+        assert title in payload["text"], f"missing heading {title!r} in TOC output"
+    # The hit chapter should be marked with the '> ' prefix.
+    assert "> " in payload["text"]
+
+
+def test_expand_toc_plain_output(docs_fixture: Path, sidecar_env):
+    result = runner.invoke(
+        app,
+        ["expand", "install.md:7", "--level", "toc", "-d", str(docs_fixture)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "macOS" in result.output
+    assert "level=toc" in result.output
+
+
+def test_expand_toc_degrades_on_non_markdown(docs_fixture: Path, sidecar_env):
+    result = runner.invoke(
+        app,
+        ["expand", "code_sample.py:4", "--level", "toc", "-d", str(docs_fixture), "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    # No heading tree available -> falls through the chapter degrade chain.
+    assert payload["level"] in ("chapter", "paragraph", "lines")

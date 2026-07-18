@@ -138,9 +138,18 @@ Deep-search also adds top-level `query`, `strategy`
 }
 ```
 
-`level` is one of `lines | paragraph | chapter | document`. It may be
+`level` is one of `lines | paragraph | chapter | document | toc`. It may be
 **smaller** than requested because of the degrade chain
-`chapter → paragraph → lines(±size) → lines(±0)`. Always read it back.
+`chapter → paragraph → lines(±size) → lines(±0)` (and `toc → chapter` when
+the file has no heading tree). Always read it back.
+
+`toc` is a special level: `text` is the single-document outline (one line
+per heading, indented by nesting depth, the hit's chapter marked with
+`> `), not body text. Like `document` it returns the whole outline by
+default and only sets `truncated: true` — centring the window on the hit's
+chapter — when the rendered outline would exceed the ~1MB safety cap. A
+non-truncated `toc` therefore equals the full-document outline. `range`
+spans the first-to-last heading returned.
 
 ### `Hit` object (serialised dataclass)
 

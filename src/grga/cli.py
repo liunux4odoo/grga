@@ -824,15 +824,21 @@ def gui_command():
 @app.command("expand")
 def expand_command(
     target: str = typer.Argument(..., help="Hit target as 'PATH:LINE' (e.g. docs/foo.md:42)."),
-    level: str = typer.Option("chapter", "--level", "-l", help="Expansion level: lines | paragraph | chapter | document."),
+    level: str = typer.Option("chapter", "--level", "-l", help="Expansion level: lines | paragraph | chapter | document | toc."),
     size: int = typer.Option(3, "--size", "-s", help="Line window size for --level lines (+/- size)."),
     directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Base directory the hit path is relative to."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON context."),
 ):
     """Expand a search hit into a wider context block.
 
-    Levels degrade predictably: chapter -> paragraph -> lines(+/-size) -> lines(+/-0).
-    The returned ``level`` field reflects the level actually achieved.
+    Levels degrade predictably: chapter -> paragraph -> lines(+/-size) -> lines(+/-0);
+    toc -> chapter (when the file has no heading tree). The returned ``level``
+    field reflects the level actually achieved.
+
+    ``--level toc`` returns the single-document outline (one line per heading,
+    the hit's chapter marked with ``>``) instead of body text. Like
+    ``document`` it returns the whole outline and only truncates — centred on
+    the hit's chapter — when it would exceed the safety cap.
     """
     from grga.expand import expand as expand_hit
     from grga.models import Hit
@@ -849,8 +855,8 @@ def expand_command(
     if not path_part or line_number <= 0:
         typer.echo("target must look like 'PATH:LINE' with LINE > 0", err=True)
         raise typer.Exit(2)
-    if level not in ("lines", "paragraph", "chapter", "document"):
-        typer.echo(f"level must be one of: lines, paragraph, chapter, document", err=True)
+    if level not in ("lines", "paragraph", "chapter", "document", "toc"):
+        typer.echo(f"level must be one of: lines, paragraph, chapter, document, toc", err=True)
         raise typer.Exit(2)
 
     hit = Hit(path=path_part, line_number=line_number, text="")

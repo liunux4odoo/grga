@@ -80,16 +80,27 @@ as implicit AND, `implicit_notice` (string).
 
 ```
 grga expand <path>:<line> -d <base_dir>
-                          --level lines|paragraph|chapter|document
+                          --level lines|paragraph|chapter|document|toc
                           [--size N]
                           [--json]
 ```
 
 Envelope: `{hit, text, level, range: [start, end], truncated}`.
 
-Levels degrade predictably: `chapter → paragraph → lines(±size) → lines(±0)`.
-The returned `level` field reflects what was **actually** achieved (may be
-smaller than requested). Never invokes an LLM. Never modifies anything.
+Levels degrade predictably: `chapter → paragraph → lines(±size) → lines(±0)`,
+and `toc → chapter` when the file has no parseable heading tree. The returned
+`level` field reflects what was **actually** achieved (may be smaller than
+requested). Never invokes an LLM. Never modifies anything.
+
+`--level toc` is the single-document outline: `text` is one rendered line per
+heading (indented by nesting depth, `[start-end]` line range suffix, the hit's
+chapter marked with `> `), **not** body text. Following the `document`
+philosophy it returns the whole outline by default and only sets
+`truncated: true` — centring the kept window on the hit's chapter — when the
+rendered outline would exceed the ~1MB safety cap. A non-truncated `toc`
+equals the full-document outline; `range` spans the first-to-last heading
+returned. Use it to see a file's structure or locate where a hit sits in it
+without paying for full body text.
 
 ## 3. `related`
 
