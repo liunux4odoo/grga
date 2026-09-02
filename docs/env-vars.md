@@ -112,6 +112,13 @@ grga 的缓存与配置位置。
 |---|---|---|
 | `GRGA_DISPLAY_SCALE` | 自动检测 | 手动覆盖 HiDPI 缩放比例，范围 1.0 – 2.5。也可在 GUI 的 settings 中配置 |
 
+## MCP 服务器
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `GRGA_DB_PATH` | 共享 deep-search DB | 覆盖默认共享图索引 DB 路径。`grga mcp` 的 scope/related/suggest 工具读侧均受此变量影响；命令行 `grga mcp start --db-path` 优先 |
+| `GRGA_MCP_LOG_LEVEL` | `WARNING` | MCP server 日志级别（`DEBUG`/`INFO`/`WARNING`/`ERROR`）。日志走 stderr，不污染 stdio 协议。见 `docs/design/plan-2026-09-02-mcp-server.md` §7.2 |
+
 ---
 
 ## 相关文档

@@ -14,6 +14,7 @@ src/grga/
 ├── cli.py, __main__.py         # CLI 入口（Typer 命令注册）
 ├── {probe,search,expand,       # v2 五动词原语（design §4）
 │   related,suggest}.py
+├── mcp/                        # MCP server（可选 extra `[mcp]`）：6 个 tool 适配器
 ├── deep_search.py              # v1 多跳搜索（重量级，legacy 主体）
 ├── models.py, meta.py          # 数据类 Hit / Context + 位置元数据填充
 ├── file_read.py                # 统一 file→list[str]：文本走 open()、非文本 suffix 走 rga --passthru
@@ -226,6 +227,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | 加一个 CLI 参数 | `cli.py` 找对应 `@app.command`，然后到该动词的核心模块 |
 | 改搜索行为 | `search.py::search_directory`；GUI 需同步（见 AGENTS.md） |
 | 改图扩展算法 | `graph/build.py`（写入期共现资产）+ `related.py::related_keywords`（读侧查询）；bench 里跑对比 |
+| 加一个 MCP tool | `mcp/tools/<name>.py`（薄适配器：参数校验 → 调 grga 内部函数 → 格式化）；`mcp/server.py` 里注册 |
 | 改 build 期 pair / 聚合逻辑 | `graph/build.py::_finalize_pairs_from_temp`（TEMP TABLE + SQL self-join，方法学见 `docs/design/db-memory-optimization-lessons.md`） |
 | 改 related 性能 / 候选查询 | `related.py::related_keywords`（index-only 早停查 `keyword_pairs`）；写入期见 `graph/build.py`；设计见 `docs/design/plan-2026-07-12-keyword-primary.md`，历史 perf 实验 `experiments/related_perf_2026_07_12/` |
 | 加一种 LLM intent | `suggest.py` + 新增 `prompts/suggest_<intent>.txt` |

@@ -33,6 +33,7 @@ grga preview      预览底层搜索命令
 grga check        检查搜索运行环境
 grga gui          启动图形界面
 grga tools        管理内置命令行工具
+grga mcp start    以 stdio 模式启动 MCP 服务器（需 `pip install grga[mcp]`）
 ```
 
 ## 搜索文件内容
@@ -476,6 +477,22 @@ grga gui
 ```bash
 grga-gui
 ```
+
+## 启动 MCP 服务器
+
+`grga mcp start` 以 stdio 模式启动一个 MCP（Model Context Protocol）服务器，
+把 grga 的 5 个检索动词（`probe` / `search` / `expand` / `related` /
+`suggest`）+ `scope list` 暴露成 MCP tools，供 Claude Desktop、Cline、Cursor
+等本地 MCP 客户端使用。
+
+```bash
+pip install "grga[mcp]"   # 首次使用需安装可选依赖
+grga mcp start
+```
+
+MCP 服务器是**只读 + 检索侧**：`suggest`（L3 LLM 兜底）不写入投票。日志走
+stderr（`GRGA_MCP_LOG_LEVEL`），共享图索引 DB 可用 `GRGA_DB_PATH` 或
+`--db-path` 覆盖。设计见 `docs/design/plan-2026-09-02-mcp-server.md`。
 
 ## 管理内置工具
 

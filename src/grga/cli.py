@@ -55,6 +55,8 @@ scope_app = typer.Typer(no_args_is_help=True, help="Manage logical scope names +
 app.add_typer(scope_app, name="scope")
 scope_tag_app = typer.Typer(no_args_is_help=True, help="Manage multi-value scope tags (v11).")
 scope_app.add_typer(scope_tag_app, name="tag")
+mcp_app = typer.Typer(no_args_is_help=True, help="Start an MCP (Model Context Protocol) server.")
+app.add_typer(mcp_app, name="mcp")
 
 CONFIG_PATH = Path.home() / ".config" / "grga" / "settings.json"
 
@@ -2270,6 +2272,34 @@ def scope_tag_mv_command(
     typer.echo(
         f"renamed tag on scope {scope!r}: {old_tag!r} -> {new_tag!r}"
     )
+
+
+@mcp_app.command("start")
+def mcp_start_command(
+    db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to $GRGA_DB_PATH or shared deep-search DB)."),
+):
+    """Start the MCP server in stdio mode.
+
+    Exposes probe / search / expand / related / suggest / scope_list as
+    MCP tools for any local MCP client (Claude Desktop, Cline, Cursor, ...).
+    Requires the optional dependency: ``pip install grga[mcp]``.
+    """
+    try:
+        from grga.mcp.server import run_server
+    except ImportError as exc:
+        typer.echo(
+            "grga mcp requires the optional 'mcp' dependency. "
+            "Install it with: pip install \"grga[mcp]\"",
+            err=True,
+        )
+        if exc.name not in ("mcp",) and exc.name is not None:
+            typer.echo(f"detail: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if db_path is not None:
+        os.environ["GRGA_DB_PATH"] = str(db_path.expanduser())
+
+    run_server()
 
 
 def main():
