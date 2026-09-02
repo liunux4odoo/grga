@@ -2277,12 +2277,16 @@ def scope_tag_mv_command(
 @mcp_app.command("start")
 def mcp_start_command(
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to $GRGA_DB_PATH or shared deep-search DB)."),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Default search directory. probe / search / expand fall back to it when the caller omits `directory` / `base_dir`."),
 ):
     """Start the MCP server in stdio mode.
 
     Exposes probe / search / expand / related / suggest / scope_list as
     MCP tools for any local MCP client (Claude Desktop, Cline, Cursor, ...).
     Requires the optional dependency: ``pip install grga[mcp]``.
+
+    ``--directory`` sets a server-wide default search directory so callers
+    can omit the per-call ``directory`` / ``base_dir`` argument.
     """
     try:
         from grga.mcp.server import run_server
@@ -2298,6 +2302,8 @@ def mcp_start_command(
 
     if db_path is not None:
         os.environ["GRGA_DB_PATH"] = str(db_path.expanduser())
+    if directory is not None:
+        os.environ["GRGA_MCP_DEFAULT_DIRECTORY"] = str(directory)
 
     run_server()
 

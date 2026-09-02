@@ -18,6 +18,7 @@ _logger = logging.getLogger("grga.mcp")
 
 _GRGA_DB_PATH_ENV = "GRGA_DB_PATH"
 _GRGA_MCP_LOG_LEVEL_ENV = "GRGA_MCP_LOG_LEVEL"
+_GRGA_MCP_DEFAULT_DIRECTORY_ENV = "GRGA_MCP_DEFAULT_DIRECTORY"
 
 
 def resolve_db_path(db_path) -> str:
@@ -34,6 +35,20 @@ def resolve_db_path(db_path) -> str:
     from grga.deep_search import DEFAULT_DB_PATH
 
     return str(DEFAULT_DB_PATH)
+
+
+def resolve_default_directory() -> str:
+    """Return the server-wide default search directory.
+
+    Set by ``grga mcp start --directory <path>`` (via
+    ``$GRGA_MCP_DEFAULT_DIRECTORY``). Tools fall back to it when the caller
+    omits ``directory`` / ``base_dir``. Returns ``""`` when unset so callers
+    can distinguish "no default" cheaply.
+    """
+    env_dir = os.environ.get(_GRGA_MCP_DEFAULT_DIRECTORY_ENV)
+    if env_dir:
+        return str(Path(env_dir).expanduser())
+    return ""
 
 
 def configure_logging() -> None:

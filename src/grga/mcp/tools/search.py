@@ -6,6 +6,7 @@ import json
 from typing import List, Optional
 
 import grga.search as search_mod
+from grga.mcp.utils import resolve_default_directory
 
 # ``search_directory`` only supports these modes; ``literal`` / ``pcre2``
 # are not implemented by the engine and would raise at query-compile time.
@@ -18,7 +19,7 @@ DEFAULT_MAX_TOTAL = 1000
 
 async def grga_search(
     query: List[str],
-    directory: str,
+    directory: Optional[str] = None,
     pattern_mode: str = "auto",
     case_sensitive: bool = False,
     max_total: Optional[int] = DEFAULT_MAX_TOTAL,
@@ -36,14 +37,19 @@ async def grga_search(
     before/after context) plus ``truncated`` / ``total_files_matched``.
     ``max_total`` caps the total real matches (default 1000; pass ``0`` or
     ``null`` for unlimited); the result is ``truncated: true`` when the
-    cap is exceeded.
+    cap is exceeded. ``directory`` falls back to the server default set by
+    ``grga mcp start --directory`` when omitted.
     """
+    effective_directory = directory or resolve_default_directory()
+    if not effective_directory or not str(effective_directory).strip():
+        raise ValueError(
+            "directory cannot be empty (pass directory, or start the server "
+            "with `grga mcp start --directory <path>`)"
+        )
     if pattern_mode not in VALID_PATTERN_MODES:
         raise ValueError(
             f"pattern_mode must be one of: {', '.join(VALID_PATTERN_MODES)}"
         )
-    if not directory or not str(directory).strip():
-        raise ValueError("directory cannot be empty")
     if implicit_operator not in ("and", "or"):
         raise ValueError("implicit_operator must be 'and' or 'or'")
 
@@ -53,7 +59,7 @@ async def grga_search(
 
     raw = await asyncio.to_thread(
         search_mod.search_directory,
-        directory,
+        effective_directory,
         [k for k in (query or []) if isinstance(k, str) and k.strip()],
         pattern_mode=pattern_mode,
         case_sensitive=case_sensitive,

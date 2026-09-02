@@ -11,6 +11,7 @@ import asyncio
 from typing import Optional
 
 from grga.expand import expand as expand_hit
+from grga.mcp.utils import resolve_default_directory
 from grga.models import Hit
 
 VALID_LEVELS = ("lines", "paragraph", "chapter", "document", "toc")
@@ -28,7 +29,8 @@ async def grga_expand(
     ``level`` degrades predictably (chapter → paragraph → lines → single
     line); the returned ``level`` field reflects the level actually
     achieved. ``document`` / ``toc`` carry a built-in 1 MB safety cap and
-    set ``truncated: true`` when they exceed it.
+    set ``truncated: true`` when they exceed it. ``base_dir`` falls back to
+    the server default set by ``grga mcp start --directory`` when omitted.
     """
     if not file_path or not str(file_path).strip():
         raise ValueError("file_path cannot be empty")
@@ -41,6 +43,6 @@ async def grga_expand(
 
     hit = Hit(path=file_path, line_number=anchor_line, text="")
     context = await asyncio.to_thread(
-        expand_hit, hit, level=level, size=size, base_dir=base_dir
+        expand_hit, hit, level=level, size=size, base_dir=base_dir or resolve_default_directory() or None
     )
     return context.to_dict()

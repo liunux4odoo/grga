@@ -490,6 +490,13 @@ pip install "grga[mcp]"   # 首次使用需安装可选依赖
 grga mcp start
 ```
 
+可以指定默认搜索目录，这样调用 `grga_search` / `grga_probe` / `grga_expand`
+时可以省略 `directory` / `base_dir` 参数：
+
+```bash
+grga mcp start --directory /path/to/corpus
+```
+
 MCP 服务器是**只读 + 检索侧**：`suggest`（L3 LLM 兜底）不写入投票。日志走
 stderr（`GRGA_MCP_LOG_LEVEL`），共享图索引 DB 可用 `GRGA_DB_PATH` 或
 `--db-path` 覆盖。设计见 `docs/design/plan-2026-09-02-mcp-server.md`。

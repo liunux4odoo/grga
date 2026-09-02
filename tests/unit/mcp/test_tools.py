@@ -43,6 +43,22 @@ def test_probe_rejects_empty_directory():
         _run(probe_tool.grga_probe(["x"], "   "))
 
 
+def test_probe_falls_back_to_default_directory(monkeypatch):
+    monkeypatch.setenv("GRGA_MCP_DEFAULT_DIRECTORY", "/default/corpus")
+    payload = {"ok": True, "total_lines": 1, "file_count": 1}
+    with mock.patch.object(probe_tool.probe_mod, "probe_directory", return_value=json.dumps(payload)) as m:
+        _run(probe_tool.grga_probe(["x"]))
+    assert m.call_args.args[0] == "/default/corpus"
+
+
+def test_probe_explicit_directory_wins_over_default(monkeypatch):
+    monkeypatch.setenv("GRGA_MCP_DEFAULT_DIRECTORY", "/default/corpus")
+    payload = {"ok": True, "total_lines": 1, "file_count": 1}
+    with mock.patch.object(probe_tool.probe_mod, "probe_directory", return_value=json.dumps(payload)) as m:
+        _run(probe_tool.grga_probe(["x"], "/explicit"))
+    assert m.call_args.args[0] == "/explicit"
+
+
 def test_probe_rejects_bad_pattern_mode():
     with pytest.raises(ValueError):
         _run(probe_tool.grga_probe(["x"], "/data", pattern_mode="nope"))
@@ -81,6 +97,14 @@ def test_search_rejects_unsupported_pattern_mode():
         _run(search_tool.grga_search(["x"], "/data", pattern_mode="literal"))
 
 
+def test_search_falls_back_to_default_directory(monkeypatch):
+    monkeypatch.setenv("GRGA_MCP_DEFAULT_DIRECTORY", "/default/corpus")
+    payload = {"ok": True, "matches": []}
+    with mock.patch.object(search_tool.search_mod, "search_directory", return_value=json.dumps(payload)) as m:
+        _run(search_tool.grga_search(["x"]))
+    assert m.call_args.args[0] == "/default/corpus"
+
+
 # ---------------------------------------------------------------------------
 # expand
 # ---------------------------------------------------------------------------
@@ -111,6 +135,24 @@ def test_expand_rejects_unknown_level():
 def test_expand_rejects_bad_anchor_line():
     with pytest.raises(ValueError):
         _run(expand_tool.grga_expand("f.md", 0, "lines"))
+
+
+def test_expand_base_dir_falls_back_to_default_directory(monkeypatch):
+    monkeypatch.setenv("GRGA_MCP_DEFAULT_DIRECTORY", "/default/corpus")
+    fake_ctx = mock.Mock()
+    fake_ctx.to_dict.return_value = {"hit": {}, "text": "", "level": "lines", "range": [1, 1], "truncated": False}
+    with mock.patch.object(expand_tool, "expand_hit", return_value=fake_ctx) as m:
+        _run(expand_tool.grga_expand("f.md", 5, "lines"))
+    assert m.call_args.kwargs["base_dir"] == "/default/corpus"
+
+
+def test_expand_base_dir_no_default_passes_none(monkeypatch):
+    monkeypatch.delenv("GRGA_MCP_DEFAULT_DIRECTORY", raising=False)
+    fake_ctx = mock.Mock()
+    fake_ctx.to_dict.return_value = {"hit": {}, "text": "", "level": "lines", "range": [1, 1], "truncated": False}
+    with mock.patch.object(expand_tool, "expand_hit", return_value=fake_ctx) as m:
+        _run(expand_tool.grga_expand("f.md", 5, "lines"))
+    assert m.call_args.kwargs["base_dir"] is None
 
 
 # ---------------------------------------------------------------------------
