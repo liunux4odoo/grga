@@ -29,6 +29,7 @@ Segment boundary rules (plan §5.2, ``chars`` mode only):
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import math
 import os
@@ -50,6 +51,7 @@ from grga.file_read import (
     indexable_suffixes,
     read_file_lines_ex,
 )
+from grga.search import _normalize_glob_patterns
 from grga.graph.ids import IdInterner, sql_var_chunks
 from grga.graph.schema import (
     BUILD_MIN_NPMI,
@@ -325,12 +327,36 @@ class Chunk:
     text: str
 
 
+def _compile_glob_matcher(patterns: Iterable[str]):
+    """Compile fnmatch-style patterns into a case-insensitive matcher.
+
+    ``*`` crosses ``/`` (loose fnmatch semantics — the same mental model as
+    ``rg --iglob``), and matching is case-insensitive regardless of the host
+    platform. The pattern list must already be normalized via
+    :func:`grga.search._normalize_glob_patterns` (or be empty). Returns a
+    callable ``matcher(rel_path: str) -> bool``, or ``None`` when no patterns
+    remain (the "no gate" sentinel callers can test for).
+    """
+    pats = [p for p in patterns if p]
+    if not pats:
+        return None
+    regexes = [re.compile(fnmatch.translate(p), re.IGNORECASE) for p in pats]
+
+    def _matches(rel: str) -> bool:
+        return any(r.match(rel) for r in regexes)
+
+    return _matches
+
+
 def iter_text_files(
     scope: Path,
     *,
     max_file_bytes: int,
     ignore_dirs: Iterable[str],
     on_skip: Optional[Callable[[str], None]] = None,
+    include_globs: Iterable[str] = (),
+    exclude_globs: Iterable[str] = (),
+    on_glob_excluded: Optional[Callable[[Path], None]] = None,
 ) -> Iterable[Path]:
     """Yield candidate indexable files under ``scope``.
 
@@ -342,10 +368,35 @@ def iter_text_files(
     ``max_file_bytes <= 0`` means *no size limit* (sentinel semantics): every
     indexable file passes the size gate. A positive value skips files larger
     than it and reports them via ``on_skip("too_large")``.
+
+    ``include_globs`` / ``exclude_globs`` (plan-2026-09-07-build-glob-filter)
+    filter the candidate set by the **path relative to ``scope``** using loose,
+    case-insensitive fnmatch semantics (``*`` crosses ``/``). Exclude wins over
+    include. The filter runs after the suffix gate and before the size gate.
+    Files rejected by the glob gates are reported via
+    ``on_glob_excluded(path)`` when provided — callers that must not treat
+    them as "disappeared from disk" (weak-semantics incremental builds) use
+    this to keep their seen-set accurate. A single-file ``scope`` is matched
+    against its basename.
     """
     accepted_suffixes = indexable_suffixes()
     ignore_set = {name for name in ignore_dirs}
+    matches_include = _compile_glob_matcher(_normalize_glob_patterns(include_globs))
+    matches_exclude = _compile_glob_matcher(_normalize_glob_patterns(exclude_globs))
+
+    def _glob_skipped(rel: str) -> bool:
+        if matches_exclude is not None and matches_exclude(rel):
+            return True
+        if matches_include is not None and not matches_include(rel):
+            return True
+        return False
+
     if scope.is_file():
+        if matches_include is not None or matches_exclude is not None:
+            if _glob_skipped(scope.name):
+                if on_glob_excluded is not None:
+                    on_glob_excluded(scope)
+                return
         yield scope
         return
     stack: List[Path] = [scope]
@@ -371,6 +422,15 @@ def iter_text_files(
                 if on_skip is not None:
                     on_skip("bad_suffix")
                 continue
+            if matches_include is not None or matches_exclude is not None:
+                try:
+                    rel = str(entry.relative_to(scope)).replace(os.sep, "/")
+                except ValueError:
+                    rel = name
+                if _glob_skipped(rel):
+                    if on_glob_excluded is not None:
+                        on_glob_excluded(entry)
+                    continue
             try:
                 size = entry.stat().st_size
             except OSError:
@@ -2383,6 +2443,8 @@ def build_graph_index(
     max_ngram_n: int = DEFAULT_MAX_NGRAM_N,
     seed_ngram_from: Optional[str] = None,
     tags: Sequence[str] = (),
+    include_globs: Iterable[str] = (),
+    exclude_globs: Iterable[str] = (),
     progress: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[[dict], None]] = None,
 ) -> BuildStats:
@@ -2441,6 +2503,14 @@ def build_graph_index(
             so query-side ``--tag`` filters can resolve this scope. Empty
             / whitespace items are skipped. Existing tags survive a
             rebuild — use ``grga scope tag rm`` to remove them.
+        include_globs / exclude_globs: optional path filters
+            (plan-2026-09-07-build-glob-filter). Each is normalized via
+            :func:`grga.search._normalize_glob_patterns` and matched
+            against the **relative** path (from ``directory``) with loose,
+            case-insensitive fnmatch semantics (``*`` crosses ``/``).
+            Empty include = accept all; exclude wins over include. Files
+            rejected by the glob gates still count as "seen in this scan"
+            so weak-semantics incremental builds never delete their rows.
         progress: optional status callback.
         on_event: structured progress callback.
     """
@@ -2573,18 +2643,34 @@ def build_graph_index(
         removed_doc_ids: List[int] = []
         seen_rel_paths: set = set()
 
+        def _rel_path_of(path: Path) -> str:
+            try:
+                return str(path.resolve().relative_to(scope_path))
+            except ValueError:
+                return str(path.resolve())
+
+        # Weak-semantics glob filtering (plan-2026-09-07 §2.3): a file
+        # excluded by ``include_globs`` / ``exclude_globs`` still exists on
+        # disk and must count as "seen in this scan" — otherwise the
+        # removed-detection pass below would misjudge it as disappeared and
+        # delete its rows. ``iter_text_files`` reports exactly those files
+        # through this callback.
+        def _mark_seen(path: Path) -> None:
+            stats.files_scanned += 1
+            seen_rel_paths.add(_rel_path_of(path))
+
         _emit("scan_start")
         for path in iter_text_files(
             scope_path,
             max_file_bytes=max_file_bytes,
             ignore_dirs=ignore_dirs,
+            include_globs=include_globs,
+            exclude_globs=exclude_globs,
             on_skip=stats.bump_reason,
+            on_glob_excluded=_mark_seen,
         ):
             stats.files_scanned += 1
-            try:
-                rel_path = str(path.resolve().relative_to(scope_path))
-            except ValueError:
-                rel_path = str(path.resolve())
+            rel_path = _rel_path_of(path)
             seen_rel_paths.add(rel_path)
 
             prev_row = existing_docs.get(rel_path) if mode == "build" else None

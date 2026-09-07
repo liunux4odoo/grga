@@ -22,7 +22,8 @@
 | **日常增量**（本机语料有增删改） | `grga index build --scope X --directory /path` | 无需额外参数，走 `(size, mtime, content_hash)` 三级增量 |
 | **改动了参数、要重算**（如抬 npmi 地板） | `grga index rebuild --scope X --directory /path --min-npmi-build 0.4` | `--refresh-ngram=append` 保留词典 / `replace` 清词典 |
 | **导入他人知识包后本机建证据** | `grga index build --scope X --directory /path --seed-ngram-from X` | 借入词典冷启动，见 §5.4 |
-| **语料太大，机器 8 GB 装不下** | `grga index rebuild --scope X --directory /path --batch-chunks 50000` | 用 recall 换 wall clock + 内存，见 §3.2 |
+| **排除"永远不进库"的文件/目录** | `grga index build --scope X --directory /path --exclude-glob '*.tmp' --exclude-glob 'build/**'` | 弱语义：既有行保留，见 §9 |
+| **语料太大，机器 8 GB 装不下** | `grga index build --scope X --directory /path`（默认已分批） | 分批是默认路径；想要 bit-exact 单遍 → `--batch-chunks 0`，见 §3.2 |
 
 ### 0.2 常见"我该不该动这个参数"
 
@@ -35,15 +36,16 @@
 | `--ngram-iters` | `2` | 中文占比高、想让新词多迭代一轮收敛 → `3` | ASCII 代码/日志为主的语料，`1` 足够 |
 | `--max-ngram-n` | `4` | 语料里有超长专有名词（如"联合国行星防御理事会"6 字）→ `5-6` | 一般 `4` 够用，`4` 已能覆盖大部分中文四字词 |
 | `--refresh-ngram` | `append` | `rebuild` 时想彻底重来 → `replace` | 增量 `build` 默认 `append` 即可 |
-| `--batch-chunks` | `0`（不分批） | 内存不够（见 §3.2 判断表） | 内存够，永远不设 |
-| `--top-n-kw` | `64` | 仅在 `--batch-chunks > 0` 时才生效；想保更多 pair → `256` | 不用分批就无需考虑 |
+| `--batch-chunks` | `50000`（分批） | 内存不够 / 语料过大想降峰值 → 保持默认或调更小；想要 bit-exact 单遍行为 → `0` | 默认就是分批，不用特意设 |
+| `--top-n-kw` | `64` | 仅在 `--batch-chunks > 0` 时才生效；想保更多 pair → `256` | 用 `--batch-chunks 0` 就无需考虑 |
+| `--include-glob` / `--exclude-glob` | 空（全收 / 不排除） | 只想索引部分文件 / 想排除"永远不进库"的目录（日志、临时、生成物） | 过滤是**弱语义**：被排除文件本次不读入，但既有索引行保留，见 §9 |
 
 ### 0.3 常见"跑挂了怎么办"
 
 | 症状 | 大概率原因 | 处理 |
 |---|---|---|
 | `disk I/O error` / SQLite `no space` | `db-temp/` 磁盘满 | 把 `deep_keywords.db` 移到大盘或 symlink `db-temp/` 到大盘 |
-| 进程被 OOM killer 干掉 | RAM 不够 | 加 `--batch-chunks 50000`（见 §3.2） |
+| 进程被 OOM killer 干掉 | RAM 不够 | 分批是默认（`--batch-chunks 50000`）；再调小 batch 或加 `GRGA_BUILD_CACHE_MB`（见 §3.2 / §3.4） |
 | jieba 初始化极慢（分钟级） | 词典累积到 100 万+ 条目 | 用 `grga index forget --phrase` 清掉噪声短语；不要频繁 `rebuild --refresh-ngram=replace` |
 | 生成共现对阶段"卡住"（进度不动） | `_finalize_pairs_from_temp` SQL 静默执行 | 正常现象，看 `db-temp/` 磁盘增长确认在跑；不要 Ctrl+C |
 | build 完成但 `related` 查不到东西 | `--min-npmi-build` 太严 或 rebuild 忘了 `--directory` | 检查 `grga scope list` 看 pairs / keywords 计数 |
@@ -53,7 +55,7 @@
 ## 1. build 阶段的整体流水线（了解到心里就好）
 
 ```
-Pass 0. 扫描：iter 文件 → 过滤后缀 / 大小 → 分级判断变更 (size, mtime, hash)
+Pass 0. 扫描：iter 文件 → 过滤后缀 / include-exclude glob（弱语义，见 §9）→ 过滤大小 → 分级判断变更 (size, mtime, hash)
 Pass 1. Phase A：多轮 auto n-gram 检测（rebuild 时 ngram_iters=2；build 时 1）
 Pass 1. Phase B：用冻结词典最后一次 tokenize，产出 chunk 关键字
 Pass 1.5. 停用词候选：单字 CJK 的 chunk-df 门槛
@@ -211,11 +213,14 @@ grga scope list
 
 ---
 
-## 3. 内存与速度：默认路径 vs 分批路径的真实取舍
+## 3. 内存与速度：默认（分批）路径 vs 单遍路径的真实取舍
+
+> 自 2026-09-07 起 `--batch-chunks` 默认值为 `50000`，**分批是默认路径**。
+> 想要旧的单遍 bit-exact 行为，显式传 `--batch-chunks 0`。
 
 ### 3.1 三种路径的核心差别
 
-| 特性 | 默认单遍 (`--batch-chunks 0`) | 分批单批 (`--batch-chunks >= 总chunks`) | 分批多批 (`--batch-chunks 50000` 等) |
+| 特性 | 单遍 (`--batch-chunks 0`) | 分批单批 (`--batch-chunks >= 总chunks`) | 分批多批 (`--batch-chunks 50000` 等，**默认**) |
 |---|---|---|---|
 | pair recall | **1.0** | **1.0** | 0.73（每批各自检测短语，跨批漂移不可逆） |
 | pair 平均 npmi | baseline | baseline | 更高（top-N 优先保强连接） |
@@ -225,18 +230,20 @@ grga scope list
 
 关键：**分批的加速主要来自 top-N per-chunk 裁剪把 `chunk × kw²` 的 self-join 中间态砍下去**，代价是永久丢 pair。单批模式（batch ≥ 总 chunks）的 1.4× 是分批管线本身的实现红利，不是"分批"这个动作本身的贡献。
 
-### 3.2 该不该开 `--batch-chunks` 的判断表
+### 3.2 该不该切回 `--batch-chunks 0`（单遍）的判断表
 
 | 语料规模（估算） | 机器 RAM | 磁盘剩余（db-temp 所在盘） | 推荐 |
 |---|---|---|---|
-| ≤ 100 MB / ~10 万 chunks | ≥ 8 GB | ≥ 10 GB | **默认路径** |
-| 100 MB - 500 MB / ~50 万 chunks | ≥ 16 GB | ≥ 50 GB | **默认路径** |
-| 500 MB - 2 GB / ~300 万 chunks | ≥ 16 GB | ≥ 100 GB | **默认路径** |
-| 500 MB - 2 GB / ~300 万 chunks | 8-16 GB | ≥ 100 GB | 默认路径，边缘可行；风险大就 `--batch-chunks 50000` |
-| ≥ 2 GB / 千万 chunks 级 | 任意 | ≥ 200 GB | `--batch-chunks 50000`；接受 recall 0.73 |
-| ≥ 2 GB | 任意 | < 语料 × 30 | **加大盘先**，不是加 batch |
+| ≤ 100 MB / ~10 万 chunks | ≥ 8 GB | ≥ 10 GB | **默认（分批）**；小语料分批≈单批，recall 近似 1.0 |
+| 100 MB - 500 MB / ~50 万 chunks | ≥ 16 GB | ≥ 50 GB | **默认（分批）** |
+| 500 MB - 2 GB / ~300 万 chunks | ≥ 16 GB | ≥ 100 GB | **默认（分批）** |
+| 500 MB - 2 GB / ~300 万 chunks | 8-16 GB | ≥ 100 GB | 默认（分批）；仍紧张就调小 batch |
+| ≥ 2 GB / 千万 chunks 级 | 任意 | ≥ 200 GB | 默认（分批）；接受 recall 0.73 |
+| 中小语料 + 需要 pair recall 1.0 / bit-exact 结果 | 足够 | 足够 | `--batch-chunks 0` 单遍 |
 
-**核心口诀**：内存不够才分批；磁盘不够先扩盘；只有"内存分批也救不了"的极大规模才需要重新考虑架构。
+**核心口诀**：分批现在是默认，绝大多数场景直接用默认即可；只有需要
+bit-exact 单遍结果（pair recall 1.0、无 top-N 裁剪）时才显式 `--batch-chunks 0`；
+磁盘不够先扩盘。
 
 ### 3.3 分批时如何调 `--top-n-kw`
 
@@ -269,12 +276,16 @@ grga scope list
 
 `auto_ngram_dict` 是唯一的**资产层**（跨 build 只增不减），它决定所有下游 tokenization：
 
+> ⚠️ **`--ngram-iters` 只在 `--batch-chunks 0`（单遍）下生效**。默认的
+> 分批管线（`--batch-chunks 50000`）每批固定跑 1 轮检测，忽略 `--ngram-iters`。
+> 想用多轮检测收敛，需显式 `--batch-chunks 0`。
+
 | 命令 + `--refresh-ngram` | 检测行为 | 词典变化 |
 |---|---|---|
 | `build` + `append` （默认） | 对变更文件做 1 轮检测 | 新短语 union 进去 |
 | `build` + `never` | 不检测 | 用现有词典 |
-| `rebuild` + `append` | 对全部文件做 `ngram_iters` 轮 | 新短语 union；旧短语 count/npmi 刷新 |
-| `rebuild` + `replace` | 对全部文件做 `ngram_iters` 轮 | **清空后重建**（一次性遗忘全部 auto 短语） |
+| `rebuild` + `append` | 对全部文件做 `ngram_iters` 轮（单遍） | 新短语 union；旧短语 count/npmi 刷新 |
+| `rebuild` + `replace` | 对全部文件做 `ngram_iters` 轮（单遍） | **清空后重建**（一次性遗忘全部 auto 短语） |
 
 ### 4.2 什么时候值得 `--ngram-iters 3`
 
@@ -395,13 +406,13 @@ export GRGA_BATCH_TOP_N=128  # 或直接 --top-n-kw 128
 
 grga index rebuild \
   --scope 大库 \
-  --directory /media/big-disk/corpus \
-  --batch-chunks 50000
+  --directory /media/big-disk/corpus
 ```
 
-- 分批处理，每批 5 万 chunks，Python 堆峰值 < 1 GB。
+- 默认 `--batch-chunks 50000` 已分批，每批 5 万 chunks，Python 堆峰值 < 1 GB。
 - `top_n_kw=128` 换来 recall 0.51；接受质量损失或后续多查几轮补齐。
 - 缓存降到 512 MB 留内存给 OS。
+- 需要 pair recall 1.0 的 bit-exact 单遍结果时，再显式加 `--batch-chunks 0`。
 
 ### 7.5 迁移到新机器（用知识包）
 
@@ -436,7 +447,7 @@ seed 是"用同名 scope 借自己"，因为 import 只带 `auto_ngram_dict` 但
 
 3. **同时开 `--batch-chunks` 和纠结 recall**。分批的 recall 0.73 天花板
    来自短语漂移，是这条路径的设计代价，不是可调参数。想要 recall 1.0
-   就别开分批；想要低内存就接受 0.73。**不要"两个都要"**。
+   就显式 `--batch-chunks 0`；想要低内存就接受 0.73。**不要"两个都要"**。
 
 4. **手动改 SQLite `PRAGMA`**。grga 已在 build 期强制了 `temp_store=FILE`
    和自适应 `cache_size`。手动干预要么被覆盖、要么打破 spill 保证。
@@ -453,9 +464,67 @@ seed 是"用同名 scope 借自己"，因为 import 只带 `auto_ngram_dict` 但
    吐回去。真正的长期存储治理是按主题拆 scope + 冷 scope 用
    `grga index export` 归档到 grgapkg（§2.7）。
 
+7. **把 glob 过滤当成"从库中移除文件"**。`--include-glob` /
+   `--exclude-glob` 是**弱语义**（见 §9）：被排除文件只不参与本次 build，
+   既有索引行（keyword_docs / heading_docs / docs）原样保留，`keyword_pairs`
+   仍基于完整语料。想真正从库中移除，用 `grga scope rm --purge-knowledge`
+   或 `grga index forget`。
+
 ---
 
-## 9. 参考
+## 9. `--include-glob` / `--exclude-glob`：按路径过滤语料
+
+`index build` / `index rebuild` 支持用文件名/路径模式过滤哪些文件参与建索引。
+
+### 9.1 语法与语义
+
+- **`--include-glob`**（可重复）：只索引相对 `--directory` 的路径命中**任一**
+  pattern 的文件；不传 = 全收。
+- **`--exclude-glob`**（可重复）：命中**任一** pattern 的文件被跳过；优先级
+  高于 include。
+- 匹配对象是**相对 scope 根目录（`--directory`）的路径**；单文件 `--directory`
+  时匹配文件名本身。
+- 匹配是**宽松 fnmatch 语义**：`*` 跨目录（`docs/*.md` 也会匹配
+  `docs/sub/b.md`），与 `rg --iglob '*.md'` 的用户心智一致——这是**已知且
+  接受**的 v1 语义，不是 bug。
+- **不区分大小写**：`*.MD` 能匹配 `foo.md`，`README*` 能匹配 `readme.md`。
+
+```bash
+# 只索引 .md 文件（含子目录，因 * 跨 /）
+grga index build --scope X --directory /path --include-glob '*.md'
+
+# 排除临时目录 / 生成物 / 日志（可重复）
+grga index build --scope X --directory /path \
+  --exclude-glob 'build/**' \
+  --exclude-glob '*.tmp' \
+  --exclude-glob '*.log'
+
+# include 与 exclude 同命中的文件 → exclude 赢
+grga index build --scope X --directory /path \
+  --include-glob '*.md' --exclude-glob 'draft*.md'
+```
+
+### 9.2 弱语义（重要）
+
+**被 glob 排除的文件只"不参与本次 build"，不代表从库中移除。**
+
+- 排除文件的**既有索引行（keyword_docs / heading_docs / docs）原样保留**，
+  不被删除。
+- `keyword_pairs` 的 npmi 仍基于**完整语料**计算（被排除文件的行还在），
+  不因本次过滤而收缩。
+- `auto_ngram_dict` 不受影响（短语是知识资产，不随本次过滤变动）。
+- 下次 build 去掉 glob 后，被排除文件重新参与——无需重建旧行。
+- 想让文件**真正离开库**，用 `grga scope rm --purge-knowledge` / `grga index forget`。
+
+### 9.3 过滤顺序
+
+先过后缀白名单 → 再过 glob → 再过 `--max-file-kb` 大小门槛（glob 是路径级、
+更便宜，所以先于大小）。`.` 开头的隐藏文件仍按既有行为直接跳过，glob 不改
+变这一行为。
+
+---
+
+## 10. 参考
 
 - 存储对比（0.2 vs 0.6 地板）的完整数据推导：本项目 chat log 2026-07-17
 - 内存优化的设计文档：[`design/plan-2026-07-15-build-memory-oom.md`](design/plan-2026-07-15-build-memory-oom.md)

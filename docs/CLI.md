@@ -501,6 +501,58 @@ MCP 服务器是**只读 + 检索侧**：`suggest`（L3 LLM 兜底）不写入�
 stderr（`GRGA_MCP_LOG_LEVEL`），共享图索引 DB 可用 `GRGA_DB_PATH` 或
 `--db-path` 覆盖。设计见 `docs/design/plan-2026-09-02-mcp-server.md`。
 
+## 建立图索引（`index build` / `index rebuild`）
+
+`grga index build` 增量更新一个 scope 的共现知识图；`grga index rebuild`
+全量清空重建。两个命令参数相同。
+
+```bash
+grga index build --scope my-notes --directory ./my-notes
+grga index rebuild --scope my-notes --directory ./my-notes --refresh-ngram=replace
+```
+
+### 主要参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--scope` / `-s` | 必填 | 逻辑 scope 名（v10，跨机器可迁移） |
+| `--directory` / `-d` | `.` | 物理语料目录（或单文件） |
+| `--db-path` | 共享 DB | SQLite 图库路径 |
+| `--chunk-mode` | `line` | 分块粒度：`line`（1 行 1 chunk）或 `chars`（多行窗口） |
+| `--chunk-max-chars` / `--chunk-min-chars` | `600` / `300` | `chars` 模式窗口大小 |
+| `--min-pair-count` | 自适应（2-5） | 共现对最低 chunk 计数门槛 |
+| `--min-npmi-build` | `0.2` | pair 写入期 npmi 门槛（不可逆，见 build-tuning §2） |
+| `--max-file-kb` | `0`（不限） | 跳过更大的文件 |
+| `--ngram-iters` | `2` | auto n-gram 检测轮数（`rebuild` 生效） |
+| `--max-ngram-n` | `4` | 最长检测短语字数 |
+| `--refresh-ngram` | `append` | `append`（并入新短语）/ `never`（不检测）/ `replace`（仅 rebuild，清空重建） |
+| `--seed-ngram-from` | — | 借用另一 scope 的词典冷启动 |
+| `--tag` / `-t` | — | 给 scope 附加多值标签（可重复） |
+| `--include-glob` | 空（全收） | 只索引相对 `--directory` 路径命中**任一** pattern 的文件；**弱语义**（既有行保留），可重复 |
+| `--exclude-glob` | 空（不排除） | 跳过命中**任一** pattern 的文件；优先级高于 include；**弱语义**（既有行保留），可重复 |
+| `--batch-chunks` | `50000` | 分批构建的每批目标 chunk 数；`0` = 关闭分批（bit-exact 单遍，pair recall 1.0 但峰值内存更高） |
+| `--top-n-kw` | `64`（env `GRGA_BATCH_TOP_N`） | `--batch-chunks > 0` 时每 chunk 关键字上限 |
+| `--json` | — | 输出结构化 JSON stats |
+
+### glob 过滤说明
+
+- 匹配对象是**相对 `--directory` 的路径**；单文件 `--directory` 匹配文件名。
+- **宽松匹配**：`*` 跨目录（`docs/*.md` 也匹配 `docs/sub/b.md`），与
+  `rg --iglob` 心智一致。
+- **不区分大小写**：`*.MD` 匹配 `foo.md`。
+- **弱语义**：被 glob 排除的文件只"不参与本次 build"，**既有索引行
+  （keyword_docs / heading_docs / docs）原样保留**，`keyword_pairs` 仍基于
+  完整语料；下次 build 去掉 glob 后文件自动重新参与。想真正移除文件用
+  `grga scope rm --purge-knowledge` / `grga index forget`。
+
+```bash
+grga index build --scope X --directory /path \
+  --include-glob '*.md' \
+  --exclude-glob 'build/**' --exclude-glob '*.tmp'
+```
+
+详细调优见 [`build-tuning.md`](build-tuning.md)。
+
 ## 管理内置工具
 
 `grga tools` 用于查看、安装和更新打包到本地的命令行工具。运行时会优先使用 wheel 内置工具，找不到时再回退系统 `PATH`。
