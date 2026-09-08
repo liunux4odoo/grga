@@ -225,7 +225,7 @@ def search_command(
     pattern_mode: str = typer.Option("auto", "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
     case_sensitive: bool = typer.Option(False, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
     max_count: Optional[int] = typer.Option(None, "--max-count", "-n", help="Maximum matches per file (rga --max-count)."),
-    max_total: Optional[int] = typer.Option(1000, "--max-total", "-N", help="Global cap on total real matches; results are truncated when exceeded (default 1000, set 0 to disable)."),
+    max_total: Optional[int] = typer.Option(100, "--max-total", "-N", help="Global cap on total real matches; results are truncated when exceeded (default 100, set 0 to disable)."),
     strict_cap: bool = typer.Option(False, "--strict-cap", help="Fail with too_many_matches when --max-total is exceeded instead of truncating."),
     timeout: float = typer.Option(600.0, "--timeout", "-t", help="Search timeout in seconds."),
     before_context: int = typer.Option(3, "--before-context", "-B", help="Lines of leading context."),

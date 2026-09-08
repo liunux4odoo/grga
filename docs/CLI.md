@@ -136,7 +136,7 @@ grga search keyword -n 20
 
 ### 全局命中上限（--max-total / -N）
 
-`--max-total / -N` 是 **单次调用的全局** 命中上限，默认 `1000`。在超大单文件
+`--max-total / -N` 是 **单次调用的全局** 命中上限，默认 `100`。在超大单文件
 （如整本小说、GB 级日志）场景下，`--max-count` 几乎不起保护作用，`--max-total`
 则保证可预测的响应时间：grga 流式读取 rga 输出，达到上限后立即结束并杀掉 rga
 子进程，返回结果里 `truncated: true`。位置元数据（occurrence / ratio / nearby）
@@ -369,7 +369,7 @@ JSON 返回结构（成功）：
 
 > `deep-search` 的内部检索使用 v1 的“空格即逻辑或”语义（`--implicit-or`），
 > 并使用一个较高的每轮全局上限（`DEEP_SEARCH_MAX_TOTAL = 20000`）而非普通
-> `search` 的默认 1000，因为它需要较多原始命中来做关键词排序；该上限仍会兜底，
+> `search` 的默认 100，因为它需要较多原始命中来做关键词排序；该上限仍会兜底，
 > 防止超大语料把调用方拖挂。
 
 ```bash

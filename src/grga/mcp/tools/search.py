@@ -14,7 +14,7 @@ VALID_PATTERN_MODES = ("auto", "regex", "glob")
 
 # Default cap on total real matches, matching the CLI's ``--max-total``
 # default. ``max_total <= 0`` (or ``None``) opts into unlimited results.
-DEFAULT_MAX_TOTAL = 1000
+DEFAULT_MAX_TOTAL = 100
 
 
 async def grga_search(
@@ -35,7 +35,7 @@ async def grga_search(
 
     Returns ``ok`` / ``matches[]`` (path, line_number, text, submatches,
     before/after context) plus ``truncated`` / ``total_files_matched``.
-    ``max_total`` caps the total real matches (default 1000; pass ``0`` or
+    ``max_total`` caps the total real matches (default 100; pass ``0`` or
     ``null`` for unlimited); the result is ``truncated: true`` when the
     cap is exceeded. ``directory`` falls back to the server default set by
     ``grga mcp start --directory`` when omitted.

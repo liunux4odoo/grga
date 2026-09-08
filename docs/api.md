@@ -74,7 +74,7 @@ fields). Shape:
   is **not** a full "files scanned in the corpus" total, which would
   require a second rga pass under truncation. It is a plain integer, not
   a verdict (design §1.5.1).
-- On the CLI: `--max-total N` (default `1000`; `0` disables), plus
+- On the CLI: `--max-total N` (default `100`; `0` disables), plus
   `--strict-cap` for the fail-fast variant. The per-file `--max-count / -n`
   still applies unchanged.
 

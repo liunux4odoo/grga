@@ -75,7 +75,7 @@ def test_search_passes_through_json_response():
         result = _run(search_tool.grga_search(["关键词"], "/data"))
     assert result == payload
     # default cap is bounded (not None) so large corpora don't stream unbounded
-    assert m.call_args.kwargs["max_total"] == 1000
+    assert m.call_args.kwargs["max_total"] == 100
 
 
 def test_search_zero_max_total_means_unlimited():

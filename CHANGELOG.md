@@ -4,6 +4,19 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
+### `--max-total` 默认 1000 → 100
+
+- **`grga search --max-total` 默认 1000 → 100**：单次调用全局命中上限收窄，
+  保证超大语料（整本小说 / GB 级日志）上响应时间更可预测。CLI
+  （`cli.search_command`）、MCP `grga_search` 工具（`DEFAULT_MAX_TOTAL`）同步；
+  `0` 仍表示关闭上限，`--strict-cap` 语义不变。`deep-search` 内部仍用
+  `DEEP_SEARCH_MAX_TOTAL = 20000` 显式覆盖，不受影响。
+- **`--batch-chunks` 默认值复核为 50000（无改动）**：CLI `index build` /
+  `index rebuild` 默认已是 50000（分批构建，2026-09-07 起）。`build_graph_index`
+  后端默认仍为 `0`（单遍 bit-exact），CLI 显式传 50000 使其生效；小 batch（如
+  10000）npmi 偏低是分批管线的既有取舍（每批短语检测漂移 + 单遍才尊重
+  `--ngram-iters`），默认 50000 已是大语料验证点，无需调整。
+
 ### rga 缓存上限 50M + probe 默认 timeout 180s + 默认排除压缩包/无文本二进制
 
 大语料（`/data/ports/sync`：11GB / 23,437 文件，含 2,700+ 二进制文档）
