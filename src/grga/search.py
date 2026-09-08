@@ -16,6 +16,94 @@ from grga.toolchain import add_tools_to_path, find_tool
 _logger = logging.getLogger("grga.search")
 
 
+# Maximum compressed blob size (bytes) that rga keeps in its preprocess cache.
+# rga's own default is 2 MiB, which means large documents whose extracted text
+# compresses beyond that (e.g. 17-28 MB novels) are re-extracted on *every*
+# scan — the single biggest slowdown on the 11 GB corpus that triggered this.
+# 50 MiB covers the largest observed blob (4.86 MB) with ample headroom.
+RGA_CACHE_MAX_BLOB_LEN = 52428800
+
+# File types excluded by default from content searches. Entries are rga
+# ``--iglob`` exclusion globs (``!`` prefix, case-insensitive). Two rules:
+#   1. Only archives + text-less binaries — formats rga cannot turn into text,
+#      so excluding them loses no matches while avoiding recursive archive
+#      decompression and binary sniffing on every scan.
+#   2. NEVER document formats (docx/pdf/pptx/xlsx/doc/xls/...). Searching work
+#      documents is grga's main job; excluding them would drop most matches.
+# ``--no-default-exclude`` empties this list (user ``-g`` globs still apply).
+DEFAULT_EXCLUDE_GLOBS = (
+    # Archives — rga recursively decompresses these on every scan.
+    "!*.zip",
+    "!*.rar",
+    "!*.7z",
+    "!*.tar",
+    "!*.gz",
+    "!*.xz",
+    "!*.bz2",
+    "!*.tgz",
+    "!*.tbz2",
+    "!*.txz",
+    "!*.zst",
+    "!*.lz4",
+    "!*.lzma",
+    "!*.jar",
+    "!*.war",
+    "!*.ear",
+    # Executables / libraries / bytecode — no extractable text.
+    "!*.exe",
+    "!*.dll",
+    "!*.so",
+    "!*.dylib",
+    "!*.o",
+    "!*.a",
+    "!*.lib",
+    "!*.class",
+    "!*.pyc",
+    "!*.whl",
+    # Installers / packages / disk images.
+    "!*.deb",
+    "!*.rpm",
+    "!*.appimage",
+    "!*.apk",
+    "!*.msi",
+    "!*.dmg",
+    "!*.pkg",
+    "!*.iso",
+    "!*.img",
+    "!*.bin",
+    # Media — rga has no adapter for these, so they never produce text
+    # matches. Images (png/jpg/...) are intentionally NOT excluded: users
+    # search image-heavy corpora by filename via ``--path-only``, and rga
+    # skips them anyway, so there is no scan cost to keeping them visible.
+    "!*.mp3",
+    "!*.mp4",
+    "!*.mkv",
+    "!*.avi",
+    "!*.mov",
+    "!*.flac",
+    "!*.wav",
+    "!*.ogg",
+    "!*.webm",
+)
+
+
+def _effective_glob_patterns(glob_patterns, default_exclude=True):
+    """Merge the default exclusion globs with the caller's globs.
+
+    Default excludes come first so ripgrep's "last matching glob wins"
+    semantics let explicit user globs override them; ``default_exclude=False``
+    (``--no-default-exclude``) returns only the caller's globs.
+    """
+    user_globs = _normalize_glob_patterns(glob_patterns)
+    if not default_exclude:
+        return user_globs
+    merged = list(DEFAULT_EXCLUDE_GLOBS)
+    for glob in user_globs:
+        if glob not in merged:
+            merged.append(glob)
+    return merged
+
+
 # ── process-group-safe subprocess helpers ──────────────────────────────────
 #
 # rga forks rga-preproc → (pandoc | pdftotext | etc.) for binary files.
@@ -193,6 +281,7 @@ def search_directory(
     max_total=None,
     strict_cap=False,
     implicit_operator="and",
+    default_exclude=True,
 ):
     target = Path(directory).expanduser().resolve()
     _log_debug(debug, f"搜索目录: {target}")
@@ -208,6 +297,8 @@ def search_directory(
             {"ok": False, "error": f"path is not a directory: {target}", "matches": []},
             ensure_ascii=False,
         )
+
+    glob_patterns = _effective_glob_patterns(glob_patterns, default_exclude=default_exclude)
 
     query = _compile_search_query(keywords, pattern_mode, debug=debug, implicit_operator=implicit_operator)
     patterns = query["patterns"]
@@ -396,8 +487,10 @@ def build_rga_command_preview(
     glob_exclude=False,
     path_only=False,
     implicit_operator="and",
+    default_exclude=True,
 ):
     rga_path = _find_rga_command() or "rga"
+    glob_patterns = _effective_glob_patterns(glob_patterns, default_exclude=default_exclude)
     query = _compile_search_query(keywords, pattern_mode, implicit_operator=implicit_operator)
     if not query["patterns"]:
         return ""
@@ -862,7 +955,7 @@ def _shared_rga_options(query, case_sensitive=False, multiline=False, glob_patte
     ``--count-matches``, ...) and are responsible for adding ``-e <pattern>``
     entries and the trailing search path.
     """
-    options = []
+    options = [f"--rga-cache-max-blob-len={RGA_CACHE_MAX_BLOB_LEN}"]
     if query["pcre2"]:
         options.append("-P")
     if multiline:

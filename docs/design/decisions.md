@@ -659,3 +659,46 @@ consumers to reconcile two shapes.
 **Impact**：MAJOR schema 迁移（v7→v8 有损），`related-signals` 契约 bump v2→v3
 （删 `ppr_score` / `hops_from_seed` / `keyword_contributions`，改 `via_seeds` → `via_seed`）。
 `mode=dir` 去向 §7.1 待定（倾向移除）。分 5 phase 落地，Phase 1 迁移最高风险。
+
+## 2026-09-08 · rga 缓存上限 50M + probe timeout 180s + 默认排除压缩包/无文本二进制
+
+**Plan doc**：`docs/design/plan-2026-09-08-rga-cache-timeout-excludes.md`
+
+**背景**：`grga search/probe` 在 `/data/ports/sync`（11GB / 23,437 文件）全量
+79.5-96.8s，probe 默认 60s 必超时。分层定位结论：Python 层非瓶颈（解析 2 万+
+行 JSONL 只要 205ms），瓶颈在 rga 扫描本身——其中两个大 pdf 因提取文本压缩后
+>2MB（rga 缓存默认上限）**永不进缓存、每次重提取 20-30s**，是最大单点。
+
+**Decision**：
+
+1. **缓存上限 2M → 50M**：构建所有 rga 命令时显式传
+   `--rga-cache-max-blob-len=52428800`（`search._RGA_CACHE_MAX_BLOB_LEN`）。
+   实测：17.9MB pdf 首次提取 20.8s → 二次 308ms（快 67 倍），缓存行 909→910。
+   只影响新建缓存，不失效/不清除已有缓存。
+2. **probe 默认 timeout 60s → 180s**：CLI、MCP、`probe_directory` 后端默认
+   三处同步。`search` 默认 600s 不变。
+3. **默认排除压缩包 + 无文本二进制**：`search` / `probe` / `preview` 默认追加
+   `DEFAULT_EXCLUDE_GLOBS`（45 项：压缩包 + 可执行/库/字节码 + 安装包/镜像 +
+   音视频），配 `--no-default-exclude` 关闭。与用户 `-g` 追加合并，用户 glob 在后。
+
+**Rationale**（按 AGENTS.md §信号暴露原则逐条自问）：
+
+- **排除列表绝不含文档类**（docx/pdf/pptx/xlsx/doc/xls/odt/rtf）：实测排除全部
+  二进制丢 88% 匹配（29,345 行中仅 3,986 行来自纯文本）。用户搜"小堆"就是在
+  文档里找，这是搜索主目标。`--no-default-exclude` 作为可逆开关兜住"想搜压缩包
+  内部"的边角。
+- **图片格式也不排除**（png/jpg/jpeg/gif/bmp/webp/ico）：默认排除会把
+  `--path-only` 文件名搜索里的图片一并藏掉，图片语料（截图/封面/素材库）用户
+  常按文件名找；rga 本就不处理图片，保留它们零扫描开销。
+- **为什么排除是默认而非 opt-in**：压缩包 + 无文本二进制在 rga 侧要么导致每次
+  递归解压、要么产生 `No adapter found` 失败噪音；排除它们零匹配损失（rga 白
+  名单外）、省时减噪。默认排除压缩包实测只省 ~5s，真正的大头（大 pdf）由缓存
+  上限解决——排除是"无副作用 + 减噪"，不是性能主解。
+- **杠杆方向**：`--rga-cache-max-blob-len` / `--iglob '!…'` 都是 rga 一行参数，
+  不新增 grga 契约字段、不动任何 `--json` 输出，热路径返回结构零变化。
+
+**Impact**：additive MINOR。新 CLI flag `--no-default-exclude`（search/probe/
+preview）；后端 `search_directory` / `probe_directory` / `build_rga_command_preview`
+新增 `default_exclude=True` 参数（默认开启，旧调用不传参数行为与改动前兼容性 =
+默认排除生效——这是有意行为变更，非契约破坏）。`deep-search` 通过 `grga search`
+子进程自动继承。MCP `grga_probe` timeout 默认同步 60→180。

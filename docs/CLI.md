@@ -211,6 +211,37 @@ grga search keyword -g '*.py' -g '*.md'
 grga search keyword -g '*.py' -g '!tests/*'
 ```
 
+### 默认排除（压缩包 / 无文本二进制）
+
+`search` / `probe`（以及 `preview` 预览）默认会**追加排除**压缩包与无文本
+价值的二进制文件，避免每次扫描都递归解压归档、或对 rga 无法提取文本的
+二进制做无谓嗅探。默认排除列表（全部为 `--iglob '!…'` 排除 glob）：
+
+- **压缩包**：`*.zip` `*.rar` `*.7z` `*.tar` `*.gz` `*.xz` `*.bz2`
+  `*.tgz` `*.tbz2` `*.txz` `*.zst` `*.lz4` `*.lzma` `*.jar` `*.war` `*.ear`
+- **可执行 / 库 / 字节码**：`*.exe` `*.dll` `*.so` `*.dylib` `*.o` `*.a`
+  `*.lib` `*.class` `*.pyc` `*.whl`
+- **安装包 / 磁盘镜像**：`*.deb` `*.rpm` `*.appimage` `*.apk` `*.msi`
+  `*.dmg` `*.pkg` `*.iso` `*.img` `*.bin`
+- **音视频**（rga 无适配器，永远提不出文本）：`*.mp3` `*.mp4` `*.mkv`
+  `*.avi` `*.mov` `*.flac` `*.wav` `*.ogg` `*.webm`
+
+**排除列表绝不含文档类**（docx / pdf / pptx / xlsx / doc / xls / odt / rtf 等）——
+在文档里搜到东西是 grga 的主用途，默认排除文档会把大部分匹配丢掉。**图片
+格式也不排除**（png / jpg / gif / webp 等）：图片语料常靠 `--path-only`
+按文件名检索，rga 本身不处理图片、保留它们没有扫描开销。
+
+默认排除与用户 `-g` 是**追加合并**：用户给的 glob 排在上面列出的默认排除
+之后，按 ripgrep"后出现的 glob 生效"的语义，用户可以显式 `-g` 覆盖默认项。
+
+需要搜压缩包内部文本、或某个被默认排除的二进制时，用 `--no-default-exclude`
+关闭默认排除（用户 `-g` 仍生效）：
+
+```bash
+grga search keyword --no-default-exclude
+grga probe keyword -d /path/to/dir --no-default-exclude
+```
+
 ### 只搜索相对文件路径
 
 `--path-only` 不搜索文件内容，只匹配目录中的相对文件路径：
@@ -262,13 +293,15 @@ grga search keyword --json
 grga probe 关键词 -d /path/to/project --json
 ```
 
-与查询语义相关的参数（`--mode` / `--case-sensitive` / `--iglob` / `--multiline` / `--path-only` / `--implicit-and` / `--implicit-or`）都与 `grga search` 同名同义，因此探测用的查询与最终执行的查询是同一套。
+与查询语义相关的参数（`--mode` / `--case-sensitive` / `--iglob` / `--multiline` / `--path-only` / `--implicit-and` / `--implicit-or` / `--no-default-exclude`）都与 `grga search` 同名同义，因此探测用的查询与最终执行的查询是同一套。
 
 probe 独有参数：
 
 - `--sample N`：抽样至多 N 个命中行，估算平均每行字节数与总字节量（默认 0，即不抽样）。
 - `--per-file`：在 JSON 中附带每个文件的命中行数（按命中数降序）。
-- `--timeout`：探测超时秒数，默认 60（比 `search` 的 600 短，避免调用方长时间等待）。
+- `--timeout`：探测超时秒数，默认 180（比 `search` 的 600 短，但足够覆盖
+  大型语料的全量扫描；`/data/ports/sync` 这类 11GB / 2 万+ 文件的目录全量
+  探测约 73s，旧默认 60 会误报超时）。
 
 JSON 返回结构（成功）：
 
@@ -311,7 +344,7 @@ JSON 返回结构（成功）：
   "implicit_operator": "and",
   "total_lines": 0,
   "file_count": 0,
-  "elapsed_ms": 60000
+  "elapsed_ms": 180000
 }
 ```
 

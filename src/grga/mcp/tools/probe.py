@@ -16,7 +16,7 @@ async def grga_probe(
     directory: Optional[str] = None,
     pattern_mode: str = "auto",
     case_sensitive: bool = False,
-    timeout: int = 60,
+    timeout: int = 180,
     multiline: bool = False,
     glob_patterns: Optional[List[str]] = None,
     path_only: bool = False,

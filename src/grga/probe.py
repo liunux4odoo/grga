@@ -10,6 +10,7 @@ from pathlib import Path
 from grga.search import (
     _compile_search_query,
     _count_total_matches,
+    _effective_glob_patterns,
     _evaluate_query_ast,
     _find_rg_command,
     _find_rga_command,
@@ -35,7 +36,7 @@ def probe_directory(
     keywords,
     pattern_mode="auto",
     case_sensitive=False,
-    timeout=60,
+    timeout=180,
     multiline=False,
     glob_patterns=None,
     path_only=False,
@@ -43,6 +44,7 @@ def probe_directory(
     per_file=False,
     debug=False,
     implicit_operator="and",
+    default_exclude=True,
 ):
     """Lightweight, read-only probe for how a query scales on disk.
 
@@ -60,6 +62,7 @@ def probe_directory(
     query = _compile_search_query(keywords, pattern_mode, debug=debug, implicit_operator=implicit_operator)
     patterns_seed = query.get("patterns") or []
     base = _empty_response(target, patterns_seed, query, implicit_operator)
+    glob_patterns = _effective_glob_patterns(glob_patterns, default_exclude=default_exclude)
 
     if not target.exists():
         return _error("directory does not exist: %s" % target, base, started)

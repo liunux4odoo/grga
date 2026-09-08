@@ -233,6 +233,7 @@ def search_command(
     multiline: bool = typer.Option(False, "--multiline", help="Enable multiline search."),
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Search relative file paths only."),
+    no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default archive/binary exclusion globs (user -g globs still apply)."),
     implicit_and: bool = typer.Option(False, "--implicit-and", help="Force implicit adjacency to AND (default). Suppresses the notice."),
     implicit_or: bool = typer.Option(False, "--implicit-or", help="Restore v1 behaviour: implicit adjacency means OR."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
@@ -284,6 +285,7 @@ def search_command(
             max_total=effective_max_total,
             strict_cap=strict_cap,
             implicit_operator=implicit_operator,
+            default_exclude=not no_default_exclude,
         )
         result = json.loads(raw)
     except Exception as exc:
@@ -443,6 +445,7 @@ def preview_command(
     multiline: bool = typer.Option(False, "--multiline", help="Enable multiline search."),
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Preview path-only search command."),
+    no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Preview the command without the default archive/binary exclusion globs."),
 ):
     """Print the exact `rga` command that `grga search` would run.
 
@@ -464,6 +467,7 @@ def preview_command(
         multiline=multiline,
         glob_patterns=file_globs,
         path_only=path_only,
+        default_exclude=not no_default_exclude,
     )
     typer.echo(command)
 
@@ -474,10 +478,11 @@ def probe_command(
     directory: Path = typer.Option(Path("."), "--directory", "-d", exists=True, file_okay=False, dir_okay=True, resolve_path=True, help="Directory to probe."),
     pattern_mode: str = typer.Option("auto", "--mode", "-m", help="Pattern mode: auto, regex, or glob."),
     case_sensitive: bool = typer.Option(False, "--case-sensitive/--ignore-case", help="Enable or disable case-sensitive search."),
-    timeout: float = typer.Option(60.0, "--timeout", "-t", help="Probe timeout in seconds."),
+    timeout: float = typer.Option(180.0, "--timeout", "-t", help="Probe timeout in seconds."),
     multiline: bool = typer.Option(False, "--multiline", help="Enable multiline search."),
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Probe relative file paths only."),
+    no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default archive/binary exclusion globs (user -g globs still apply)."),
     implicit_and: bool = typer.Option(False, "--implicit-and", help="Force implicit adjacency to AND (default)."),
     implicit_or: bool = typer.Option(False, "--implicit-or", help="Restore v1 behaviour: implicit adjacency means OR."),
     sample: int = typer.Option(0, "--sample", help="Sample up to N matched lines to estimate average line bytes (0 disables)."),
@@ -526,6 +531,7 @@ def probe_command(
             per_file=per_file,
             debug=effective_debug,
             implicit_operator=implicit_operator,
+            default_exclude=not no_default_exclude,
         )
         result = json.loads(raw)
     except Exception as exc:

@@ -4,6 +4,33 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
+### rga 缓存上限 50M + probe 默认 timeout 180s + 默认排除压缩包/无文本二进制
+
+大语料（`/data/ports/sync`：11GB / 23,437 文件，含 2,700+ 二进制文档）
+上的性能根因修复。三件事相互独立、各配开关，additive 不破坏现有调用。
+
+- **rga 缓存 blob 上限 2M → 50M**：`search` / `probe` 构建 rga 命令时显式传
+  `--rga-cache-max-blob-len=52428800`（模块常量 `RGA_CACHE_MAX_BLOB_LEN`）。
+  之前 17.9MB / 27.8MB 的两个大 pdf 提取文本压缩后 >2MB，永不进缓存、每次
+  搜索重提取 20-30s；50M 覆盖当前最大 blob（4.86MB）后首次提取进缓存，
+  二次命中 ~300ms（实测快 67 倍）。只影响新建缓存，已有缓存不失效不清除。
+- **probe 默认 timeout 60s → 180s**：`grga probe`（CLI + MCP + `probe_directory`
+  后端默认）全量扫描 11GB 目录实测 73.7s，旧默认 60s 必误报超时。`search`
+  默认 600s 不变；内部 `_stream_rga_search` / `_run_checked` timeout 传递链
+  确认一致。超时仍走 `start_new_session + killpg` 干净退出，不留孤儿进程。
+- **默认排除压缩包 + 无文本二进制**：`search` / `probe` / `preview` 默认追加
+  排除 glob（`DEFAULT_EXCLUDE_GLOBS`，45 项）：压缩包（zip/rar/7z/tar/gz/xz/
+  bz2/…）、可执行/库/字节码（exe/dll/so/deb/rpm/pyc/…）、音视频（mp3/mp4/…）。
+  **绝不含文档类**（docx/pdf/pptx/xlsx/doc/xls/odt/rtf）——在文档里搜到东西
+  是主用途；**图片格式也不排除**（png/jpg/gif/webp 等）——图片语料靠
+  `--path-only` 按文件名检索，保留它们无扫描开销。默认排除与用户 `-g` 追加
+  合并（用户 glob 在后、可覆盖默认）；新增 `--no-default-exclude` 关闭（用户
+  `-g` 仍生效）。
+
+设计取舍详见 `docs/design/plan-2026-09-08-rga-cache-timeout-excludes.md` 与
+`docs/design/decisions.md`。测试 `tests/unit/test_rga_cache_and_default_excludes.py`
+覆盖 18 用例（缓存 flag 下发 / 排除合并 / 文档类保护 / 端到端 zip 排除）。
+
 ### `grga tools check` → `grga tools status` + probe orphan 进程修复
 
 - **改名** `grga tools check` → `grga tools status`（输出 schema 不变）。`tools check`
