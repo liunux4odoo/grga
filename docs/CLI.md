@@ -560,13 +560,13 @@ grga index build --scope X --directory /path \
 ### 检查工具状态
 
 ```bash
-grga tools check
+grga tools status
 ```
 
 输出 JSON：
 
 ```bash
-grga tools check --json
+grga tools status --json
 ```
 
 ### 查看当前平台工具目录
@@ -677,7 +677,7 @@ grga preview 'foo.*bar' --mode regex --multiline
 grga check
 
 # 检查内置工具
-grga tools check
+grga tools status
 ```
 
 ## 退出码
@@ -687,7 +687,7 @@ grga tools check
 | `search` | 搜索成功，包括 0 个匹配 | 参数错误、执行失败或超时 |
 | `preview` | 预览成功 | 参数错误 |
 | `check` | 必需工具可用 | 必需工具缺失 |
-| `tools check` | 命令执行成功 | 通常只报告工具状态，不以缺失工具作为失败 |
+| `tools status` | 命令执行成功 | 通常只报告工具状态，不以缺失工具作为失败 |
 | `tools install` | 安装成功 | 下载、解压或平台不支持等错误 |
 | `tools update` | 更新成功 | 下载、解压或平台不支持等错误 |
 

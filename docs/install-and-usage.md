@@ -77,7 +77,7 @@ python -m pip install -e '.[standalone]'
 grga tools install            # 安装当前平台支持的全部工具
 grga tools install rg rga     # 只装指定工具
 grga tools update             # 更新
-grga tools check              # 查看状态
+grga tools status             # 查看状态 (grga tools check 为废弃别名)
 grga tools migrate            # 从旧 site-packages 缓存迁移到新目录
 ```
 

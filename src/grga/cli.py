@@ -595,8 +595,8 @@ def check_command(json_output: bool = typer.Option(False, "--json", help="Print 
     raise typer.Exit(0 if result.get("ok") else 1)
 
 
-@tools_app.command("check")
-def tools_check_command(
+@tools_app.command("status")
+def tools_status_command(
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
     prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
 ):
@@ -612,6 +612,16 @@ def tools_check_command(
         typer.echo(f"{name}: {info['path'] or 'missing'} ({info['source']})")
         if info.get("version"):
             typer.echo(f"  {info['version']}")
+
+
+@tools_app.command("check")
+def tools_check_deprecated(
+    json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
+    prefer_system: bool = typer.Option(False, "--prefer-system", help="Prefer system-installed tools over the managed cache."),
+):
+    """Deprecated alias for `grga tools status` (prints a warning to stderr, then delegates)."""
+    typer.echo("[grga] `tools check` is deprecated — use `tools status` instead.", err=True)
+    tools_status_command(json_output=json_output, prefer_system=prefer_system)
 
 
 @tools_app.command("path")

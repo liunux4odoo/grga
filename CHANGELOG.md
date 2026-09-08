@@ -4,6 +4,20 @@ All notable changes to `grga` are recorded here.
 
 ## [Unreleased]
 
+### `grga tools check` → `grga tools status` + probe orphan 进程修复
+
+- **改名** `grga tools check` → `grga tools status`（输出 schema 不变）。`tools check`
+  保留为 deprecated alias，stderr 打印弃用警告后委派到 `status` 逻辑。`grga check`
+  (顶层) 完全不动 —— 仍是 search-stack viability gate，缺失必需工具时 exit ≠ 0。
+
+- **修复** `grga probe` / `grga search` 在 timeout 时 orphaned 子进程泄露。
+  根因: `subprocess.run`/`Popen` 缺少 `start_new_session=True`，超时后仅杀 rga
+  父进程，rga-preproc → pandoc/pdftotext 子进程成为孤儿，占住 stdout pipe。
+  修复: 新增 `_run_checked` + `_kill_process_group` helper，在 `probe.py` /
+  `search.py` 的所有 rga 子进程调用统一使用 `start_new_session=True` +
+  `os.killpg(SIGKILL)`。验证: `/data/ports/sync` (23,429 文件 / 11G) 上
+  timeout 前后 orphan 进程数从 7 → 0。
+
 ### `grga graph inspect` 契约扩展 · `top_docs` 定位捷径 + `--scope` / `--tag` 过滤
 
 `grga graph inspect <keyword>` 之前只回聚合计数（`docs_by_scope`），caller

@@ -1,9 +1,11 @@
 import fnmatch
 import json
 import logging
+import os
 import queue
 import re
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -12,6 +14,82 @@ from pathlib import Path
 from grga.toolchain import add_tools_to_path, find_tool
 
 _logger = logging.getLogger("grga.search")
+
+
+# ── process-group-safe subprocess helpers ──────────────────────────────────
+#
+# rga forks rga-preproc → (pandoc | pdftotext | etc.) for binary files.
+# When a subprocess timeout fires, killing only the rga process leaves
+# those child preprocessors orphaned.  They keep the stdout pipe open,
+# which makes the *next* communicate()/wait() call block indefinitely —
+# the "hang with no output" symptom reported by users.
+#
+# Fix: start each child in its own session (process group) and, on timeout,
+# killpg the *entire* group so rga-preproc/pandoc die together with rga.
+
+
+def _kill_process_group(process):
+    """Send SIGKILL to the entire process group of *process*.
+
+    Safe to call after ``process.kill()`` — if the process is already dead
+    ``os.getpgid`` raises ProcessLookupError which we swallow.
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _run_checked(command, cwd=None, timeout=None, debug=False):
+    """Drop-in replacement for ``subprocess.run`` with process-group timeout.
+
+    Behaves identically to::
+
+        subprocess.run(command, cwd=cwd, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace",
+                       timeout=timeout, check=False)
+
+    but starts the process with ``start_new_session=True`` and, on
+    ``TimeoutExpired``, kills the **entire process group** (rga + rga-preproc
+    + pandoc) instead of only rga.  The original ``TimeoutExpired`` is
+    re-raised so existing ``except subprocess.TimeoutExpired`` handlers
+    continue to work unchanged.
+    """
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        )
+    except OSError:
+        raise
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(process)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(
+            cmd=command,
+            timeout=timeout,
+            output=stdout,
+            stderr=stderr,
+        )
+
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def _log_debug(debug_enabled, message):
@@ -483,16 +561,7 @@ def _search_relative_paths(rg_path, target, query, case_sensitive=False, max_cou
     _log_debug(debug, f"路径搜索命令: {' '.join(command)}")
 
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(target),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
+        completed = _run_checked(command, cwd=str(target), timeout=timeout, debug=debug)
     except subprocess.TimeoutExpired:
         _log_debug(debug, "错误: rg 文件列表超时")
         return {"ok": False, "error": "rg file listing timed out", "matches": []}
@@ -865,6 +934,7 @@ def _stream_rga_search(command, cwd, timeout, max_total=None, debug=False):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            start_new_session=True,
         )
     except OSError as exc:
         return {"matches": [], "truncated": False, "returncode": 1, "stderr": str(exc), "timed_out": False}
@@ -967,13 +1037,16 @@ def _stream_rga_search(command, cwd, timeout, max_total=None, debug=False):
 
 
 def _kill_process(process):
-    try:
-        process.kill()
-    except (OSError, ValueError):
-        pass
+    """Kill rga AND its children (rga-preproc → pandoc) via process group."""
+    _kill_process_group(process)
     try:
         if process.stdout:
             process.stdout.close()
+    except (OSError, ValueError):
+        pass
+    try:
+        if process.stderr:
+            process.stderr.close()
     except (OSError, ValueError):
         pass
 
@@ -987,16 +1060,7 @@ def _count_total_matches(rga_path, target, query, case_sensitive=False, multilin
     command.append(".")
     _log_debug(debug, f"预计数命令: {' '.join(command)}")
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(target),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
+        completed = _run_checked(command, cwd=str(target), timeout=timeout, debug=debug)
     except subprocess.TimeoutExpired:
         return {"ok": False, "total": 0}
     if completed.returncode not in (0, 1):

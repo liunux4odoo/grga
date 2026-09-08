@@ -18,6 +18,8 @@ from grga.search import (
     _parse_rga_event_line,
     _parse_skipped_files,
     _shared_rga_options,
+    _kill_process_group,
+    _run_checked,
 )
 
 _logger = logging.getLogger("grga.probe")
@@ -217,16 +219,7 @@ def _probe_paths(base, target, query, case_sensitive, glob_patterns, deadline, p
     _log_debug(debug, f"路径探测命令: {' '.join(command)}")
 
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(target),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
+        completed = _run_checked(command, cwd=str(target), timeout=timeout, debug=debug)
     except subprocess.TimeoutExpired:
         return _error("rg file listing timed out", base, started)
 
@@ -261,16 +254,7 @@ def _count_per_file(rga_path, target, query, case_sensitive, multiline, glob_pat
     command.append(".")
     _log_debug(debug, f"逐文件计数命令: {' '.join(command)}")
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(target),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
+        completed = _run_checked(command, cwd=str(target), timeout=timeout, debug=debug)
     except subprocess.TimeoutExpired:
         return {"ok": False}
 
@@ -331,6 +315,7 @@ def _sample_match_bytes(rga_path, target, query, case_sensitive, multiline, glob
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            start_new_session=True,
         )
     except OSError:
         return None
@@ -367,10 +352,8 @@ def _sample_match_bytes(rga_path, target, query, case_sensitive, multiline, glob
 
 
 def _kill(process):
-    try:
-        process.kill()
-    except (OSError, ValueError):
-        pass
+    """Kill rga AND its children (rga-preproc → pandoc) via process group."""
+    _kill_process_group(process)
     try:
         if process.stdout:
             process.stdout.close()

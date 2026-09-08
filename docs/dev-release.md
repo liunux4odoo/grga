@@ -53,7 +53,7 @@ Upload to TestPyPI, install in a fresh venv, then run:
 
 ```bash
 grga --version
-grga tools check --json          # missing tools, exit code 4 expected on json mode
+grga tools status --json          # full inventory, exit code 0 always
 grga tools install rg             # triggers first-run download
 grga search --json some-term      # end-to-end
 ```

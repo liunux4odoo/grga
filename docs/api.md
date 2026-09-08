@@ -677,9 +677,11 @@ grga scope tag mv   <scope> <old> <new>    # 单 scope 内改名（单行 UPDATE
 
 ---
 
-## `grga check` / `grga tools check`
+## `grga check` / `grga tools status`
 
 `check` returns `{ok, paths:{name:path|null}, warnings[], errors[]}`.
-`tools check` returns `{platform, tools_dir, tools:{name:{path, source, version}}}`.
+`tools status` returns `{platform, tools_dir, tools:{name:{path, source, version}}}`.
+`tools check` is a deprecated alias that prints a warning to stderr and delegates
+to `tools status`.
 These are environment-diagnostic commands, not part of the four-verb search
-contract, and are documented here only for completeness.
+contract, and are documented here for completeness.
