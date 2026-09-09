@@ -41,7 +41,7 @@ def test_run_checked_kills_child_process_group_on_timeout(tmp_path):
 
     After the timeout, the child ``sleep 300`` must NOT survive.
     """
-    marker = f"grga_test_orphan_{os.getpid()}_{int(time.time())}"
+    marker = tmp_path / f"grga_test_orphan_{os.getpid()}_{int(time.time())}"
     cmd_str = f"sleep 300 & echo $! > {marker}_pid; wait $!"
     cmd = ["bash", "-c", cmd_str]
 

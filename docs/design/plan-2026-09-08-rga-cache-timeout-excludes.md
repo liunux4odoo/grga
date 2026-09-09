@@ -29,12 +29,15 @@
 
 - **缓存有效**：preproc_cache mtime 匹配率 100%（907/907）；单文件缓存命中 68ms、0 个
   pdftotext 子进程；flag 组合 / 相对 vs 绝对路径不影响命中。
-- **973 个文件永不缓存，每次重新 preproc**：
-  - **865 个 xlsx/doc/pptx/xls**：rga 0.10.10 pandoc adapter 白名单只有
-    `.epub/.odt/.docx/.fb2/.ipynb/.html/.htm`，**不含 xlsx/pptx/doc/xls** → rga-preproc
-    报 `No adapter found ... passthrough disabled` → 永远失败、永远不缓存、每次重试。
-    （上游至今未支持：2024-09 有人提 PR 未合并；非工具链版本问题 —— grga 自带 pandoc，
-    docx 能正常处理。）
+- **973 个文件默认模式下不进入缓存，每次重新 preproc**：
+  - **865 个 xlsx/doc/pptx/xls**：rga 0.10.10 **pandoc adapter 白名单只有**
+    `.epub/.odt/.docx/.fb2/.ipynb/.html/.htm`，不含 xlsx/pptx/doc/xls。**但注意**
+    （2026-09-08 用户质疑后复核）：**rga 其实能处理 xlsx/pptx** —— 它们本质是 zip，
+    在 `--rga-accurate`（magic bytes / mime type 检测）下会被识别为 `application/zip`
+    → 走 **zip adapter** 递归解压 XML → **成功提取且可缓存**。rga-preproc 报
+    `No adapter found` 只发生在**默认扩展名匹配**路径（.xlsx/.pptx 不在任何 adapter
+    白名单）。上游至今未把 xlsx/pptx 加入 pandoc 白名单（2024-09 有人提 PR 未合并），
+    但 zip adapter 路径已能覆盖 —— 只是需要 `--rga-accurate`。
   - **2 个大 pdf**：`学霸的黑科技系统.pdf`（17.9MB）提取文本压缩后 **4.86MB**、
     `这游戏也太真实了.pdf`（27.8MB）~5-6MB，**超过 rga 缓存默认上限 2MB**
     （`--rga-cache-max-blob-len` 默认值）→ **永不缓存，每次重新提取 20s / 30s+**。
@@ -138,7 +141,61 @@
 ## 7 · 决策留痕（本轮否决的分支）
 
 - ❌ **排除全部二进制**（含 docx/pdf）：丢 88% 匹配，违反搜索主目标。否决。
-- ❌ **升级 rga 解决 xlsx/pptx**：上游 2024 至今未支持，不可控。可后续观察，不作为本次依赖。
+- ❌ **升级 rga 解决 xlsx/pptx**：rga 上游 pandoc 白名单至今未含 xlsx/pptx（2024-09 PR 未合并）。
+  **但非升级问题** —— 本机 `--rga-accurate` 已能通过 zip adapter 处理 xlsx/pptx（见 0.3）。
+  真正的决策是：grga 是否开启 `--rga-accurate`（见下）。
 - ❌ **加 depth 参数**：治标不治本（重灾区文件在浅层），且引入新语义。暂缓。
 - ✅ **调大缓存上限**：一行参数，治大 pdf 大头，收益已验证（67 倍）。
 - ✅ **默认排除压缩包+无文本二进制**：无副作用减噪，配开关可逆。
+- ⚠️ **新发现（2026-09-08 用户质疑后复核）—— grga 当前漏搜 xlsx/pptx**：grga 构建的 rga
+  命令**未加 `--rga-accurate`**，因此默认扩展名匹配**漏掉全部 xlsx/pptx**。实测
+  `小堆创新联盟` 目录：默认 2.8s 匹配 265 文件（0 个 xlsx/pptx）；`--rga-accurate` 33s
+  匹配 348 文件（**+75 xlsx + 8 pptx = 83 个 Office 文件被漏掉**），二次热缓存后 5.1s。
+  **这比"慢"更重要 —— 是"漏搜"**。是否开 accurate 需用户决策（见第 8 节）。
+
+## 8 · 待用户决策：是否开启 `--rga-accurate`（本轮新议题，未拍板）
+
+> 这不是原始三件事之一，是用户质疑引发的**新增发现**。默认排除 / 缓存上限 / timeout
+> 三项仍按第 1-7 节执行，本节约束不阻塞它们；本项**独立决策**。
+
+### 背景
+
+rga 处理 xlsx/pptx 的路径是：`--rga-accurate` → magic bytes 检测到 PK zip 头 →
+mime `application/zip` → **zip adapter 递归解压 XML**。默认（扩展名匹配）则漏掉。
+
+### 实测数据（`小堆创新联盟` 目录）
+
+| 模式 | 首次 | 二次(热缓存) | 找回 xlsx/pptx |
+|---|---|---|---|
+| 默认（现状） | 2.8s | ~2.8s | **0 个（漏搜 83 个文件）** |
+| `--rga-accurate` | 33s | **5.1s** | +75 xlsx + 8 pptx |
+
+### 选项
+
+- **A. grga 默认加 `--rga-accurate`**：完整召回（不丢 Office 文件），二次搜索 5.1s 可接受。
+  代价：首次冷扫描慢（33s+）；pptx 提取是原始 XML（`xmlns` 命名空间噪声，实验9 见
+  `MATCH: ...<Relationships xmlns="http://schemas...`），可能产生标签噪声命中。
+- **B. 加 `--accurate` flag 默认关**：保持现状（快、无噪声），需要时用户手动开。
+  代价：默认漏搜 xlsx/pptx 的问题不解决。
+- **C. 只对 Office 扩展名精确开关**：默认对 `.xlsx/.pptx/.doc/.xls` 也尝试 zip adapter
+  （不全局 accurate，避免其他文件类型误判）。实现稍复杂，需 rga 不支持按扩展名强制 adapter
+  （`--rga-adapters` 是全局的）—— 可行性待 code agent 评估。
+
+### 本方案的建议倾向
+
+- 若用户在意"搜得全"（工作场景，xlsx/pptx 常含关键信息）→ **A**，配 `--no-accurate` 关闭。
+- 若用户更在意"快 + 干净" → **B**，后续可升级。
+- 噪声问题可观察：zip adapter 提取的 XML 中，中文搜索词几乎不会命中 `xmlns`（那是 ASCII
+  命名空间），实际业务影响有限（实验 11 的 75 xlsx 匹配是真内容）。
+
+<!-- 第 9 节待 accurate 决策后补充：默认排除列表是否需因 accurate 调整（accurate 下 zip 递归，
+     可能让"排除压缩包"误伤 xlsx/pptx 的 zip 路径 —— 但排除的是文件扩展名 *.zip 等，
+     xlsx/pptx 不受 *.zip glob 影响，无冲突）。 -->
+
+## 9 · 后续：office-adapters 方案定案（2026-09-09）
+
+第 8 节的 accurate 三选一未直接落地 —— 用户后续拍板改为**方案 D：自定义
+adapter**（`docs/design/plan-2026-09-09-office-adapters.md`）。grga 通过 rga
+`custom_adapters` 配置注册 `pandoc_office`，把 `.xlsx/.pptx/.doc/.xls/.ppt`
+映射到 pandoc，默认开启，`--no-office-adapters` 按次排除。
+

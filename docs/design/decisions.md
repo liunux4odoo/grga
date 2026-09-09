@@ -702,3 +702,33 @@ preview）；后端 `search_directory` / `probe_directory` / `build_rga_command_
 新增 `default_exclude=True` 参数（默认开启，旧调用不传参数行为与改动前兼容性 =
 默认排除生效——这是有意行为变更，非契约破坏）。`deep-search` 通过 `grga search`
 子进程自动继承。MCP `grga_probe` timeout 默认同步 60→180。
+
+### 2026-09-09：Office 文档自定义 adapter（pandoc_office）
+
+**问题**：rga 0.10.10 内置 pandoc adapter 白名单只有
+`.epub/.odt/.docx/.fb2/.ipynb/.html/.htm`（源码 custom.rs 冻结于 2019，
+pandoc 2.18 才加 xlsx/pptx reader）。xlsx/pptx/doc/xls/ppt 报 `No adapter found`、
+永不缓存、每次重试 —— 真实语料**漏搜 84+ 个 Office 文件**。
+
+**决策**：grga 通过 rga 的 `custom_adapters` 配置注册 `pandoc_office` adapter
+（xlsx/pptx/doc/xls/ppt → pandoc），在**检查 / 安装 / 更新工具**时幂等写入
+rga 用户配置文件（`~/.config/ripgrep-all/config.jsonc`，合并保留用户已有配置，
+JSONC 注释由自写剥离器处理）。`--no-office-adapters` 按次排除（`--rga-adapters=
+-pandoc_office`）。
+
+**Rationale**：
+- **写配置而非每次传参**：用户明确要求避免每次命令行传 `--rga-config-file`；
+  配置常驻 + 按次排除开关，默认路径零额外参数。
+- **默认开**：漏搜 Office 文档是功能缺陷（搜工作文档是主用途），优先于首次
+  提取速度（二次有缓存 50M 上限保底）。
+- **合并不覆盖**：写入前解析现有 config（剥离注释），只追加 `pandoc_office`；
+  解析失败/不可写时静默跳过，绝不破坏用户配置。
+- **binary 用相对名 `pandoc`**：依赖 `add_tools_to_path()` 把 managed pandoc
+  目录加 PATH，rga-preproc 子进程经继承 env 找到它（实测 39ms 命中）。
+- **与排除列表无冲突**：Office 文件不在 `DEFAULT_EXCLUDE_GLOBS`，adapter 按
+  扩展名处理，不经过 zip adapter。
+
+**Impact**：additive。新 CLI flag `--no-office-adapters`（search/probe/preview）；
+后端 `_shared_rga_options` / `search_directory` / `probe_directory` /
+`build_rga_command_preview` / `_count_total_matches` 新增 `office_adapters=True`
+参数。副作用：grga 会 touch 用户 rga 全局 config（只追加，不破坏）。

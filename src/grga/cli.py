@@ -31,6 +31,7 @@ from grga.toolchain import (
     VerifyError,
     check_tools,
     current_tools_dir,
+    ensure_rga_office_config,
     ensure_tools,
     install_tools,
     install_tools_from_dir,
@@ -101,6 +102,10 @@ def _guard_tools(required, *, json_mode, offline, interactive=None):
             offline=offline,
             progress=(None if json_mode else (lambda message: typer.echo(message, err=True))),
         )
+        if "rga" in required:
+            # Register the pandoc_office custom adapter in rga's user config
+            # (idempotent; needed so xlsx/pptx/doc/xls/ppt are searchable).
+            ensure_rga_office_config()
     except OfflineError as exc:
         raise typer.Exit(
             emit_error(
@@ -234,6 +239,7 @@ def search_command(
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Search relative file paths only."),
     no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default archive/binary exclusion globs (user -g globs still apply)."),
+    no_office_adapters: bool = typer.Option(False, "--no-office-adapters", help="Do not use the pandoc_office custom adapter (xlsx/pptx/doc/xls/ppt not searchable)."),
     implicit_and: bool = typer.Option(False, "--implicit-and", help="Force implicit adjacency to AND (default). Suppresses the notice."),
     implicit_or: bool = typer.Option(False, "--implicit-or", help="Restore v1 behaviour: implicit adjacency means OR."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON result."),
@@ -286,6 +292,7 @@ def search_command(
             strict_cap=strict_cap,
             implicit_operator=implicit_operator,
             default_exclude=not no_default_exclude,
+            office_adapters=not no_office_adapters,
         )
         result = json.loads(raw)
     except Exception as exc:
@@ -446,6 +453,7 @@ def preview_command(
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Preview path-only search command."),
     no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Preview the command without the default archive/binary exclusion globs."),
+    no_office_adapters: bool = typer.Option(False, "--no-office-adapters", help="Preview the command without the pandoc_office custom adapter."),
 ):
     """Print the exact `rga` command that `grga search` would run.
 
@@ -468,6 +476,7 @@ def preview_command(
         glob_patterns=file_globs,
         path_only=path_only,
         default_exclude=not no_default_exclude,
+        office_adapters=not no_office_adapters,
     )
     typer.echo(command)
 
@@ -483,6 +492,7 @@ def probe_command(
     file_globs: Optional[List[str]] = typer.Option(None, "--iglob", "-g", help="Case-insensitive file glob. Can be used multiple times."),
     path_only: bool = typer.Option(False, "--path-only", help="Probe relative file paths only."),
     no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default archive/binary exclusion globs (user -g globs still apply)."),
+    no_office_adapters: bool = typer.Option(False, "--no-office-adapters", help="Do not use the pandoc_office custom adapter (xlsx/pptx/doc/xls/ppt not searchable)."),
     implicit_and: bool = typer.Option(False, "--implicit-and", help="Force implicit adjacency to AND (default)."),
     implicit_or: bool = typer.Option(False, "--implicit-or", help="Restore v1 behaviour: implicit adjacency means OR."),
     sample: int = typer.Option(0, "--sample", help="Sample up to N matched lines to estimate average line bytes (0 disables)."),
@@ -532,6 +542,7 @@ def probe_command(
             debug=effective_debug,
             implicit_operator=implicit_operator,
             default_exclude=not no_default_exclude,
+            office_adapters=not no_office_adapters,
         )
         result = json.loads(raw)
     except Exception as exc:
@@ -609,6 +620,10 @@ def tools_status_command(
     """Report which managed tools are installed and where they resolve from."""
     _apply_prefer_system(prefer_system)
     result = check_tools()
+    if result["tools"].get("rga", {}).get("path"):
+        # Tool check is a good moment to (idempotently) register the
+        # pandoc_office custom adapter in rga's user config.
+        ensure_rga_office_config()
     if json_output:
         typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -697,6 +712,9 @@ def tools_install_command(
                 typer.echo(f"skipped: {item['name']} ({item['reason']})", err=True)
         if report["failed"]:
             raise typer.Exit(EXIT_PARTIAL_INSTALL if report["installed"] else EXIT_IO)
+        # Tool install is a good moment to register the pandoc_office
+        # custom adapter in rga's user config (idempotent).
+        ensure_rga_office_config()
         return
 
     try:
@@ -707,6 +725,7 @@ def tools_install_command(
         raise typer.Exit(emit_error(EXIT_DOWNLOAD_FAIL, "download_failed", str(exc), json_mode=json_output))
     for item in result:
         typer.echo(json.dumps(item, ensure_ascii=False))
+    ensure_rga_office_config()
 
 
 @tools_app.command("update")
@@ -728,6 +747,7 @@ def tools_update_command(
         raise typer.Exit(emit_error(EXIT_DOWNLOAD_FAIL, "download_failed", str(exc), json_mode=json_output))
     for item in result:
         typer.echo(json.dumps(item, ensure_ascii=False))
+    ensure_rga_office_config()
 
 
 @tools_app.command("migrate")

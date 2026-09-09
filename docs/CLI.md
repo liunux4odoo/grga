@@ -242,6 +242,18 @@ grga search keyword --no-default-exclude
 grga probe keyword -d /path/to/dir --no-default-exclude
 ```
 
+### 关闭 Office 文档 adapter
+
+grga 默认通过 `pandoc_office` 自定义 adapter 搜索 Office 文档
+（`.xlsx` / `.pptx` / `.doc` / `.xls` / `.ppt`）——该 adapter 在检查 /
+安装 / 更新工具时幂等注册进 rga 配置文件。如某个搜索想按次关闭（不修改
+配置文件），用 `--no-office-adapters`：
+
+```bash
+grga search keyword --no-office-adapters
+grga probe keyword -d /path/to/dir --no-office-adapters
+```
+
 ### 只搜索相对文件路径
 
 `--path-only` 不搜索文件内容，只匹配目录中的相对文件路径：

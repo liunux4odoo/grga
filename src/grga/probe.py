@@ -45,6 +45,7 @@ def probe_directory(
     debug=False,
     implicit_operator="and",
     default_exclude=True,
+    office_adapters=True,
 ):
     """Lightweight, read-only probe for how a query scales on disk.
 
@@ -96,6 +97,7 @@ def probe_directory(
         per_file=per_file,
         debug=debug,
         started=started,
+        office_adapters=office_adapters,
     )
 
 
@@ -123,7 +125,7 @@ def _remaining(deadline):
     return remaining if remaining > 0 else 0
 
 
-def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns, deadline, sample, per_file, debug, started):
+def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns, deadline, sample, per_file, debug, started, office_adapters=True):
     rga_path = _find_rga_command()
     if rga_path is None:
         return _error("rga command not found", base, started)
@@ -141,6 +143,7 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
         glob_patterns=glob_patterns,
         timeout=per_file_timeout,
         debug=debug,
+        office_adapters=office_adapters,
     )
     if not per_file_counts.get("ok"):
         fallback_timeout = _remaining(deadline)
@@ -155,6 +158,7 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
             glob_patterns=glob_patterns,
             timeout=fallback_timeout,
             debug=debug,
+            office_adapters=office_adapters,
         )
         if not precount.get("ok"):
             return _error("rga probe failed or timed out", base, started)
@@ -198,6 +202,7 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
                 file_count=len(files),
                 total_lines=total_lines,
                 debug=debug,
+                office_adapters=office_adapters,
             )
             if sample_info is not None:
                 base["sample"] = sample_info
@@ -248,10 +253,10 @@ def _probe_paths(base, target, query, case_sensitive, glob_patterns, deadline, p
     return json.dumps(base, ensure_ascii=False)
 
 
-def _count_per_file(rga_path, target, query, case_sensitive, multiline, glob_patterns, timeout, debug):
+def _count_per_file(rga_path, target, query, case_sensitive, multiline, glob_patterns, timeout, debug, office_adapters=True):
     """Return per-file match counts via ``rga --count-matches --with-filename``."""
     command = [rga_path, "--count-matches", "--with-filename", "--no-require-git"]
-    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns))
+    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns, office_adapters=office_adapters))
     for pattern in query["patterns"]:
         command.extend(["-e", pattern])
     command.append(".")
@@ -298,11 +303,11 @@ def _split_count_line(line):
     return path, count
 
 
-def _sample_match_bytes(rga_path, target, query, case_sensitive, multiline, glob_patterns, timeout, sample, file_count, total_lines, debug):
+def _sample_match_bytes(rga_path, target, query, case_sensitive, multiline, glob_patterns, timeout, sample, file_count, total_lines, debug, office_adapters=True):
     """Estimate total matched-text size by sampling up to ``sample`` lines."""
     per_file_cap = max(1, math.ceil(sample / max(1, file_count)))
     command = [rga_path, "--json", "--line-number", "--no-require-git", "--max-count", str(per_file_cap)]
-    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns))
+    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns, office_adapters=office_adapters))
     for pattern in query["patterns"]:
         command.extend(["-e", pattern])
     command.append(".")

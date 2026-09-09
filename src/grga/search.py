@@ -282,6 +282,7 @@ def search_directory(
     strict_cap=False,
     implicit_operator="and",
     default_exclude=True,
+    office_adapters=True,
 ):
     target = Path(directory).expanduser().resolve()
     _log_debug(debug, f"搜索目录: {target}")
@@ -367,6 +368,7 @@ def search_directory(
             glob_patterns=glob_patterns,
             timeout=timeout,
             debug=debug,
+            office_adapters=office_adapters,
         )
         if precount.get("ok") and precount["total"] > max_total:
             _log_debug(debug, f"strict-cap 触发: {precount['total']} > {max_total}")
@@ -394,6 +396,7 @@ def search_directory(
         multiline=multiline,
         glob_patterns=glob_patterns,
         glob_exclude=glob_exclude,
+        office_adapters=office_adapters,
     )
     _log_debug(debug, f"执行命令: {' '.join(command)}")
 
@@ -488,6 +491,7 @@ def build_rga_command_preview(
     path_only=False,
     implicit_operator="and",
     default_exclude=True,
+    office_adapters=True,
 ):
     rga_path = _find_rga_command() or "rga"
     glob_patterns = _effective_glob_patterns(glob_patterns, default_exclude=default_exclude)
@@ -519,6 +523,7 @@ def build_rga_command_preview(
         multiline=multiline,
         glob_patterns=glob_patterns,
         glob_exclude=glob_exclude,
+        office_adapters=office_adapters,
     )
     return " ".join(_quote_command_part(part) for part in command)
 
@@ -933,9 +938,9 @@ def _path_submatches(path, compiled_patterns):
     return submatches
 
 
-def _build_command(rga_path, query, case_sensitive=False, max_count=None, before_context=3, after_context=3, multiline=False, glob_patterns=None, glob_exclude=False):
+def _build_command(rga_path, query, case_sensitive=False, max_count=None, before_context=3, after_context=3, multiline=False, glob_patterns=None, glob_exclude=False, office_adapters=True):
     command = [rga_path, "--json", "--line-number", "--column", "--no-require-git"]
-    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns))
+    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns, office_adapters=office_adapters))
     if max_count is not None:
         command.extend(["--max-count", str(max_count)])
     if before_context:
@@ -948,14 +953,22 @@ def _build_command(rga_path, query, case_sensitive=False, max_count=None, before
     return command
 
 
-def _shared_rga_options(query, case_sensitive=False, multiline=False, glob_patterns=None):
+def _shared_rga_options(query, case_sensitive=False, multiline=False, glob_patterns=None, office_adapters=True):
     """Return the subset of rga options that every rga-based command shares.
 
     Callers append their own leading subcommand flags (``--json``,
     ``--count-matches``, ...) and are responsible for adding ``-e <pattern>``
     entries and the trailing search path.
+
+    ``office_adapters=False`` excludes the ``pandoc_office`` custom adapter
+    (registered in rga's user config by :func:`ensure_rga_office_config`),
+    restoring the old "xlsx/pptx/doc/xls/ppt invisible" behaviour for that
+    single invocation. The exclusion is passed per-invocation via rga's
+    ``--rga-adapters=-<name>`` so the default path stays zero-extra-args.
     """
     options = [f"--rga-cache-max-blob-len={RGA_CACHE_MAX_BLOB_LEN}"]
+    if not office_adapters:
+        options.append("--rga-adapters=-pandoc_office")
     if query["pcre2"]:
         options.append("-P")
     if multiline:
@@ -1144,10 +1157,10 @@ def _kill_process(process):
         pass
 
 
-def _count_total_matches(rga_path, target, query, case_sensitive=False, multiline=False, glob_patterns=None, timeout=600, debug=False):
+def _count_total_matches(rga_path, target, query, case_sensitive=False, multiline=False, glob_patterns=None, timeout=600, debug=False, office_adapters=True):
     """Estimate the total number of matching lines via ``rga --count-matches``."""
     command = [rga_path, "--count-matches", "--no-require-git", "--no-filename"]
-    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns))
+    command.extend(_shared_rga_options(query, case_sensitive=case_sensitive, multiline=multiline, glob_patterns=glob_patterns, office_adapters=office_adapters))
     for pattern in query["patterns"]:
         command.extend(["-e", pattern])
     command.append(".")

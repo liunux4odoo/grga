@@ -51,6 +51,13 @@ CSV 等），无需额外配置。若需要搜索 **PDF / Office / 电子书**�
 `.docx` / `.xlsx` / `.pptx` / `.epub` / `.odt` …），再运行一次
 `grga tools install` 安装 `rga` / `pandoc` / `pdftotext` 等工具链即可。
 
+> **Office 文档（xlsx / pptx / doc / xls / ppt）**：rga 0.10.10 的内置 pandoc
+> adapter 白名单不含这些格式（上游 2019 年冻结，pandoc 2.18 才支持 xlsx/pptx
+> reader）。grga 在检查 / 安装 / 更新工具时，会把一个 `pandoc_office` 自定义
+> adapter 幂等地注册进 rga 的配置文件（`~/.config/ripgrep-all/config.jsonc`，
+> 合并保留你已有的其它配置），使这些格式可被搜索。可用
+> `grga search --no-office-adapters` 临时关闭（按次排除，不修改配置文件）。
+
 可选依赖：
 
 - `.[standalone]`：构建独立可执行文件所需
