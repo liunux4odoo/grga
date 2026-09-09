@@ -44,8 +44,8 @@ ascending, never empty.
 
 ### Tag filter
 
-Scopes carry **multi-valued tag labels** (built via `grga index build
---tag <label>` or `grga scope tag add`). `related --mode graph` accepts
+Scopes carry **multi-valued tag labels** (written at index-build time,
+or later via `grga scope tag add`). `related --mode graph` accepts
 tag filters that resolve into a scope-id set:
 
 * `--tag 科幻` — every scope carrying that label.
@@ -114,9 +114,9 @@ works — knowledge is enough for candidate expansion. But
 `graph inspect` emits an `evidence_hint` explaining the state:
 
 > "'physics-cn' has knowledge in [physics-cn] but no local corpus
-> evidence. Run `grga index build --scope <name> --directory <path>`
-> to attach local documents, or use `grga related --scope <name>` for
-> pure knowledge-graph expansion (evidence not required)."
+> evidence. Attaching local documents is a user-side offline task;
+> use `grga related --scope <name>` for pure knowledge-graph
+> expansion (evidence not required)."
 
 Building the local evidence is a user-side action (outside this skill).
 

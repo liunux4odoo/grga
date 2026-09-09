@@ -267,7 +267,9 @@ def _inspect(
         "index_hint": (
             f"'{original}' is not indexed in the graph. It may still appear "
             f"in the corpus text — try `grga search \"{original}\"` for "
-            f"full-text hits, or `grga index build` to (re)index a scope."
+            f"full-text hits. Re-indexing a scope (`grga index build`) is a "
+            f"user-side offline task and outside any retrieval-only skill "
+            f"loop."
         ),
     }
     if not folded:
@@ -317,9 +319,10 @@ def _inspect(
                 "evidence_hint": (
                     f"'{original}' has knowledge in "
                     f"{sorted(knowledge_scopes)} but no local corpus "
-                    f"evidence. Run `grga index build --scope <name> "
-                    f"--directory <path>` to attach local documents, or "
-                    f"use `grga related --scope <name>` for pure "
+                    f"evidence. Attaching local documents "
+                    f"(`grga index build --scope <name> --directory <path>`) "
+                    f"is a user-side offline task; a retrieval-only skill "
+                    f"should use `grga related --scope <name>` for pure "
                     f"knowledge-graph expansion (evidence not required)."
                 ),
             }

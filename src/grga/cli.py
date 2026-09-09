@@ -2051,7 +2051,7 @@ def scope_list_command(
         ))
         return
     if not scopes:
-        typer.echo("no scopes in this DB — run `grga index build --scope <name> --directory <path>` first", err=True)
+        typer.echo("no scopes in this DB — creating scopes via `grga index build --scope <name> --directory <path>` is a user-side offline task", err=True)
         return
     for s in scopes:
         dirs = ", ".join(d.directory for d in s.directories) or "(no local bindings)"

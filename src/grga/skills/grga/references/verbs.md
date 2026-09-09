@@ -176,8 +176,8 @@ Scope filter (`--scope` + `--tag`，`--mode graph`)：
 - `--scope NAME`（可多选）— 精确逻辑 scope 名匹配；多个即并集。
 - `--tag LABEL`（可多选）— 按 scope 标签选 scope 集合。
   `--tag-logic or`（默认）= 命中任一标签的 scope；`--tag-logic and` =
-  同时带全部标签的 scope。标签在 `grga index build --tag ...` 或
-  `grga scope tag add` 时写入。
+  同时带全部标签的 scope。标签在索引构建时写入，或通过
+  `grga scope tag add` 添加。
 - **`--scope` 与 `--tag` 同时给 = 取交集**（scope 必须既在 name 列表里
   又满足 tag 条件）。任一 filter 非空但解析为空集 → 返回空结果（不
   退化成跨全部 scope）。两者都不给 = cross-scope union。

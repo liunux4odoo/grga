@@ -412,7 +412,7 @@ dedicated ``index_hint`` and a ``similar_keywords`` vocabulary probe:
   "total_docs": 0,
   "docs_by_scope": {},
   "top_cooccurring_keywords": [],
-  "index_hint": "'苍坤' is not indexed in the graph. It may still appear in the corpus text — try `grga search \"苍坤\"` for full-text hits, or `grga index build` to (re)index a scope.",
+  "index_hint": "'苍坤' is not indexed in the graph. It may still appear in the corpus text — try `grga search \"苍坤\"` for full-text hits. Re-indexing a scope (`grga index build`) is a user-side offline task and outside any retrieval-only skill loop.",
   "similar_keywords": [
     {"kw": "苍坤上人", "kind": "superstring", "chunk_df": 87},
     {"kw": "苍坤真人", "kind": "superstring", "chunk_df": 12}

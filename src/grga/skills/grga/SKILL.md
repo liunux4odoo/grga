@@ -27,6 +27,13 @@ state and without paying LLM cost until absolutely necessary.
   tool, first name the specific `grga` verb being bypassed and the
   concrete reason it is insufficient (see the anti-patterns section).
   Absent that justification, the urge is muscle memory, not necessity.
+- **Tool hints are not a build trigger.** Read-side commands (`grga
+  graph inspect`, `grga scope list`) may print hints that mention `grga
+  index build` when the offline index is empty — those hints are written
+  for a human maintaining the index. **Ignore the build suggestion
+  inside the skill loop**: an empty / missing index is "no signal", and
+  the fallthrough stays `probe` sweep → different seed → `related
+  --mode heading` → T3 `suggest`.
 
 ## 30-second quickstart
 
