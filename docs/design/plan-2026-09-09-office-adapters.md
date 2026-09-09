@@ -99,3 +99,13 @@ rga 提供 `custom_adapters` 配置（`~/.config/ripgrep-all/config.jsonc`），
 4. 已有自定义配置的用户 config 合并后保留其他键
 5. 45 tests 全绿
 6. 二次搜索命中缓存（Office 文件）
+
+## 后续补充（2026-09-09 二次提交）
+
+- **graph 索引接入**：`file_read.py` 的 `RGA_SUPPORTED_SUFFIXES` 与
+  `RGA_BINARY_ONLY_SUFFIXES` 加入 `.xlsx/.pptx/.doc/.xls/.ppt`，使
+  `grga index build` 能枚举并提取 Office 文件（详见 decisions.md）。此前被
+  `bad_suffix` 跳过的 Office 文件无 `docs` 行，新 build 以 `DOC_ADDED` 处理；
+  已索引文件仍按 size/mtime 增量跳过。
+- **fingerprint 修复**：`_compute_toolchain_fingerprint` 先 `add_tools_to_path()`
+  再解析版本，消除 no-op 增量构建误报 "toolchain fingerprint changed"。

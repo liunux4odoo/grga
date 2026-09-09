@@ -732,3 +732,30 @@ JSONC 注释由自写剥离器处理）。`--no-office-adapters` 按次排除（
 后端 `_shared_rga_options` / `search_directory` / `probe_directory` /
 `build_rga_command_preview` / `_count_total_matches` 新增 `office_adapters=True`
 参数。副作用：grga 会 touch 用户 rga 全局 config（只追加，不破坏）。
+
+### 2026-09-09：pandoc_office 接入 graph 索引（补充决策）
+
+**问题**：上述 adapter 只影响 `grga search`/`probe`（rga CLI 直读 config）。
+`grga index build` 的文件枚举 gate `indexable_suffixes()`（`file_read.py` 的
+`RGA_SUPPORTED_SUFFIXES`）不含 `.xlsx/.pptx/.doc/.xls/.ppt` → 这些文件在
+`iter_text_files` 就以 `bad_suffix` 跳过、从未进 `docs` 表 —— adapter 对
+graph 索引无效。
+
+**决策**：把 `.xlsx/.pptx/.doc/.xls/.ppt` 加进 `file_read.py` 的
+`RGA_SUPPORTED_SUFFIXES` 与 `RGA_BINARY_ONLY_SUFFIXES`：
+- `RGA_SUPPORTED_SUFFIXES`：build 枚举后经 `read_file_lines_ex` →
+  `_read_via_rga`（`rga --passthru`）→ pandoc_office 提取干净文本。
+- `RGA_BINARY_ONLY_SUFFIXES`：rga 失败时返回 `FAILED` 而不是 native UTF-8
+  读二进制垃圾灌进索引。
+- 附带收益：`expand` 上下文（`read_file_lines`）对 Office 命中文件也走
+  pandoc_office，不再是二进制乱码。
+
+**修复的既有 bug**：`_compute_toolchain_fingerprint` 依赖进程 PATH，而 PATH
+只在文件读取时才被 `add_tools_to_path()` 打上 managed 工具目录 —— 数据构建
+（有读取）与随后的 no-op 增量构建（无读取）的 fingerprint 不同 → 每次 no-op
+构建都误报 "toolchain fingerprint changed"。修复：fingerprint 内部先调用
+`add_tools_to_path()`，保证两次解析同一组二进制。
+
+**Impact**：additive MINOR。增量语义不变：之前被 `bad_suffix` 跳过的 Office
+文件无 `docs` 行 → 新 build 以 `DOC_ADDED` 处理；已索引文件仍按 size/mtime
+跳过。

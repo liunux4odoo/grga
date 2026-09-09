@@ -70,6 +70,8 @@ RGA_SUPPORTED_SUFFIXES = frozenset({
     ".pdf",
     # pandoc
     ".epub", ".odt", ".docx", ".fb2", ".ipynb", ".html", ".htm",
+    # pandoc_office (custom adapter registered by toolchain.ensure_rga_office_config)
+    ".xlsx", ".pptx", ".doc", ".xls", ".ppt",
     # ffmpeg (metadata only; text extraction is limited)
     ".mkv", ".mp4", ".avi", ".mp3", ".ogg", ".flac", ".webm",
     # zip
@@ -96,6 +98,7 @@ RGA_SUPPORTED_SUFFIXES = frozenset({
 RGA_BINARY_ONLY_SUFFIXES = frozenset({
     ".pdf",
     ".epub", ".odt", ".docx", ".fb2",
+    ".xlsx", ".pptx", ".doc", ".xls", ".ppt",
     ".mkv", ".mp4", ".avi", ".mp3", ".ogg", ".flac", ".webm",
     ".zip", ".jar", ".xpi", ".kra", ".snagx",
     ".als", ".bz2", ".gz", ".tbz", ".tbz2", ".tgz", ".xz", ".zst",

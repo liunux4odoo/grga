@@ -4283,7 +4283,17 @@ def _compute_toolchain_fingerprint() -> str:
     is fixed so a re-run on the same machine yields the same hash. Any
     binary that is missing contributes an empty string, which is still
     stable across runs. See design §4.2.
+
+    Resolution uses the managed-tool PATH (grga's own pandoc/rga live in
+    the tools cache, not on the shell PATH). ``add_tools_to_path`` is
+    called here so the fingerprint resolves the *same* binaries whether
+    or not file reads happened earlier in the process — otherwise a
+    no-op incremental build (no reads → PATH unstamped) would spuriously
+    differ from the data-bearing build that preceded it.
     """
+    from grga.toolchain import add_tools_to_path
+
+    add_tools_to_path()
     parts = [
         _binary_version("rga"),
         _binary_version("pandoc"),

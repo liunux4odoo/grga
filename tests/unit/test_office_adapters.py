@@ -228,3 +228,21 @@ def test_cli_preview_flag_toggles_office_adapters():
 
     without = runner.invoke(app, ["preview", "--no-office-adapters", "hello"])
     assert "--rga-adapters=-pandoc_office" in without.output
+
+
+# ---------------------------------------------------------------------------
+# toolchain fingerprint (build-time warning source)
+# ---------------------------------------------------------------------------
+
+
+def test_toolchain_fingerprint_stable_across_calls():
+    # A no-op incremental build never reads files, so PATH stays unstamped;
+    # the fingerprint must still resolve the same managed tool versions as
+    # the data-bearing build before it (regression: spurious "toolchain
+    # fingerprint changed" warning on every no-op build).
+    from grga.graph.build import _compute_toolchain_fingerprint
+
+    a = _compute_toolchain_fingerprint()
+    b = _compute_toolchain_fingerprint()
+    assert a == b
+
