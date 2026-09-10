@@ -111,6 +111,49 @@ Metadata fields (real matches only, `--metadata` on):
 Non-Markdown files (or unparsable Markdown) simply omit the three structure
 fields; callers should treat "absent" as `null`.
 
+### Real output sample
+
+```json
+{
+  "ok": true,
+  "patterns": ["attention"],
+  "directory": "/abs/papers",
+  "truncated": false,
+  "total_files_matched": 2,
+  "matches": [
+    {
+      "path": "nlp/transformers.md",
+      "line_number": 17,
+      "absolute_offset": 612,
+      "text": "The attention mechanism is the core of the transformer model.",
+      "is_context": false,
+      "submatches": [{"match": "attention", "start": 4, "end": 13}],
+      "occurrence_index": 1,
+      "total_occurrences": 8,
+      "line_ratio": 0.15,
+      "nearby_hits": 2,
+      "matched_terms": ["attention"],
+      "heading_path": ["Architecture", "Attention"],
+      "chapter_id": "architecture-attention",
+      "chapter_range": [12, 45]
+    },
+    {
+      "path": "psych/attention-and-memory.md",
+      "line_number": 3,
+      "absolute_offset": 98,
+      "text": "Attention and memory are closely linked cognitive processes.",
+      "is_context": false,
+      "submatches": [{"match": "Attention", "start": 0, "end": 9}],
+      "occurrence_index": 1,
+      "total_occurrences": 5,
+      "line_ratio": 0.07,
+      "nearby_hits": 0,
+      "matched_terms": ["attention"]
+    }
+  ]
+}
+```
+
 ### `answer` object (deep-search only)
 
 | field | type | meaning |

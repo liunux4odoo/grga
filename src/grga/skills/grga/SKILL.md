@@ -53,6 +53,8 @@ verb, not the cost order below:
 - **Literal / location** — "X 出现在哪？", "包含 X 的段落 / 章节？" →
   `probe` → `search` → `expand`.
 - **Vague / open-ended** → `probe` first; escalate via stuck signals.
+  For **discovery** use OR: `grga search "A B C" --implicit-or` (or `A || B || C`)
+  — reserve implicit AND for verifying a hypothesis you already have.
 
 **Friction-free basics (read once):**
 
@@ -60,7 +62,9 @@ verb, not the cost order below:
   three. Discovery → use OR (`--implicit-or`, or `||`); verification →
   AND.
 - **`-d / --directory` is a directory, not a file** — for a single file
-  pass its parent directory.
+  pass its parent directory. Pin it to one file / one type with
+  `-g '*name.txt'` (case-insensitive iglob, repeatable) so PDFs and
+  other books in the same tree don't pollute results.
 - **`related` takes `--scope`, not `-d`** — omit `--scope` for cross-scope
   union, or pick one from `grga scope list --json` (never `sqlite3`).
 
@@ -71,7 +75,7 @@ Cheapest-first cost order — see **Start here** for entry-verb routing
 
 ```bash
 grga probe "your query" --directory ./docs --json                            # 1) cheap size check before a full search
-grga search "your query" --directory ./docs --json                           # 2) baseline hits + metadata
+grga search "your query" --directory ./docs --json                           # 2) baseline hits + metadata; pin to one file with -g '*name.txt'
 grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 3) widen one hit into chapter/paragraph/lines
 grga related "keyword" --json  # 4) candidate keywords via co-occurrence — the ENTRY verb for entity/relationship questions (clues, not answers). Needs a pre-built offline index.
 ```
@@ -236,6 +240,13 @@ list is caller work:
 **Identity questions:** person-name candidates ARE the suspect list —
 `related "国字脸"` surfacing `方长 / 狂风 / 老白 / 夜十` means "these
 people co-occur with the seed"; test each, do not discard as noise.
+
+**Why is this candidate associated?** `related` keeps candidates light
+(`kw` + `npmi` + `scopes[]`), no per-candidate document list. To see
+*where* a candidate comes from — which files drive the association — run
+`grga graph inspect <candidate> --docs-limit N`; its `top_docs` is the
+locate-me shortcut. Call for the candidates you care about, not for all
+of them — the mirror is query-on-demand.
 
 ### Stuck signals & escalation
 

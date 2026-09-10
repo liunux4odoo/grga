@@ -254,6 +254,14 @@ def search_command(
     occurrence / line_ratio / heading_path annotations. Use `--json` for
     machine-readable output; combine `--implicit-and/--implicit-or` to pin
     how adjacent keywords are joined.
+
+    Each match carries a ``path`` field (the relative file path). Full
+    JSON schema and sample output in ``docs/api.md``.
+
+    Minimal ``--json`` match shape::
+
+        {"path": "docs/foo.md", "line_number": 42, "text": "...",
+         "is_context": false, "occurrence_index": 1, "total_occurrences": 3}
     """
     query = _join_keywords(keywords)
     if not query:
@@ -1931,7 +1939,8 @@ def related_command(
             typer.echo(json.dumps(kw_result.to_dict(), ensure_ascii=False, indent=2))
             return
         if not kw_results:
-            typer.echo("no related keywords found", err=True)
+            scope_label = ", ".join(scope_list) if scope_list else "all scopes"
+            typer.echo(f"no signal in scope '{scope_label}'")
         else:
             for r in kw_results:
                 typer.echo(
@@ -1973,7 +1982,8 @@ def related_command(
         typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
         return
     if not results:
-        typer.echo("no related documents found", err=True)
+        scope_label = heading_scope or "all scopes"
+        typer.echo(f"no signal in scope '{scope_label}'")
         raise typer.Exit(0)
     for item in results:
         kw = ("  <- " + ", ".join(item.keywords)) if item.keywords else ""

@@ -470,3 +470,109 @@ def test_related_keywords_scopes_survives_limit_truncation(sidecar_env, tmp_path
     assert set(target_row.scopes) == {"scope-a", "scope-b"}, (
         f"D14 regression: expected both scopes, got {target_row.scopes}"
     )
+
+
+def test_related_keywords_whitespace_arg_splits_when_no_phrase_evidence(sidecar_env, tmp_path):
+    """A whitespace-containing arg with no phrase-level evidence is split
+    into multiple seeds (the CJK multi-seed case: ``"楚光 小柒"`` → two).
+
+    The ngram detector never produces space-joined CJK phrases, so a
+    string like ``"alpha beta"`` passed as a single quoted arg should be
+    split into its component tokens — provided the exact phrase is NOT
+    attested in ``keyword_docs``. (If it IS attested, we keep it as a
+    phrase — see the next test.)
+    """
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    lines = ["alpha beta gamma line"] * 5 + ["alpha solo", "beta solo", "gamma solo"]
+    (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
+    db = tmp_path / "graph.db"
+    _build(scope, db)
+
+    # Single arg with whitespace → should be split into ["alpha", "beta"].
+    # Both are known individually; both expand to neighbours.
+    result = related_keywords(
+        ["alpha beta"], limit_per_seed=10, min_npmi=0.0, db_path=db,
+    )
+    # resolved_seeds should show two seeds, both in index.
+    assert {s.seed for s in result.resolved_seeds} == {"alpha", "beta"}
+    assert all(s.in_index for s in result.resolved_seeds)
+    # Results should include candidates from BOTH seeds.
+    via_seeds = {r.via_seed for r in result.results}
+    assert "alpha" in via_seeds
+    assert "beta" in via_seeds
+
+
+def test_related_keywords_whitespace_arg_kept_as_phrase_when_attested(sidecar_env, tmp_path):
+    """When the exact whitespace-joined string HAS doc-level evidence
+    (e.g. an ASCII phrase re-joined by the ngram detector), keep it as a
+    single phrase seed instead of splitting.
+    """
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    # Use a known multi-token phrase. The build-time ngram detector
+    # produces space-joined phrases; we simulate that by inserting a
+    # phrase-level keyword_docs row manually.
+    lines = ["first second shared"] * 5 + ["first only", "second only"]
+    (scope / "doc.txt").write_text("\n".join(lines), encoding="utf-8")
+    db = tmp_path / "graph.db"
+    _build(scope, db)
+
+    from grga.graph.schema import connect, ensure_schema
+
+    conn = connect(db)
+    try:
+        ensure_schema(conn)
+        # If the ngram detector already produced "first second" as a
+        # phrase, then ``keyword_docs`` already has it and this test is
+        # already covered. Otherwise, manually inject phrase-level
+        # evidence to simulate the ASCII-phrase rejoin case.
+        row = conn.execute(
+            "SELECT 1 FROM keyword_docs kd "
+            "JOIN keywords k ON k.id = kd.kw_id "
+            "WHERE k.kw = ? LIMIT 1",
+            ("first second",),
+        ).fetchone()
+        if row is None:
+            # Inject: add the phrase to keywords + keyword_docs + a pair
+            # with a known neighbour so we can observe it expanding.
+            conn.execute("INSERT OR IGNORE INTO keywords(kw) VALUES(?)", ("first second",))
+            kw_id = conn.execute("SELECT id FROM keywords WHERE kw = ?", ("first second",)).fetchone()[0]
+            # Grab scope_id and doc_id.
+            scope_id = conn.execute("SELECT id FROM scopes WHERE name = ?", ("test-scope",)).fetchone()[0]
+            doc_id = conn.execute("SELECT id FROM docs WHERE scope_id = ? AND doc_path = ?", (scope_id, "doc.txt")).fetchone()[0]
+            conn.execute(
+                "INSERT OR IGNORE INTO keyword_docs(scope_id, kw_id, doc_id, occurrence_count, chunk_count) "
+                "VALUES(?, ?, ?, 5, 3)",
+                (scope_id, kw_id, doc_id),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO keyword_stats(scope_id, kw_id, chunk_df, doc_df, total_occurrences) "
+                "VALUES(?, ?, 3, 1, 5)",
+                (scope_id, kw_id),
+            )
+            gamma_id = conn.execute("SELECT id FROM keywords WHERE kw = ?", ("gamma",)).fetchone()
+            if gamma_id is None:
+                conn.execute("INSERT OR IGNORE INTO keywords(kw) VALUES(?)", ("gamma",))
+                gamma_id = conn.execute("SELECT id FROM keywords WHERE kw = ?", ("gamma",)).fetchone()[0]
+            else:
+                gamma_id = gamma_id[0]
+            a, b = sorted([kw_id, gamma_id])
+            conn.execute(
+                "INSERT OR IGNORE INTO keyword_pairs(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi) "
+                "VALUES(?, ?, ?, 'chunk_cooccur', 3, 0.5)",
+                (scope_id, a, b),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    result = related_keywords(
+        ["first second"], limit_per_seed=10, min_npmi=0.0, db_path=db,
+    )
+    # The phrase should be treated as a single seed, not split.
+    assert len(result.resolved_seeds) == 1
+    assert result.resolved_seeds[0].seed == "first second"
+    assert result.resolved_seeds[0].in_index is True
+    # All candidates should be via the phrase seed.
+    assert all(r.via_seed == "first second" for r in result.results)

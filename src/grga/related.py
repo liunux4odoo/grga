@@ -101,6 +101,81 @@ def _fold(term: str) -> str:
     return term.casefold().strip()
 
 
+def _normalise_inner_whitespace(text: str) -> str:
+    """Collapse runs of whitespace inside ``text`` into single spaces.
+
+    Used by the phrase-or-split heuristic so that ``"nano  center"`` (double
+    space) is still recognised as the stored phrase ``"nano center"``.
+    """
+    return " ".join(text.split())
+
+
+def _phrase_in_evidence(conn: sqlite3.Connection, phrase: str) -> bool:
+    """Whether the exact casefolded phrase has doc-level evidence.
+
+    Checks ``keyword_docs`` (joined to ``keywords``). Scope-independent:
+    a phrase that is attested in *any* scope counts as a phrase. This is
+    the same evidence table ``graph inspect`` uses for "does the graph
+    know this keyword?" (not-indexed branch / ``top_docs``).
+    """
+    row = conn.execute(
+        "SELECT 1 FROM keyword_docs kd "
+        "JOIN keywords k ON k.id = kd.kw_id "
+        "WHERE k.kw = ? LIMIT 1",
+        (phrase,),
+    ).fetchone()
+    return row is not None
+
+
+def _resolve_seed_args(
+    conn: sqlite3.Connection,
+    raw_seeds: Sequence[str],
+) -> List[str]:
+    """Expand user-supplied seed args into concrete folded graph seeds.
+
+    A single argument can carry interior whitespace in two different
+    ways, and the graph has no way to tell them apart from the arg
+    boundary alone:
+
+    * **space-joined phrase** — the build-time ngram detector re-joins
+      ASCII phrases with a space (e.g. ``nano center``), so the string
+      *is* one keyword in the index.
+    * **accidental concatenation** — CJK terms have no spaces, so a
+      quoted string like ``"楚光 小柒"`` is actually two seeds that
+      happen to have been passed as one shell argument.
+
+    Resolve per-argument with an evidence probe: if the exact string
+    has doc-level evidence (``keyword_docs``), keep it as one phrase
+    seed; otherwise split on whitespace into multiple seeds. The
+    resulting list is case-folded, de-duplicated (first-seen order
+    preserved), and empty entries are dropped.
+
+    Args:
+        conn: open SQLite connection (schema already ensured).
+        raw_seeds: seed arguments as supplied by the caller (pre-fold).
+
+    Returns:
+        A list of folded, de-duplicated seed strings.
+    """
+    out: List[str] = []
+    seen: set = set()
+    for raw in raw_seeds:
+        if raw is None:
+            continue
+        folded_phrase = _normalise_inner_whitespace(_fold(raw))
+        if not folded_phrase:
+            continue
+        if " " in folded_phrase and not _phrase_in_evidence(conn, folded_phrase):
+            candidates = folded_phrase.split()
+        else:
+            candidates = [folded_phrase]
+        for c in candidates:
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+    return out
+
+
 def _normalise_scopes(
     scopes: Optional[Sequence[str]],
 ) -> Optional[List[str]]:
@@ -348,15 +423,6 @@ def related_keywords(
         raise ValueError(
             f"tag_logic must be one of {VALID_TAG_LOGIC}, got {tag_logic!r}"
         )
-    seed_folded: List[str] = []
-    seen_seeds: set = set()
-    for s in (_fold(k) for k in seeds):
-        if s and s not in seen_seeds:
-            seen_seeds.add(s)
-            seed_folded.append(s)
-    if not seed_folded:
-        return RelatedKeywordsResult(results=[], resolved_seeds=[])
-
     from grga.deep_search import DEFAULT_DB_PATH
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
@@ -365,9 +431,18 @@ def related_keywords(
     effective_min_npmi = (
         _default_min_npmi() if min_npmi is None else float(min_npmi)
     )
+    # Fast path: if every raw seed is empty after basic folding, there is
+    # nothing to resolve and no need to open a DB connection. This
+    # preserves the pre-fallback zero-side-effect behaviour for empty
+    # inputs (which callers may use as a defensive guard).
+    if not any(_fold(s) for s in seeds):
+        return RelatedKeywordsResult(results=[], resolved_seeds=[])
     conn = connect(target_db)
     try:
         ensure_schema(conn)
+        seed_folded = _resolve_seed_args(conn, seeds)
+        if not seed_folded:
+            return RelatedKeywordsResult(results=[], resolved_seeds=[])
         return _related_keywords_impl(
             conn,
             seed_folded,
@@ -824,17 +899,19 @@ def related(
             f"unknown related mode: {mode!r} (expected one of {VALID_MODES})"
         )
 
-    seeds = [s for s in (_fold(k) for k in keywords) if s]
-    if not seeds:
-        return []
-
     from grga.deep_search import DEFAULT_DB_PATH
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     scope_name = resolve_scope_name(scope)
+    # Fast path: nothing to do with all-empty seeds; skip the connection.
+    if not any(_fold(k) for k in keywords):
+        return []
     conn = connect(target_db)
     try:
         ensure_schema(conn)
+        seeds = _resolve_seed_args(conn, keywords)
+        if not seeds:
+            return []
         return _related_heading(
             conn, seeds, limit,
             seed_scope_name=scope_name,
