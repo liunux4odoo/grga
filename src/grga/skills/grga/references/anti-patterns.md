@@ -68,7 +68,8 @@ Two failure modes hidden by this habit:
 - **Right question, wrong tool.** For a keyword's scope distribution,
   top co-occurring keywords, or polysemy signal, the stable public verb
   is `grga graph inspect <keyword> --db <path> --json`. Its output is
-  contract; the underlying storage is not.
+  contract; the underlying storage is not. Scope names (for `related
+  --scope`) come from `grga scope list --json` — never from the DB.
 
 Legitimate exceptions (few and explicit): actively developing grga
 itself, or debugging a suspected corruption / migration bug after `grga

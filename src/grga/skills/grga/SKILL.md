@@ -1,6 +1,6 @@
 ---
 name: grga
-description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index has already been built by the user; if `related` / `graph inspect` returns empty, treat that as "no signal available" and continue with the remaining evidence. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
+description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index has already been built by the user; if `related` / `graph inspect` returns empty, treat that as "no signal available" and continue with the remaining evidence. Entity / identity / relationship questions (who is X, are A and B the same entity, what else relates to X) route to a `related`-first workflow; literal location questions route to `probe → search → expand`. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
 ---
 
 # grga skill
@@ -19,6 +19,10 @@ state and without paying LLM cost until absolutely necessary.
   or similar tools to hunt for keywords, patterns, or DB rows. Route
   the search through the appropriate verb (`probe` / `search` /
   `expand` / `related` / `suggest`) instead.
+- **Open-ended task? Run `related` before the first `search`** — the
+  session-open T2-bookend is mandatory (see "Tiered reflection
+  workflow"). The quickstart below is **cost order, not execution
+  order**; "Start here" picks the entry verb by question type.
 - **Post-processing is fine.** `sed`, `awk`, `wc`, `sort`, `uniq`,
   `jq`, `cut`, and friends remain the right tools for slicing,
   counting, aggregating, or reformatting `grga` output. Pipe `grga
@@ -35,13 +39,41 @@ state and without paying LLM cost until absolutely necessary.
   the fallthrough stays `probe` sweep → different seed → `related
   --mode heading` → T3 `suggest`.
 
+## Start here: pick the entry verb
+
+Read this before the quickstart — the **question type** decides the entry
+verb, not the cost order below:
+
+- **Entity / identity / relationship** — "X 是谁？", "A 和 B 是同一人 /
+  同一个概念吗？", "和 X 相关的人物还有谁？" → **start with `related`**,
+  not `search`. `related` returns candidate keywords — **clues, not
+  answers**: harvest the names / entities in the list and test each with
+  `search` (recipe: "Consuming related output"). For identity questions
+  run independent evidence chains per side (anti-pattern #1).
+- **Literal / location** — "X 出现在哪？", "包含 X 的段落 / 章节？" →
+  `probe` → `search` → `expand`.
+- **Vague / open-ended** → `probe` first; escalate via stuck signals.
+
+**Friction-free basics (read once):**
+
+- **Multi-word is implicit AND** — `"A B C"` matches lines with all
+  three. Discovery → use OR (`--implicit-or`, or `||`); verification →
+  AND.
+- **`-d / --directory` is a directory, not a file** — for a single file
+  pass its parent directory.
+- **`related` takes `--scope`, not `-d`** — omit `--scope` for cross-scope
+  union, or pick one from `grga scope list --json` (never `sqlite3`).
+
 ## 30-second quickstart
+
+Cheapest-first cost order — see **Start here** for entry-verb routing
+(entity / identity / relationship questions enter at step 4, not 1).
 
 ```bash
 grga probe "your query" --directory ./docs --json                            # 1) cheap size check before a full search
 grga search "your query" --directory ./docs --json                           # 2) baseline hits + metadata
 grga expand "path/to/file.md:42" --directory ./docs --level chapter --json   # 3) widen one hit into chapter/paragraph/lines
-grga related "keyword" --json  # 4) candidate related keywords via co-occurrence (needs a pre-built offline index); pipe them into rga for passages. Empty result → sweep 2-4 domain-adjacent keywords with T0 `probe` before giving up.
+grga related "keyword" --json  # 4) candidate keywords via co-occurrence — the ENTRY verb for entity/relationship questions (clues, not answers). Needs a pre-built offline index.
 ```
 
 `suggest` is the LLM fallback and runs only on demand — see
@@ -115,7 +147,7 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
 | `grga probe <q> -d <dir>` | `rga --count-matches` — returns `total_lines`, `file_count` without bodies. Makes no decision. | About to `search` an unfamiliar corpus / broad keyword / huge file — want a cheap size signal first. |
 | `grga search <q> -d <dir>` | Hits + position metadata (`occurrence_index`, `line_ratio`, `nearby_hits`) + `heading_path` for Markdown. Space-separated terms are **implicit AND** (`--implicit-or` restores OR). `--max-total N` (default 1000) sets `truncated`. | Concrete query string. First **evidence-fetching** verb — but for open-ended queries a T2-bookend `related` sweep precedes T1 (see workflow). |
 | `grga expand <path>:<line> --level <lines\|paragraph\|chapter\|document\|toc>` | Turn one hit into a `Context` block. Degrades `chapter → paragraph → lines(±3) → lines(±0)`; `toc → chapter` when no heading tree. `toc` returns the single-doc outline (one line per heading, hit chapter marked `>`); like `document` it returns the whole outline and only truncates around the hit chapter when past a safety cap. Always read the returned `level`. Never invokes an LLM. | Hit is interesting and surrounding text is needed; want a whole Markdown chapter; quoting a block into another prompt; need the file's outline / where the hit sits inside it (`toc`). |
-| `grga related <kw…> --mode <graph\|heading> [--scope <name> …] [--tag <label> …] [--tag-logic and\|or] --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi` + `scopes[]`**（不返回文档，caller 按 `scopes[]` 定位 scope 绑定目录再 ripgrep），`heading` 返回共享 Markdown heading path 的**文档**（`scope` 字段区分同名文件）。`--scope` 可**重复**做多选；`--tag` 可**重复**按标签选 scope；两者同时给取交集。不传 `--scope` / `--tag` 跨全部 scope 联查。**Precondition**: the offline index must already have been built by the user; if not, `related` returns `{"results": []}` — treat empty as "no signal, move on". | Caller has keywords and needs to broaden — not deepen — the exploration. |
+| `grga related <kw…> --mode <graph\|heading> [--scope <name> …] [--tag <label> …] [--tag-logic and\|or] --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi` + `scopes[]`**（不返回文档，caller 按 `scopes[]` 定位 scope 绑定目录再 ripgrep），`heading` 返回共享 Markdown heading path 的**文档**（`scope` 字段区分同名文件）。`--scope` 可**重复**做多选；`--tag` 可**重复**按标签选 scope；两者同时给取交集。不传 `--scope` / `--tag` 跨全部 scope 联查。**Precondition**: the offline index must already have been built by the user; if not, `related` returns `{"results": []}` — treat empty as "no signal, move on". **Returns candidate keywords (clues), not answers** — combine with `search` to build the answer (recipe: "Consuming related output"). | Caller has keywords and needs to broaden — not deepen; **entry verb for entity / identity / relationship questions**. |
 | `grga suggest <q> --intent <expand\|rerank\|reformulate> --hits <hits.json>` | **Only** verb that calls an LLM. Returns reformulated queries / expanded keywords / rerankings. | Search returns too few / low-quality results, or query is intrinsically vague. **Never** the first verb (see "Stuck signals" for triggers and relaxed guardrails). |
 
 ### Supporting commands (read-side only)
@@ -226,6 +258,22 @@ is caller judgment, not a workflow rule.
 If any box cannot be ticked, run the missing sweep before answering.
 "T1 already gave me enough" is **not** a valid reason to skip — it is
 the precise trigger for the pre-answer bookend.
+
+### Consuming `related` output (the recipe)
+
+`related` returns **candidate keywords, never an answer** — reading the
+list is caller work:
+
+1. **Filter for entities.** Keep proper nouns / names / concrete terms;
+   drop stopwords & discourse markers (`不过`, `什么`, `the`, `would`)
+   and very-high-`chunk_df` hub words. Sort survivors by `npmi`.
+2. **Feed them back into `search`.** `grga search "<c1> <c2> ..." --implicit-or -d <dir> --json` (or `rga -e c1 -e c2`) to locate & verify passages, then `expand` the best hits.
+3. **Hop once more.** Promote a strong candidate (high `npmi`, moderate
+   `chunk_df`) to the next `related` seed; 1-2 hops is usually enough.
+
+**Identity questions:** person-name candidates ARE the suspect list —
+`related "国字脸"` surfacing `方长 / 狂风 / 老白 / 夜十` means "these
+people co-occur with the seed"; test each, do not discard as noise.
 
 ### Stuck signals & escalation
 

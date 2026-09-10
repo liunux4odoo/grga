@@ -146,6 +146,9 @@ low-DF surrogate）。
 policy. The verb surfaces 每条候选自带的 `npmi` 与 `chunk_df`；the caller
 decides whether to keep the seed or swap.
 
+**Consuming the candidate list** (filter entities → feed back into
+`search` → hop again) lives in SKILL.md § "Consuming related output".
+
 ### Seed-quality decision table for `related --mode graph`
 
 `related --mode graph` 的所有信号扁平在每条 `results[]` 上（`{kw, npmi,

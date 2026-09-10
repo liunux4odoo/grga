@@ -6,6 +6,9 @@
 计算，**不调用 LLM**。拿到候选关键字后，用 `rga` / `grga search` 找原文
 片段是 caller 的职责。
 
+> **Consumption recipe now lives in `SKILL.md` § "Consuming related
+> output"** — this file is the worked storyboard for that recipe.
+
 ## Storyboard
 
 1. Precondition: the corpus's offline co-occurrence index already exists
@@ -88,6 +91,18 @@ Interpretation:
   pair 在写入期被 npmi 门槛过滤）。**在本 skill 内直接跳过**——改用
   `--mode heading`、换一个 low-DF seed，或就用手头的 T1 证据继续。索引
   构建/维护属于用户离线动作，不由 skill 触发。
+
+## Identity variant (who is X / which entity is X?)
+
+For identity questions, treat **person-name / entity candidates as the
+suspect list**, not as concept neighbours to fold into a query:
+
+`related "国字脸" --mode graph` → `方长 / 狂风 / 老白 / 夜十` (names
+co-occurring with the seed) → `grga search "方长 狂风 老白 夜十"
+--implicit-or` to pull each name's passages, then compare
+first-appearance / characteristic contexts. Names are evidence, not
+noise — do not filter them out just because they are not obviously
+"related concepts".
 
 ## When *not* to use this pattern
 
