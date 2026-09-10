@@ -207,6 +207,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/plan-2026-07-12-keyword-primary.md` | v9 架构：pair 字典化 + 删 keyword_chunks（schema v8 落地文档） |
 | `docs/design/db-memory-optimization-lessons.md` | **DB/内存优化方法学**：TEMP TABLE + SQL self-join 替代 Python 大 Counter；改任何"Python 聚合→落 SQLite"模块前必读 |
 | `docs/design/plan-2026-07-15-build-memory-oom.md` | **build OOM 修复方案**：ngram 检测 + pair npmi 重算 TEMP TABLE 化（v9.1 方法学的第二/第三次应用）；附文件级断点续跑完整设计留档（本轮不做，证据触发再启） |
+| `docs/design/plan-2026-09-10-build-interrupt-recovery.md` | **build 中断恢复与状态管理提案（待评估）**：中断行为核实结论固化（处理中批次重处理）、构建完成标记识别残缺状态、中断恢复测试、per-batch floor 累计化、WAL、rebuild 提前清空缺口 |
 | `docs/design/related-signals-v3.md` | `related --json` 当前契约（graph 返候选关键字） |
 | `docs/design/deprecated/related-signals-v2.md` | **已归档** · v2 契约（PPR + expansion + keyword_contributions） |
 | `docs/design/deprecated/trace-signals.md` | **已废弃** · 旧 graph_actions 契约（2026-07-12 撤除） |
