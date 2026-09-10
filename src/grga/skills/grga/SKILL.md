@@ -1,6 +1,6 @@
 ---
 name: grga
-description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and prescribes a tiered probe->search->expand/related->suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index has already been built by the user; if `related` / `graph inspect` returns empty, treat that as "no signal available" and continue with the remaining evidence. Entity / identity / relationship questions (who is X, are A and B the same entity, what else relates to X) route to a `related`-first workflow; literal location questions route to `probe → search → expand`. Prefer this skill for structure-aware Markdown search, chapter-level context extraction, and cross-document navigation on the local filesystem. It does not fetch URLs, does not modify source files, and only calls an LLM inside `suggest`.
+description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and a tiered probe → search → expand/related → suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index was built by the user; empty `related` / `graph inspect` means "no signal available", not a build trigger. Entity / identity / relationship questions (who is X, are A and B the same entity) route to a `related`-first workflow; literal location questions route to `probe → search → expand`. It does not fetch URLs, does not modify source files, and calls an LLM only inside `suggest`.
 ---
 
 # grga skill
@@ -86,35 +86,25 @@ grga reads a **shared per-user knowledge graph** at
 **offline by the user beforehand**. This skill never writes to it.
 
 The graph is organised around **logical scope names** (portable across
-machines; e.g. `physics-cn`, `/小说/科幻`). A scope binds to one or
-more local directories on this machine via `grga scope list`.
+machines; e.g. `physics-cn`, `/小说/科幻`), each bound to one or more
+local directories via `grga scope list --json`.
 
-**读侧 scope 语义**：
+**读侧 scope 语义**（细节见 `references/storage-model.md`）：
 
-- `related --mode graph` 用 `--scope <name>`（**多选**：`--scope a
-  --scope b` 是并集；不传 `--scope` 则跨全部 scope 联查）。每条返回的
-  候选带 `scopes[]` 字段，告诉 caller 它落在哪几个 scope，用来路由
-  ripgrep 到对应目录。
-- **`--tag <label>` 标签过滤**：scope 可携带多值标签（如 `科幻`、
-  `小说`），caller 用 `--tag <a> --tag <b> [--tag-logic and|or]`（默认
-  `or`）按标签选 scope 集合。`--scope` 和 `--tag` 同时给时**取交集**
-  （scope 必须既满足 name 列表又满足 tag 条件）；两者都为空 = cross-scope。
-  用来在混合语料库里按主题域缩范围而不必记住每个 scope 的确切名字。
-- `related --mode heading` 默认跨 scope（heading paths 是结构化过滤，
-  抗同名歧义）。加 `--same-scope`（要求恰好一个 `--scope`）以限制。
-- 一个 scope 可能是"knowledge-only"（已 import 但本机还没建证据）——
-  `related --mode graph` 依然工作，`--mode heading` 会返回空，
-  `graph inspect` 会给出 `evidence_hint`。
+- `related --mode graph` 用 `--scope <name>`：**重复即并集**，不传 =
+  cross-scope。候选带 `scopes[]` 字段，caller 据此把 ripgrep 路由到
+  scope 绑定目录。
+- `--tag <label>` 按标签选 scope 集合（重复多选，`--tag-logic and|or`
+  默认 `or`）；与 `--scope` 同给**取交集**；两者都空 = cross-scope。
+- `related --mode heading` 默认跨 scope（heading paths 抗同名歧义），
+  加 `--same-scope` 限制。knowledge-only scope 下 graph 可用、
+  heading 为空（`graph inspect` 给 `evidence_hint`）。
 
-**读 verbs 的 `--directory` 语义**：`probe` / `search` / `expand` 是
-纯 rga/文件系统扫描动词，它们的 `--directory` 是**物理目录**，跟
-scope 无关。`related` 只用 `--scope` / `--tag`（逻辑名 / 标签）；
-`suggest` 可选 `--scope` 用于记账。**热路径动词不接受 `--tag`**——想
-按标签缩范围时先跑 `grga related --tag ...` 或 `grga scope list --json`
-拿到候选 scope name，再喂给 `search --scope <name>`。
-
-Full scope semantics、`RelatedKeyword.scopes[]` 用法、knowledge-only
-分支、`--db` override 场景 → `references/storage-model.md`。
+**`--directory` 语义**：`probe` / `search` / `expand` 的 `--directory`
+是**物理目录**，与 scope 无关；`related` 只用 `--scope` / `--tag`。
+**热路径动词不接受 `--tag`** —— 想按标签缩范围，先 `grga related
+--tag ...` 或 `grga scope list --json` 拿 scope name，再喂给
+`search --scope <name>`。
 
 ## When to use this skill
 
@@ -144,11 +134,11 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
 
 | Verb | One-line purpose | Use when |
 |---|---|---|
-| `grga probe <q> -d <dir>` | `rga --count-matches` — returns `total_lines`, `file_count` without bodies. Makes no decision. | About to `search` an unfamiliar corpus / broad keyword / huge file — want a cheap size signal first. |
-| `grga search <q> -d <dir>` | Hits + position metadata (`occurrence_index`, `line_ratio`, `nearby_hits`) + `heading_path` for Markdown. Space-separated terms are **implicit AND** (`--implicit-or` restores OR). `--max-total N` (default 1000) sets `truncated`. | Concrete query string. First **evidence-fetching** verb — but for open-ended queries a T2-bookend `related` sweep precedes T1 (see workflow). |
-| `grga expand <path>:<line> --level <lines\|paragraph\|chapter\|document\|toc>` | Turn one hit into a `Context` block. Degrades `chapter → paragraph → lines(±3) → lines(±0)`; `toc → chapter` when no heading tree. `toc` returns the single-doc outline (one line per heading, hit chapter marked `>`); like `document` it returns the whole outline and only truncates around the hit chapter when past a safety cap. Always read the returned `level`. Never invokes an LLM. | Hit is interesting and surrounding text is needed; want a whole Markdown chapter; quoting a block into another prompt; need the file's outline / where the hit sits inside it (`toc`). |
-| `grga related <kw…> --mode <graph\|heading> [--scope <name> …] [--tag <label> …] [--tag-logic and\|or] --db <path>` | Neighbours of seed keywords：`graph` 返回**候选关键字 + `npmi` + `scopes[]`**（不返回文档，caller 按 `scopes[]` 定位 scope 绑定目录再 ripgrep），`heading` 返回共享 Markdown heading path 的**文档**（`scope` 字段区分同名文件）。`--scope` 可**重复**做多选；`--tag` 可**重复**按标签选 scope；两者同时给取交集。不传 `--scope` / `--tag` 跨全部 scope 联查。**Precondition**: the offline index must already have been built by the user; if not, `related` returns `{"results": []}` — treat empty as "no signal, move on". **Returns candidate keywords (clues), not answers** — combine with `search` to build the answer (recipe: "Consuming related output"). | Caller has keywords and needs to broaden — not deepen; **entry verb for entity / identity / relationship questions**. |
-| `grga suggest <q> --intent <expand\|rerank\|reformulate> --hits <hits.json>` | **Only** verb that calls an LLM. Returns reformulated queries / expanded keywords / rerankings. | Search returns too few / low-quality results, or query is intrinsically vague. **Never** the first verb (see "Stuck signals" for triggers and relaxed guardrails). |
+| `grga probe <q> -d <dir>` | `rga --count-matches` — `total_lines` / `file_count`, no bodies. Makes no decision. | About to `search` an unfamiliar corpus / broad keyword / huge file — cheap size signal first. |
+| `grga search <q> -d <dir>` | Hits + position metadata (`occurrence_index`, `line_ratio`, `nearby_hits`) + `heading_path` for Markdown. Space-separated terms are **implicit AND**; `--implicit-or` restores OR. `--max-total N` (default 1000) caps hits; overflow sets `truncated`. | Concrete query string. First **evidence-fetching** verb — for open-ended queries a T2-bookend `related` precedes it (see workflow). |
+| `grga expand <path>:<line> --level <lines\|paragraph\|chapter\|document\|toc>` | Turn one hit into a `Context` block; degrades `chapter → paragraph → lines → lines(±0)`; `toc` = the file's outline. Always read the returned `level`. Never invokes an LLM. | Surrounding text is needed; want a whole Markdown chapter; need the file's outline / where the hit sits (`toc`). |
+| `grga related <kw…> --mode <graph\|heading> [--scope <name> …] [--tag <label> …]` | `graph` → **candidate keywords + `npmi` + `scopes[]`** (not documents; caller routes `scopes[]` to scope-bound dirs, then ripgrep); `heading` → documents sharing a heading path. **Returns clues, not answers** — combine with `search` (recipe: "Consuming related output"). Empty `{"results": []}` = "no signal, move on" (needs a pre-built offline index). | Broaden, not deepen; **entry verb for entity / identity / relationship questions**. |
+| `grga suggest <q> --intent <expand\|rerank\|reformulate> --hits <hits.json>` | **Only** verb that calls an LLM. Returns reformulated queries / expanded keywords / rerankings. | Too few / low-quality results, or query intrinsically vague. **Never** the first verb (see "Stuck signals"). |
 
 ### Supporting commands (read-side only)
 
@@ -297,12 +287,9 @@ rationale in `references/reflection-loop.md` § stuck signals.
 
 Empty `related` from a missing / partial offline index is **not** a
 trigger to build one inside the skill — treat it as "no graph signal
-for this seed". Before spending on T3, try one **T0 `probe` sweep** of
-2-4 hand-picked domain-adjacent keywords (synonyms, sibling concepts,
-super/sub-terms): it is the cheapest way to check whether the vocabulary
-gap is one hop away, and non-zero counts feed straight back into T1.
-Only fall through to T3 or to the existing T1 evidence if the probe
-sweep also comes up empty.
+for this seed"; fall through order and the T0 `probe`-sweep recipe live
+in `references/reflection-loop.md` § "A missing offline index is not a
+build trigger".
 
 ## Caller anti-patterns
 
@@ -310,12 +297,10 @@ Mental-model traps that defeat the loop even when every verb behaves
 correctly. Full case-by-case walk-through, symptoms, and legitimate
 exceptions in `references/anti-patterns.md`.
 
-**Meta-rule for the tool-substitution family** (2-4 below): when
-tempted to drop into a lower-level tool, name the specific grga verb
-being bypassed and why it is genuinely insufficient. If no verb can be
-named, the urge is muscle-memory, not necessity. Dropping out silently
-gives up the skill's stability guarantees, position metadata, and
-partition semantics.
+**Meta-rule** (for 2-4 below): before dropping into a lower-level tool,
+name the specific grga verb being bypassed and why it is genuinely
+insufficient — if none can be named, the urge is muscle memory, not
+necessity.
 
 1. **Do not pre-disambiguate identity questions** — when the question
    is *"are A and B the same entity?"*, run **two independent evidence
