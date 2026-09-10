@@ -86,44 +86,20 @@ grga reads a **shared per-user knowledge graph** at
 **offline by the user beforehand**. This skill never writes to it.
 
 The graph is organised around **logical scope names** (portable across
-machines; e.g. `physics-cn`, `/小说/科幻`), each bound to one or more
-local directories via `grga scope list --json`.
+machines; e.g. `physics-cn`, `/小说/科幻`). `probe` / `search` /
+`expand` use `--directory` (physical dir, unrelated to scope);
+`related` uses `--scope` / `--tag`, not `-d`.
 
-**读侧 scope 语义**（细节见 `references/storage-model.md`）：
-
-- `related --mode graph` 用 `--scope <name>`：**重复即并集**，不传 =
-  cross-scope。候选带 `scopes[]` 字段，caller 据此把 ripgrep 路由到
-  scope 绑定目录。
-- `--tag <label>` 按标签选 scope 集合（重复多选，`--tag-logic and|or`
-  默认 `or`）；与 `--scope` 同给**取交集**；两者都空 = cross-scope。
-- `related --mode heading` 默认跨 scope（heading paths 抗同名歧义），
-  加 `--same-scope` 限制。knowledge-only scope 下 graph 可用、
-  heading 为空（`graph inspect` 给 `evidence_hint`）。
-
-**`--directory` 语义**：`probe` / `search` / `expand` 的 `--directory`
-是**物理目录**，与 scope 无关；`related` 只用 `--scope` / `--tag`。
-**热路径动词不接受 `--tag`** —— 想按标签缩范围，先 `grga related
---tag ...` 或 `grga scope list --json` 拿 scope name，再喂给
-`search --scope <name>`。
+Full scope/tag semantics, `--tag-logic`, knowledge-only scopes, and
+DB-path override in `references/storage-model.md`.
 
 ## When to use this skill
 
-Use grga when the task involves any of the following on a local directory:
-
-- Full-text or boolean search across mixed content (Markdown, source
-  code, PDF/Office via `rga` preprocessors) with **position metadata**
-  (`occurrence_index`, `line_ratio`, `nearby_hits`, `heading_path`).
-- Turning a single hit into a **wider textual context** (nearby lines,
-  paragraph, Markdown chapter, whole file).
-- Answering "**what else is related to this?**" via co-occurrence graph
-  （返回候选关键字 + `npmi`，caller 用 ripgrep 找片段）, or shared
-  Markdown heading paths（返回文档）.
-- Asking an LLM to expand keywords, rerank hits, or reformulate a vague
-  query — only after cheaper layers have been tried.
-
 Do **not** use for: web/HTTP fetches, editing files, autonomous "agent"
-loops (grga verbs are stateless — the caller owns the loop), or the
-separate `grga deep-search` LLM-planned QA command.
+loops (grga verbs are stateless — the caller owns the loop), the
+separate `grga deep-search` LLM-planned QA command, or as a replacement
+for raw `rg` / `rga` (grga adds structure and graph on top; for raw
+byte-level search prefer `rg` directly).
 
 ## The five verbs (contract summary)
 
@@ -142,16 +118,12 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
 
 ### Supporting commands (read-side only)
 
-- `grga graph inspect <keyword> --db <path> [--scope <name> …] [--tag <label> …] [--tag-logic and|or] [--docs-limit N]` —
-  diagnostic on a keyword's scope distribution, `top_docs` (the documents
-  holding it, a locate-me shortcut), top co-occurring keywords, and
-  polysemy signal. `--scope` / `--tag` narrow every field the same way as
-  `related`; an explicit filter matching zero scopes returns
-  `scope_filter_hint` (distinct from `index_hint`). **Not a substitute
-  for `related`** (see `references/reflection-loop.md` § T2 is `related`,
-  not `graph inspect`). Empty output (`total_docs == 0`, no
-  `scope_filter_hint`) means the keyword is not in the offline index —
-  treat as "no signal" and skip.
+- `grga graph inspect <keyword>` — read-only diagnostic on a keyword's
+  scope distribution, `top_docs` (locate-me shortcut), and polysemy
+  signal. **Not a substitute for `related`** (T2 is `related`, not
+  `graph inspect` — see `references/reflection-loop.md`). Empty output
+  means the keyword is not in the offline index — treat as "no signal".
+  Full CLI, filters, and field semantics in `references/verbs.md`.
 
 > Offline index construction (`grga index build` / `index rebuild` /
 > `index promote`) is **out of scope for this skill**. The user is
@@ -327,41 +299,6 @@ Four worked examples ship with this skill:
   same concept" (search → collect keywords → related graph).
 - `examples/search-suggest.md` — cold-start / vague-query loop
   with in-session LLM reflection.
-
-Composition notes:
-
-- **Probe first when in doubt**. Re-probing 2-3 times costs almost
-  nothing.
-- **Skip expand for tiny hits** — quote `matches[i].text` if the hit
-  line already answers.
-- **Chain expand + related** — after `expand --level chapter`, feed
-  chapter headings into `related --mode heading`.
-- **Rerank before expand** on a broad `search` (50+ hits): `suggest
-  --intent rerank` first, then `expand` top 3-5.
-- **Re-probe LLM output** from `suggest --intent reformulate` before
-  searching it.
-
-## Practical CLI invariants
-
-- Every verb accepts `--json` and prints a single JSON document to
-  stdout on success. On failure, exit non-zero and either return
-  `"ok": false` in the JSON (probe / search / suggest) or a plain error
-  string on stderr (expand / related). `probe` failures stay
-  schema-homogeneous.
-- Paths returned by `search` are **relative to the search directory**
-  unless absolute inputs were passed. `expand` accepts either form.
-- Shared SQLite DB defaults to `~/.config/grga/deep_keywords.db`
-  (honours `$XDG_CONFIG_HOME`); `--db <path>` overrides.
-- Markdown structure sidecar caches under `.grga/structure/` in the
-  search directory root (or `$GRGA_SIDECAR_ROOT`). Rebuilt on `mtime`
-  change.
-
-## What this skill is not
-
-- Not a QA agent — provides evidence; the caller composes the answer.
-- Not a web / file-editing tool — grga never edits files.
-- Not a replacement for `rg` / `rga` — for raw byte-level search prefer
-  `rg` directly; grga adds structure and graph on top.
 
 ## References
 
