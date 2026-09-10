@@ -733,6 +733,39 @@ JSONC 注释由自写剥离器处理）。`--no-office-adapters` 按次排除（
 `build_rga_command_preview` / `_count_total_matches` 新增 `office_adapters=True`
 参数。副作用：grga 会 touch 用户 rga 全局 config（只追加，不破坏）。
 
+### 2026-09-10：DEFAULT_EXCLUDE_GLOBS 统一 build/search 双阶段
+
+**问题**：`DEFAULT_EXCLUDE_GLOBS`（rga 风格 glob）只对 search/probe 生效；
+`grga index build` 用独立的 Python fnmatch matcher（`iter_text_files`
+exclude_globs），默认只靠 `ignore_dirs`（.git/.grga/.venv/node_modules/
+__pycache__/dist/build/target）过滤临时目录，**压缩包/无文本二进制仍会进索引**。
+
+**决策**：把 `DEFAULT_EXCLUDE_GLOBS` 扩为单一排除来源，search 与 build 共用：
+- search.py 新增目录排除（`!**/node_modules/**`、`!**/__pycache__/**`、
+  `!**/.venv/**`、`!**/venv/**`、`!**/.mypy_cache/**`、`!**/.pytest_cache/**`、
+  `!**/.ruff_cache/**`、`!**/dist/**`、`!**/build/**`、`!**/target/**`、
+  `!**/.grga/**`、`!**/.stversions/**`）——只列**非隐藏**临时目录；隐藏
+  点目录（.git 等）rga 默认已跳过、build Python walk 也跳过，不加死重量
+- 新增 `search._to_build_globs()`：把 rga 风格 glob 翻译成 build fnmatch
+  方言（剥 `!` 前缀；`**/x/**` 展开成 `x/**` + `**/x/**` 双模式，覆盖根级 +
+  嵌套级——fnmatch 的 `**` 与 `*` 等价且首段 `**/` 需要非空前缀）
+- `index build` / `index rebuild` 加 `--no-default-exclude` 开关，默认把
+  `_to_build_globs()` 合并进 exclude_globs（用户 `--exclude-glob` 追加其后，
+  exclude-wins 语义仍生效）；build 自身 `ignore_dirs` 安全网保留
+
+**Rationale**：
+- **单一来源防漂移**：同一排除列表，search 与 build 不再各自维护
+- **build 不该吃压缩包**：`indexable_suffixes` 含 `.zip/.jar/.tar`，build
+  之前会索引压缩包内部共现——统一排除后知识图不再被垃圾污染
+- **globs 与 .gitignore 叠加**（09-09 实验确认）：用户 .gitignore 照样生效，
+  DEFAULT_EXCLUDE_GLOBS 只是额外排除，不覆盖不冲突
+- **`--no-default-exclude` 保留退出通道**：想搜/想索引压缩包时显式打开
+
+**Impact**：additive。search.py 的 `DEFAULT_EXCLUDE_GLOBS` 从 45 项扩到
+57 项；新增 `_to_build_globs()`；`_run_index_build` + `index build/rebuild`
+命令加 `default_exclude=True` / `--no-default-exclude`。build 默认行为变更：
+压缩包 + 临时目录不再进索引（可用 `--no-default-exclude` 恢复）。
+
 ### 2026-09-09：pandoc_office 接入 graph 索引（补充决策）
 
 **问题**：上述 adapter 只影响 `grga search`/`probe`（rga CLI 直读 config）。

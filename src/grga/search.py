@@ -84,7 +84,58 @@ DEFAULT_EXCLUDE_GLOBS = (
     "!*.wav",
     "!*.ogg",
     "!*.webm",
+    # Transient / dependency directories — high noise, no corpus value.
+    # Hidden dot-dirs (.git/.stversions/.env) are NOT listed here: rga skips
+    # hidden files by default, and ``grga index build`` skips them in its
+    # Python walk, so adding them would be dead weight. These are the
+    # non-hidden transient dirs that both rga search and the build walk WOULD
+    # descend into unless explicitly excluded. ``**/x/**`` (rg/fnmatch loose
+    # semantics, ``*`` crosses ``/``) covers nested + root; build-side
+    # conversion expands root+ nested for fnmatch's stricter ``**``.
+    "!**/node_modules/**",
+    "!**/__pycache__/**",
+    "!**/.venv/**",
+    "!**/venv/**",
+    "!**/.mypy_cache/**",
+    "!**/.pytest_cache/**",
+    "!**/.ruff_cache/**",
+    "!**/dist/**",
+    "!**/build/**",
+    "!**/target/**",
+    "!**/.grga/**",
+    "!**/.stversions/**",
 )
+
+
+def _to_build_globs():
+    """Translate rga-style ``DEFAULT_EXCLUDE_GLOBS`` into build-walk globs.
+
+    ``grga index build`` enumerates files with a Python fnmatch matcher
+    (``_compile_glob_matcher``), which has two differences from ripgrep's
+    glob semantics:
+
+    - ripgrep's leading ``!`` negation is not understood by fnmatch; the
+      ``!`` is stripped so ``!*.zip`` becomes ``*.zip`` (a positive
+      "exclude" pattern for the build walk's ``exclude_globs``).
+    - ripgrep's ``**/x/**`` matches ``x`` at the root (zero path prefix);
+      Python fnmatch's ``**`` is equivalent to ``*`` and a leading
+      ``**/`` requires a non-empty prefix, so root-level ``node_modules/``
+      would be missed. Each directory pattern is therefore expanded into a
+      root form (``x/**``) plus a nested form (``**/x/**``).
+
+    Keeps build and search on the *same* exclusion list (single source of
+    truth) while bridging the two glob dialects.
+    """
+    out = []
+    for pattern in DEFAULT_EXCLUDE_GLOBS:
+        body = pattern[1:] if pattern.startswith("!") else pattern
+        if body.startswith("**/"):
+            tail = body[3:]
+            out.append(body)
+            out.append(tail)
+        else:
+            out.append(body)
+    return tuple(out)
 
 
 def _effective_glob_patterns(glob_patterns, default_exclude=True):

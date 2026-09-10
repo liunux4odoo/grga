@@ -242,6 +242,13 @@ grga search keyword --no-default-exclude
 grga probe keyword -d /path/to/dir --no-default-exclude
 ```
 
+> **默认排除对 `grga index build` 同样生效**：`index build` / `index rebuild`
+> 默认套用与 search 相同的排除列表（压缩包、无文本二进制、`node_modules/`
+> `__pycache__/` 等临时目录），通过 `--no-default-exclude` 关闭。build 自带的
+> `ignore_dirs`（`.git`/`.grga`/`.venv`/`node_modules`/`__pycache__`）安全网
+> 始终保留，不受该开关影响。用户 `--exclude-glob` 在默认排除之后追加，
+> exclude-wins 语义仍生效；`--include-glob` 不受影响。
+
 ### 关闭 Office 文档 adapter
 
 grga 默认通过 `pandoc_office` 自定义 adapter 搜索 Office 文档

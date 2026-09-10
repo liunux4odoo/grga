@@ -21,7 +21,7 @@ from grga.exit_codes import (
 )
 from grga.probe import probe_directory
 from grga.runtime_env import is_interactive, is_offline
-from grga.search import build_rga_command_preview, check_environment, configure_logging, search_directory
+from grga.search import _to_build_globs, build_rga_command_preview, check_environment, configure_logging, search_directory
 from grga.toolchain import (
     MANUAL_INSTALL_URLS,
     MissingToolsError,
@@ -1201,6 +1201,7 @@ def index_build_command(
     replace: bool = typer.Option(False, "--replace", help="[deprecated] Wipe the scope's asset + index + derived layers and rebuild from scratch. Use `grga index forget --all` followed by `grga index build`, or `grga index rebuild --refresh-ngram=replace` instead."),
     include_glob: List[str] = typer.Option([], "--include-glob", help="Only index files whose path relative to --directory matches any of these loose, case-insensitive fnmatch patterns (`*` crosses `/`). Repeatable. Empty = accept all. Files excluded here are NOT removed from the index (weak semantics): they simply do not participate in this build."),
     exclude_glob: List[str] = typer.Option([], "--exclude-glob", help="Skip files whose path relative to --directory matches any of these loose, case-insensitive fnmatch patterns (`*` crosses `/`). Repeatable. Exclude wins over include. Files excluded here are NOT removed from the index (weak semantics): they simply do not participate in this build."),
+    no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default exclusion globs (archives, executables, node_modules/__pycache__/... that search also skips). The build's own transient-dir safety net (ignore_dirs: .git/.grga/.venv/node_modules/__pycache__) still applies."),
     batch_chunks: int = typer.Option(50000, "--batch-chunks", help="Enable batched build with target N chunks per batch. Default 50000 (batched is the default pipeline). 0 = disabled = legacy single-pass (bit-exact, no per-batch phrase drift / top-N kw cap, but higher peak memory). >0 processes files in RAM-bounded batches with per-batch phrase detection + top-N per-chunk kw cap (see --top-n-kw). refresh_ngram=append (default) unions new phrases; =never reuses the dict as-is. See experiments/batched_build_2026_07_16/FINDINGS.md."),
     top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="Only used with --batch-chunks>0. Per-chunk keyword cap for pair enumeration (higher=more pairs, more RAM). Default via env GRGA_BATCH_TOP_N (default 64)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
@@ -1283,6 +1284,7 @@ def index_build_command(
             tags=tags,
             include_globs=include_glob,
             exclude_globs=exclude_glob,
+            default_exclude=not no_default_exclude,
             batch_chunks=batch_chunks,
             top_n_kw=top_n_kw,
             text_progress=text_progress,
@@ -1315,6 +1317,7 @@ def index_rebuild_command(
     tags: List[str] = typer.Option([], "--tag", help="Attach a multi-value scope tag (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Accumulate-only (existing tags survive a rebuild); remove with `grga scope tag rm`."),
     include_glob: List[str] = typer.Option([], "--include-glob", help="Only index files whose path relative to --directory matches any of these loose, case-insensitive fnmatch patterns (`*` crosses `/`). Repeatable. Empty = accept all. Files excluded here are NOT removed from the index (weak semantics): they simply do not participate in this build."),
     exclude_glob: List[str] = typer.Option([], "--exclude-glob", help="Skip files whose path relative to --directory matches any of these loose, case-insensitive fnmatch patterns (`*` crosses `/`). Repeatable. Exclude wins over include. Files excluded here are NOT removed from the index (weak semantics): they simply do not participate in this build."),
+    no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default exclusion globs (archives, executables, node_modules/__pycache__/... that search also skips). The build's own transient-dir safety net (ignore_dirs: .git/.grga/.venv/node_modules/__pycache__) still applies."),
     batch_chunks: int = typer.Option(50000, "--batch-chunks", help="Enable batched build with target N chunks per batch. Default 50000 (batched is the default pipeline). 0 = disabled = legacy single-pass (bit-exact, no per-batch phrase drift / top-N kw cap, but higher peak memory). >0 activates a fundamentally different pipeline: per-batch phrase detection + top-N per-chunk kw cap (see --top-n-kw). Faster + lower peak on large corpora BUT produces a different phrase/pair set (per-batch phrase drift ~27%; top-N discards low-rank kws). Use for corpora too large for single-pass. See experiments/batched_build_2026_07_16/FINDINGS.md."),
     top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="Only used with --batch-chunks>0. Per-chunk keyword cap for pair enumeration (higher=more pairs, more RAM). Default via env GRGA_BATCH_TOP_N (default 64)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
@@ -1369,6 +1372,7 @@ def index_rebuild_command(
             tags=tags,
             include_globs=include_glob,
             exclude_globs=exclude_glob,
+            default_exclude=not no_default_exclude,
             batch_chunks=batch_chunks,
             top_n_kw=top_n_kw,
             text_progress=text_progress,
@@ -1402,6 +1406,7 @@ def _run_index_build(
     tags: Optional[List[str]] = None,
     include_globs: Optional[List[str]] = None,
     exclude_globs: Optional[List[str]] = None,
+    default_exclude: bool = True,
     batch_chunks: int = 50000,
     top_n_kw: Optional[int] = None,
     text_progress,
@@ -1414,8 +1419,23 @@ def _run_index_build(
     ``directory`` is the physical path to index; ``build_graph_index``
     records the binding in ``scope_directories``. ``tags`` (v11) are
     accumulate-only labels UPSERTed into ``scope_tags``.
+
+    ``default_exclude`` (``--no-default-exclude``) applies the same
+    ``DEFAULT_EXCLUDE_GLOBS`` the search path uses, translated to the
+    build walk's fnmatch dialect via :func:`grga.search._to_build_globs`,
+    so build and search share one exclusion source. User ``--exclude-glob``
+    patterns are appended after the defaults; the fnmatch matcher is
+    "exclude wins", so explicit user excludes always take effect.
     """
     from grga.graph.build import build_graph_index
+
+    if default_exclude:
+        effective_excludes = list(_to_build_globs())
+    else:
+        effective_excludes = []
+    for glob in exclude_globs or ():
+        if glob not in effective_excludes:
+            effective_excludes.append(glob)
 
     return build_graph_index(
         scope,
@@ -1432,7 +1452,7 @@ def _run_index_build(
         seed_ngram_from=seed_ngram_from,
         tags=tuple(tags or ()),
         include_globs=tuple(include_globs or ()),
-        exclude_globs=tuple(exclude_globs or ()),
+        exclude_globs=tuple(effective_excludes),
         mode=mode,
         refresh_ngram=refresh_ngram,
         batch_chunks=batch_chunks,
