@@ -16,14 +16,16 @@ to `search`. Read:
 - `total_lines`, `file_count`
 - `per_file[0].matches` (if `--per-file`) — spot single-file domination
 - `sample.est_total_bytes` (if `--sample N`) — rough context-budget check
+- `neighbors`（可选）— 首关键字的 top-5 图邻域（`{kw, npmi}`，npmi 降序），作为**换词候选**提示。有索引的目录上 probe 时会附带；键缺席 = 无可用图，`[]` = 图里有这个词但无邻居。**这不是 related 的替代品**——要完整邻域/多 seed/看形态走 **T2 `related`**。
 
 Decide:
 
 | Observation | Action |
 |---|---|
-| `total_lines == 0` | Loosen: `and → or`, drop a term, drop an `--iglob`, or jump to **T3** `intent=reformulate` |
+| `total_lines == 0` | Loosen: `and → or`, drop a term, drop an `--iglob`, or jump to **T3** `intent=reformulate`；如果 `neighbors` 非空，先用里面的候选词换词回 probe |
 | `total_lines` huge or `est_total_bytes` blows the budget | Tighten: `or → and`, add a term, add `--iglob`, or plan to use `--max-total` / `--max-count` at T1 |
 | One file holds >80% of `total_lines` | Add an `--iglob` excluding it, or plan a per-file cap |
+| `neighbors` non-empty and on-topic | 快速换词验证：挑 1-2 个最相关的 neighbor 回 probe，不必等 T2 bookend |
 | `total_lines` in a sane band (task-specific, e.g. 5-500) | Proceed to **T1** with the same params |
 
 Guardrail: cap re-probes at ~2-3 rounds. If the query will not fall into

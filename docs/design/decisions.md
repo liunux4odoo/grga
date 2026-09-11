@@ -4,6 +4,44 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-09-11 · probe 附带 neighbors 最小字段面
+
+**Plan doc**：`docs/design/plan-2026-09-11-probe-neighbors.md`
+
+**背景**：`grga probe` 是纯 L1 动词（只数命中、不碰图），caller 在 probe
+阶段如果遇到词汇错位（0-hit 或假通），要等到 T2 `related` 才发现换词方向，
+浪费一轮。希望把 T2 的一小块能力下沉到 T1，让 probe 顺手附"换词候选"。
+
+**Decision**：probe JSON 新增可选顶层字段 `neighbors`（仅内容探测、目
+录命中已绑定 scope 时出现），每项**仅含 `kw + npmi` 两个字段**，默认
+top-5、按 npmi 降序、只对第一个 seed。
+
+已拍板的决策点：
+
+| # | 决策点 | 结论 |
+|---|---|---|
+| D1 | 字段面 | 每项仅 `kw` + `npmi`，2 字段；禁止 `cooccur_count` / `chunk_df` / `via_seed` / `source` / `scopes` 等 related 字段 |
+| D2 | 数量 | 默认 top-5，**不加** `--neighbors N` flag；要更多走 related |
+| D3 | 多 seed | 只对第一个 seed 输出；其余 seed 的邻域走 related（T2） |
+| D4 | 键缺席语义 | `neighbors` 键**缺席** = 无可用图索引；`neighbors: []` = 有索引但 seed 无候选。两个动作不同，值得区分 |
+| D5 | 失败模式 | 图查询任何失败（DB 打不开 / 表不存在 / 超时 / 异常）→ **静默省略** neighbors 键，probe 照常返回、退出码 0 |
+| D6 | 数据源 | 复用现有 `keyword_pairs` 图查询层（`related_keywords` 同源），不新写第二套邻域扫描逻辑 |
+| D7 | `--db-path` 参数 | **不加**。probe 保持无 DB 参数的轻量定位，非默认库走 related |
+| D8 | `--path-only` | 不附带 neighbors。路径发现与词级邻域正交 |
+
+**Rationale**：
+
+- **输出最少（防替代品化）**：probe 定位是"换词候选"提示，不是 related
+  的替代品。related 仍是全量图校准（top-N 更多、字段更全、看形态）。
+  字段面一扩就滑向 related 廉价克隆，杠杆反了。
+- **复用 related 查询层**：同一份 `keyword_pairs` 数据、同一个排序键，
+  保证 probe neighbors 与 `related --limit 5` 逐项一致（可复验）。
+- **键缺席 vs 空数组**：缺席 = 没有图可用（caller 不必再试图）；空数组 =
+  图里有词但无邻居（caller 升级到 T3 换措辞）。两个动作不同。
+- **不加 `--db-path`**：probe 是无参轻量动词（摸边界），保持"0 配置就
+  能跑"的定位；非默认库场景极少，交给 related。
+- **仅首 seed**：probe 是聚焦探针，多 seed 邻域展开 = related 的活。
+
 ## 2026-09-11 · 数字+汉字混合短语支持（变体甲：数字仅在 CJK 邻接时成 token）
 
 **Plan doc**：`docs/design/plan-2026-09-11-digit-cjk-ngram.md`

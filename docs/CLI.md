@@ -349,6 +349,7 @@ JSON 返回结构（成功）：
 - `total_lines`：命中行数总和；`file_count`：至少命中一行的文件数。
 - `patterns` / `terms` / `pcre2` / `implicit_operator` / `implicit_notice`：与 `search` 输出一致，帮助调用方了解查询被如何解释。
 - `sample.est_total_bytes`：`total_lines * avg_line_bytes` 的**粗估**，只给数量级参考，不宜做严格算术。
+- `neighbors`（可选，仅内容探测且目录命中已绑定 scope 时出现）：首关键字在 `keyword_pairs` 图里的 top-5 近邻，按 `npmi` 降序。每项仅含 `kw`（词）+ `npmi`（float，round 6）两个字段，作为"换词候选"提示。**键缺席 ≠ 空数组**：缺席 = 该目录没有可用图索引（无命中 scope / DB 不可用 / 查询异常）；`[]` = 有索引但该 seed 在图里无候选（未知词 / 孤立节点）。多关键字时只对第一个 seed 输出，其余 seed 的邻域走 `related`（T2）。
 
 失败时 JSON 结构与成功时**同构**（同样包含 `patterns` / `terms` / `pcre2` / `implicit_operator` / `implicit_notice` / `directory` / `total_lines` / `file_count` / `elapsed_ms` 等字段，值为默认零/空），额外携带 `ok: false` 与 `error` 字段，方便调用方用统一的 schema 解析：
 

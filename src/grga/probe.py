@@ -6,6 +6,7 @@ import subprocess
 import time
 
 from pathlib import Path
+from typing import Optional, List, Dict, Any
 
 from grga.search import (
     _compile_search_query,
@@ -22,6 +23,8 @@ from grga.search import (
     _kill_process_group,
     _run_checked,
 )
+
+_PROBE_NEIGHBORS_LIMIT = 5
 
 _logger = logging.getLogger("grga.probe")
 
@@ -125,6 +128,124 @@ def _remaining(deadline):
     return remaining if remaining > 0 else 0
 
 
+def _try_resolve_scope_for_directory(directory: str, db_path) -> Optional[int]:
+    """Return the scope_id that covers *directory*, or ``None`` on any failure.
+
+    Silently swallows every error (missing DB, no schema, malformed rows).
+    The probe hot path must never break because the graph is unavailable.
+    """
+    try:
+        from grga.graph.schema import connect, ensure_schema
+        from grga.graph.ids import IdInterner
+        conn = connect(db_path)
+        try:
+            ensure_schema(conn)
+            interner = IdInterner(conn)
+            return interner.resolve_scope_for_directory(directory)
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _lookup_neighbors(seed: str, scope_id: int, db_path) -> Optional[List[Dict[str, Any]]]:
+    """Return top-N ``{kw, npmi}`` neighbours for *seed* in *scope_id*.
+
+    Returns ``None`` on any failure (silent degradation).  Returns ``[]``
+    when the seed is known but has no qualifying neighbours — the caller
+    can distinguish "no graph available" (``None``) from "no neighbours"
+    (empty list).
+    """
+    try:
+        from grga.graph.schema import connect, ensure_schema
+        from grga.graph.ids import IdInterner
+        from grga.related import _related_keywords_impl
+
+        conn = connect(db_path)
+        try:
+            ensure_schema(conn)
+            interner = IdInterner(conn)
+            scope_name = interner.scope_name(scope_id)
+            # related_keywords normalises + folds seeds, but we hand in a
+            # single pre-folded seed and use the impl directly with a
+            # single scope to keep it cheap.  We still go through the
+            # public code path for correctness — just short-circuit the
+            # scope-name resolution.
+            from grga.related import _resolve_seed_args
+            seed_folded = _resolve_seed_args(conn, [seed])
+            if not seed_folded:
+                # Seed not in vocabulary → empty list (key present, empty).
+                return []
+            from grga.related import _default_min_npmi
+            result = _related_keywords_impl(
+                conn,
+                seed_folded,
+                limit_per_seed=_PROBE_NEIGHBORS_LIMIT,
+                min_npmi=_default_min_npmi(),
+                scope_names=[scope_name],
+                tag_names=None,
+                tag_logic="or",
+            )
+            return [
+                {"kw": r.kw, "npmi": round(float(r.npmi), 6)}
+                for r in result.results
+            ]
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _first_seed_from_query(query: dict) -> Optional[str]:
+    """Extract the first user-supplied keyword from a compiled query.
+
+    The query's ``terms`` are AST nodes (``{"kind": "term", "value": ...,
+    "pattern": ...}``); we want the raw ``value`` as the graph seed, not
+    the compiled regex pattern.  Returns ``None`` when there are no terms
+    (which should never happen for a probe that reaches this point, but
+    guarded anyway).
+    """
+    terms = query.get("terms") or []
+    if not terms:
+        return None
+    first = terms[0]
+    if isinstance(first, dict):
+        return first.get("value")
+    # Defensive: if terms is ever a list of strings, just use it.
+    return str(first) if first else None
+
+
+def _attach_neighbors(base: dict, target: Path, query: dict, debug: bool) -> dict:
+    """Attach the ``neighbors`` field to *base* in-place, best-effort.
+
+    * Only for content probes (caller decides — this helper does not check
+      ``path_only``).
+    * Uses the **first** seed only (probe is a focused probe; multi-seed
+      neighbours belong to ``related``).
+    * Any error → neighbours key is simply not added.  Never raises.
+      The entire function is wrapped in try/except as a defence-in-depth
+      guard so the probe hot path can never be broken by graph issues.
+    """
+    try:
+        from grga.deep_search import DEFAULT_DB_PATH
+        first_seed = _first_seed_from_query(query)
+        if not first_seed:
+            return base
+        directory_str = str(target)
+
+        scope_id = _try_resolve_scope_for_directory(directory_str, DEFAULT_DB_PATH)
+        if scope_id is None:
+            return base
+
+        neighbors = _lookup_neighbors(first_seed, scope_id, DEFAULT_DB_PATH)
+        if neighbors is None:
+            return base
+        base["neighbors"] = neighbors
+        return base
+    except Exception:
+        return base
+
+
 def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns, deadline, sample, per_file, debug, started, office_adapters=True):
     rga_path = _find_rga_command()
     if rga_path is None:
@@ -167,6 +288,7 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
         base["warning"] = per_file_counts.get("warning")
         base["skipped_files"] = per_file_counts.get("skipped_files", [])
         base["elapsed_ms"] = _elapsed_ms(started)
+        _attach_neighbors(base, target, query, debug)
         return json.dumps(base, ensure_ascii=False)
 
     files = per_file_counts["files"]
@@ -208,6 +330,7 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
                 base["sample"] = sample_info
 
     base["elapsed_ms"] = _elapsed_ms(started)
+    _attach_neighbors(base, target, query, debug)
     return json.dumps(base, ensure_ascii=False)
 
 

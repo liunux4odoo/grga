@@ -256,6 +256,55 @@ class IdInterner:
             for row in rows
         ]
 
+    def resolve_scope_for_directory(
+        self, directory: str,
+    ) -> Optional[int]:
+        """Return the scope_id whose bound directory is the best prefix match.
+
+        Prefix match means ``directory`` equals the bound directory or is a
+        subdirectory of it.  When multiple scopes match (e.g. a parent and a
+        deeper child both bound), the **most specific** (longest) bound
+        directory wins; ties are broken by most-recent ``indexed_at`` then by
+        scope id.  Returns ``None`` when no scope has a binding that covers
+        ``directory``.
+
+        This is the complement of :meth:`list_directories` (which goes
+        scope → directories).  Used by ``grga probe`` to figure out which
+        scope's graph to attach neighbours from.
+        """
+        # SQLite has no native path-prefix operator, so we test every
+        # binding.  The scope_directories table is tiny (one row per
+        # bound directory — typically single-digit per machine), so a
+        # full scan + Python filter is perfectly fine.
+        rows = self._conn.execute(
+            """
+            SELECT scope_id, directory, indexed_at
+            FROM scope_directories
+            """
+        ).fetchall()
+        candidates: List[Tuple[int, str, Optional[str]]] = []
+        target = str(directory)
+        for row in rows:
+            bound = str(row["directory"])
+            if not bound:
+                continue
+            if target == bound or target.startswith(bound.rstrip("/") + "/"):
+                candidates.append(
+                    (int(row["scope_id"]), bound, row["indexed_at"])
+                )
+        if not candidates:
+            return None
+        # Sort: longest bound directory first (most specific), then
+        # newest indexed_at (NULLs last), then lowest scope_id for
+        # determinism.  Two-step stable sort because the first two keys
+        # are descending and the third is ascending.
+        candidates.sort(key=lambda t: t[0])  # tertiary: scope_id asc
+        candidates.sort(
+            key=lambda t: (len(t[1]), t[2] or ""),
+            reverse=True,
+        )
+        return candidates[0][0]
+
     def unbind_directory(
         self, scope_id: int, directory: Optional[str] = None
     ) -> int:

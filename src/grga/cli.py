@@ -592,6 +592,11 @@ def probe_command(
     for item in per_file_list:
         typer.echo(f"  {item['matches']:>6}  {item['path']}")
 
+    neighbors = result.get("neighbors")
+    if neighbors:
+        parts = [f"{n['kw']}({round(float(n['npmi']), 2)})" for n in neighbors]
+        typer.echo(f"neighbors:   {', '.join(parts)}")
+
     notice = result.get("implicit_notice")
     if notice:
         typer.echo(f"[grga] {notice}", err=True)
