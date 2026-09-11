@@ -17,13 +17,15 @@ grga 侧的具体命令与依赖：
 | 纯文本 / 源码搜索 | ✅ | ✅ | ✅ | `grga search 关键词` | 无 |
 | 大文档集速度（并发 + `.gitignore`） | ❌ 单线程 | ✅ 多线程 | ✅ 继承 rg | 同上，自动透传 `rg` | `rg`（首次 `grga tools install` 自动下载） |
 | PDF / Office / EPUB / 归档 / sqlite | ❌ | ❌ | ✅ 内建适配器 | 同上，自动透传 `rga` | `rga` + `rga-preproc` + `pandoc` + `pdftotext`（自动下载） |
+| **Office 文档增强**（xlsx/pptx/doc/xls/ppt 原生表格/幻灯片/Word 结构提取） | ❌ | ❌ | ⚠️ rga 原生只提取纯文本 | `grga search` 自动走自定义 `pandoc_office` adapter | `pandoc`（已包含在自动下载的工具链中） |
 | 查询表达式（短语 / 正则 / glob / `\|\|` / `&&` / 括号） | ⚠️ 仅正则 | ⚠️ 仅正则 | ⚠️ 仅正则 | 默认多词 **AND**，`--implicit-or` 恢复 v1 OR 语义 | 无 |
 | 路径搜索（只匹配文件名，不读内容） | ⚠️ 需配合 `find` | ⚠️ 需 `--files \| rg` | ⚠️ 同 rg | `grga search --path-only` | 无 |
 | 命令预览与试探（先看规模再决定读不读） | ❌ | ❌ | ❌ | `grga preview` / `grga probe` | 无 |
-| Markdown / PDF 的段落 / 章节上下文扩展 | ❌ | ❌ | ❌ | `grga expand`（按行 / 段落 / 章节逐级） |  |
+| Markdown / PDF 的段落 / 章节上下文扩展 | ❌ | ❌ | ❌ | `grga expand`（按行 / 段落 / 章节 / 目录大纲逐级） |  |
 | 关键词共现关系图（离线索引 + 亚毫秒查询） | ❌ | ❌ | ❌ | `grga index build --scope <name>` → `grga related` / `grga graph inspect` | |
 | LLM 深度搜索、查询改写、结果重排 | ❌ | ❌ | ❌ | `grga deep-search` / `grga suggest` | OpenAI 兼容 API；至少 `GRGA_OPENAI_API_KEY` + `GRGA_OPENAI_MODEL`（详见 [docs/env-vars.md](docs/env-vars.md)） |
-| Agent 友好（`--json` + 稳定退出码契约） | ❌ | ⚠️ 部分 | ⚠️ 部分 | `grga skill install` 分发内置 agent 技能包 | 错误契约见 [docs/exit-codes.md](docs/exit-codes.md) |
+| **MCP Server**（Model Context Protocol，6 个内置 tool） | ❌ | ❌ | ❌ | `grga mcp start` 启动 stdio MCP server | 无（MCP 客户端如 Claude Desktop 等） |
+| Agent 友好（`--json` + 稳定退出码契约 + Skill 包） | ❌ | ⚠️ 部分 | ⚠️ 部分 | `grga skill install` 分发内置 agent 技能包 + `--json` 结构化输出 | 错误契约见 [docs/exit-codes.md](docs/exit-codes.md) |
 
 所有环境变量都可以写进 `$XDG_CONFIG_HOME/grga/.env`（首次运行会自动生成
 一份注释模板），完整清单见 [docs/env-vars.md](docs/env-vars.md)。更多 CLI
@@ -59,12 +61,22 @@ grga gui                            # 图形界面（或 grga-gui）
 grga --help                        # 查看命令帮助
 ```
 
-**给你的 AI Agent 装 skill**（可选，一行搞定，让 Kilo / Claude Code / QwenPaw 等直接学会用 grga）：
+**给你的 AI Agent 接入 grga**（两种方式，二选一即可）：
+
+- **Skill 包**（适合 Kilo / Claude Code / QwenPaw 等支持 skill 的 agent）：
+  ```bash
+  grga skill install --to ~/.kilocode/skills   # 换成你的 agent skill 目录即可
+  ```
+
+- **MCP Server**（适合 Claude Desktop / Cursor 等支持 Model Context Protocol 的客户端）：
+  在 MCP 客户端配置中添加：
+  ```json
+  { "mcpServers": { "grga": { "command": "grga", "args": ["mcp", "start", "--directory", "/path/to/docs"] } } }
+  ```
+
+**预学习（可选）** —— 视语料规模需要花费一定时间，但可以提供图扩展能力：
 
 ```bash
-grga skill install --to ~/.kilocode/skills   # 换成你的 agent skill 目录即可
-
-# 预学习（可选，视语料规模需要花费一定时间，但可以提供图扩展能力）
 # --scope 是逻辑域名（跨机器可迁移，与本机目录解耦，可任取有意义的名字）；
 # --directory 未传则默认当前目录（这里由前面的 cd 兜底）
 cd /path/to/your/documents
@@ -82,10 +94,11 @@ grga tools install
 grga search "面壁计划" -g "*.pdf"
 ```
 
-**上下文扩展** —— 把命中扩展成段落 / 章节：
+**上下文扩展** —— 把命中扩展成段落 / 章节 / 目录大纲：
 
 ```bash
-grga expand ...   # 按行 / 段落 / 章节逐级扩展
+grga expand ...                    # 按行 / 段落 / 章节逐级扩展
+grga expand --level toc 文档.md   # 提取单文档目录大纲
 ```
 
 **关键词共现关系图**（不依赖 LLM，先建索引再查）：

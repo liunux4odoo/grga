@@ -2,7 +2,7 @@
 
 All notable changes to `grga` are recorded here.
 
-## [Unreleased]
+## [0.4.0] - 2026-09-11
 
 ### `--max-total` 默认 1000 → 100
 
