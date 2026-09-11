@@ -12,7 +12,7 @@ from grga import paths
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for key in ("GRGA_TOOLS_DIR", "GRGA_STATE_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME", "LOCALAPPDATA", "APPDATA"):
+    for key in ("GRGA_TOOLS_DIR", "GRGA_STATE_DIR", "GRGA_CACHE_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "LOCALAPPDATA", "APPDATA"):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch
 
@@ -122,3 +122,64 @@ def test_state_dir_platform_default_windows(monkeypatch):
     _force_windows(monkeypatch)
     monkeypatch.setenv("LOCALAPPDATA", "C:\\Local")
     assert paths.resolve_state_dir() == Path("C:\\Local") / "grga"
+
+
+def test_cache_dir_grga_cache_dir_override(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_CACHE_DIR", "/tmp/cache")
+    monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/xdgcache")
+    assert paths.resolve_cache_dir() == Path("/tmp/cache")
+
+
+def test_cache_dir_empty_string_ignored(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_CACHE_DIR", "")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/home/user")))
+    assert paths.resolve_cache_dir() == Path("/home/user/.cache/grga")
+
+
+def test_cache_dir_whitespace_only_ignored(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_CACHE_DIR", "   ")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/home/user")))
+    assert paths.resolve_cache_dir() == Path("/home/user/.cache/grga")
+
+
+def test_cache_dir_xdg_cache_home(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/xdgcache")
+    assert paths.resolve_cache_dir() == Path("/tmp/xdgcache/grga")
+
+
+def test_cache_dir_grga_beats_xdg(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_CACHE_DIR", "/tmp/override")
+    monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/xdgcache")
+    assert paths.resolve_cache_dir() == Path("/tmp/override")
+
+
+def test_cache_dir_platform_default_posix(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/home/user")))
+    assert paths.resolve_cache_dir() == Path("/home/user/.cache/grga")
+
+
+def test_cache_dir_platform_default_windows(monkeypatch):
+    _force_windows(monkeypatch)
+    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\me\\AppData\\Local")
+    assert paths.resolve_cache_dir() == Path("C:\\Users\\me\\AppData\\Local") / "grga" / "cache"
+
+
+def test_cache_dir_windows_no_localappdata_falls_back(monkeypatch):
+    _force_windows(monkeypatch)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("C:\\Users\\me")))
+    assert paths.resolve_cache_dir() == Path("C:\\Users\\me/AppData/Local/grga/cache")
+
+
+def test_cache_dir_does_not_create_directory(monkeypatch, tmp_path):
+    _force_posix(monkeypatch)
+    root = tmp_path / "cache"
+    monkeypatch.setenv("GRGA_CACHE_DIR", str(root))
+    result = paths.resolve_cache_dir()
+    assert not result.exists()

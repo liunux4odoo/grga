@@ -1,16 +1,14 @@
-"""Central resolver for the grga managed-tools cache directory.
+"""Central resolver for grga directory paths.
 
-Priority (highest first):
+This module resolves the tools cache, state directory, and general cache
+directory, following XDG Base Directory conventions with grga-specific
+overrides. Each resolver function documents its own priority chain.
 
-1. ``$GRGA_TOOLS_DIR``                          -> used as the tools *root*
-2. ``$XDG_DATA_HOME/grga/tools``               -> root
-3. platform default                             -> root
-   * Linux / macOS: ``~/.local/share/grga/tools``
-   * Windows:       ``%LOCALAPPDATA%\\grga\\tools``
-
-The *root* never contains the platform segment. The per-platform directory is
-``<root>/<platform>``; use :func:`resolve_tools_dir` for that. So
-``GRGA_TOOLS_DIR=/tmp/x`` resolves the current-platform dir to
+Tools cache notes
+-----------------
+The tools *root* never contains the platform segment. The per-platform
+directory is ``<root>/<platform>``; use :func:`resolve_tools_dir` for that.
+So ``GRGA_TOOLS_DIR=/tmp/x`` resolves the current-platform dir to
 ``/tmp/x/<platform>``.
 
 This module is intentionally free of any :mod:`grga.toolchain` import so it
@@ -90,3 +88,29 @@ def resolve_state_dir():
         return base / APP_NAME
 
     return Path.home() / ".local" / "share" / APP_NAME
+
+
+def resolve_cache_dir():
+    """Return the grga cache directory (sidecar structure docs, ...).
+
+    Priority:
+      1. ``$GRGA_CACHE_DIR`` (explicit override)
+      2. ``$XDG_CACHE_HOME/grga``
+      3. platform default cache dir
+         * Linux / macOS: ``~/.cache/grga``
+         * Windows:       ``%LOCALAPPDATA%\\grga\\cache``
+    """
+    override = _env("GRGA_CACHE_DIR")
+    if override:
+        return Path(override)
+
+    xdg_cache = _env("XDG_CACHE_HOME")
+    if xdg_cache:
+        return Path(xdg_cache) / APP_NAME
+
+    if _is_windows():
+        local = _env("LOCALAPPDATA")
+        base = Path(local) if local else Path.home() / "AppData" / "Local"
+        return base / APP_NAME / "cache"
+
+    return Path.home() / ".cache" / APP_NAME

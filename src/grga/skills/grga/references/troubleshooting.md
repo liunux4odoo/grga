@@ -40,7 +40,7 @@ This is the documented degrade chain, not a bug: `chapter → paragraph → line
 - `chapter` only works on Markdown files with a parseable structure sidecar. Non-md paths silently degrade to `paragraph`.
 - A paragraph with fewer than 2 non-empty lines degrades to `lines(±size)`.
 - Always read `Context.level` on the return value rather than assuming the request was honoured.
-- If `chapter` should work but does not, delete the cached sidecar under `.grga/structure/` (or `$GRGA_SIDECAR_ROOT`) and re-run; it will be rebuilt from mtime.
+- If `chapter` should work but does not, delete the cached sidecar under `$GRGA_SIDECAR_ROOT` (or `$GRGA_CACHE_DIR/structure`, default `~/.cache/grga/structure`) and re-run; it will be rebuilt from mtime.
 
 ## `grga suggest` hangs, times out, or returns empty fields
 

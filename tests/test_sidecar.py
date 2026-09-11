@@ -26,6 +26,18 @@ def test_default_sidecar_root_uses_env(monkeypatch, tmp_path):
     assert default_sidecar_root() == tmp_path / "x"
 
 
+def test_default_sidecar_root_falls_back_to_cache_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("GRGA_SIDECAR_ROOT", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    assert default_sidecar_root() == tmp_path / "cache" / "grga" / "structure"
+
+
+def test_default_sidecar_root_sidecar_env_beats_cache_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRGA_SIDECAR_ROOT", str(tmp_path / "sidecar"))
+    monkeypatch.setenv("GRGA_CACHE_DIR", str(tmp_path / "cache"))
+    assert default_sidecar_root() == tmp_path / "sidecar"
+
+
 def test_first_build_writes_sidecar(sidecar_root: Path, tmp_path: Path):
     md = tmp_path / "a.md"
     _write_md(md, "# T\n\nhi\n")

@@ -1,9 +1,10 @@
 """Sidecar cache for structure documents (Phase 2.3).
 
-Structure indexes are stored under a `.grga/structure/` directory
-(configurable via ``GRGA_SIDECAR_ROOT``) with hashed filenames so long paths
-(and Windows path-length limits) are avoided. Each sidecar records the
-source mtime; a stale mtime triggers a lazy rebuild.
+Structure indexes are stored under the grga cache directory's ``structure/``
+subdirectory (configurable via ``GRGA_SIDECAR_ROOT`` or ``GRGA_CACHE_DIR``)
+with hashed filenames so long paths (and Windows path-length limits) are
+avoided. Each sidecar records the source mtime; a stale mtime triggers a lazy
+rebuild.
 
 The public entry point is :func:`load_or_build`. All exceptions are caught
 and turned into empty StructureDoc instances, matching the design's degrade
@@ -25,7 +26,8 @@ def default_sidecar_root() -> Path:
     override = os.environ.get("GRGA_SIDECAR_ROOT")
     if override:
         return Path(override).expanduser()
-    return Path.cwd() / ".grga" / "structure"
+    from grga.paths import resolve_cache_dir
+    return resolve_cache_dir() / "structure"
 
 
 def _hash_key(source: Path) -> str:

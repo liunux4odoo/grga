@@ -161,6 +161,11 @@ EXAMPLE_ENV_TEMPLATE = """\
 # resolution order: $XDG_STATE_HOME/grga -> $XDG_DATA_HOME/grga -> platform.
 # GRGA_STATE_DIR=/path/to/state
 
+# Override the grga cache directory (sidecar structure docs, ...). Default
+# resolution order: $XDG_CACHE_HOME/grga -> ~/.cache/grga (POSIX)
+#                                  -> %LOCALAPPDATA%\\grga\\cache (Windows)
+# GRGA_CACHE_DIR=/path/to/cache
+
 # Prefer system-installed tools on $PATH over the managed cache.
 # GRGA_PREFER_SYSTEM=0
 
@@ -176,8 +181,9 @@ EXAMPLE_ENV_TEMPLATE = """\
 # Structure sidecar cache (Markdown chapter tree, used by expand)
 # ---------------------------------------------------------------------------
 
-# Root directory for the on-disk structure sidecar cache. Default is the
-# search directory root at `.grga/structure/`.
+# Root directory for the on-disk structure sidecar cache. Takes precedence
+# over GRGA_CACHE_DIR. Defaults to $GRGA_CACHE_DIR/structure (which in turn
+# defaults to $XDG_CACHE_HOME/grga/structure or ~/.cache/grga/structure).
 # GRGA_SIDECAR_ROOT=/path/to/sidecar
 
 # ---------------------------------------------------------------------------

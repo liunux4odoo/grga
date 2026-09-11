@@ -24,8 +24,8 @@ grga 启动时会自动加载 `$XDG_CONFIG_HOME/grga/.env`（未设置 `XDG_CONF
 |---|---|
 | [LLM 凭据](#llm-凭据) | `GRGA_OPENAI_API_KEY` / `GRGA_OPENAI_MODEL` / `GRGA_OPENAI_BASE_URL` / `OPENAI_*` 回退 |
 | [托管工具链](#托管工具链) | `GRGA_TOOLS_DIR` / `GRGA_STATE_DIR` / `GRGA_PREFER_SYSTEM` / `GRGA_OFFLINE` / `GRGA_INSECURE` |
-| [XDG 基础目录](#xdg-基础目录) | `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` / `LOCALAPPDATA`（Windows） |
-| [结构缓存](#结构缓存) | `GRGA_SIDECAR_ROOT` |
+| [XDG 基础目录](#xdg-基础目录) | `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` / `LOCALAPPDATA`（Windows） |
+| [结构缓存](#结构缓存) | `GRGA_SIDECAR_ROOT` / `GRGA_CACHE_DIR` |
 | [图查询与索引](#图查询与索引) | `GRGA_PPR_MIN_NPMI` / `GRGA_QUIET_MIGRATION` |
 | [桌面 GUI](#桌面-gui) | `GRGA_DISPLAY_SCALE` |
 
@@ -88,13 +88,21 @@ grga 的缓存与配置位置。
 | `XDG_CONFIG_HOME` | 决定 `.env` / `settings.json` 的位置（回退 `~/.config`） |
 | `XDG_DATA_HOME` | 决定托管工具缓存根（回退 `~/.local/share`） |
 | `XDG_STATE_HOME` | 决定状态目录根（回退 `~/.local/state`） |
+| `XDG_CACHE_HOME` | 决定缓存目录根（回退 `~/.cache`） |
 | `LOCALAPPDATA` | Windows 上作为 XDG 的替代（`%LOCALAPPDATA%\grga\...`） |
 
 ## 结构缓存
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `GRGA_SIDECAR_ROOT` | 搜索目录下的 `.grga/structure/` | Markdown 章节树 sidecar 缓存的根目录。`grga expand --level chapter` 与 `heading_path` 元数据会读写此目录 |
+| `GRGA_CACHE_DIR` | *(未设置)* | 缓存目录（sidecar 结构文档等）的显式覆盖。设置后忽略所有 XDG / 平台默认 |
+| `GRGA_SIDECAR_ROOT` | `$GRGA_CACHE_DIR/structure`（最终回退 `~/.cache/grga/structure`） | Markdown 章节树 sidecar 缓存的根目录。优先级高于 `GRGA_CACHE_DIR`。`grga expand --level chapter` 与 `heading_path` 元数据会读写此目录 |
+
+**缓存目录解析顺序**（未设 `GRGA_CACHE_DIR` 时）：
+
+1. `$XDG_CACHE_HOME/grga`
+2. Linux/macOS：`~/.cache/grga`
+3. Windows：`%LOCALAPPDATA%\grga\cache`
 
 ## 图查询与索引
 
