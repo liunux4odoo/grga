@@ -69,9 +69,11 @@ from grga.graph.schema import (
 # greedy 2-20 char blob). The two branches are matched in one pass and merged
 # in positional order; the ASCII branch is the *previous* mainline regex.
 _ASCII_TOKEN = r"[A-Za-z][A-Za-z0-9_+#.-]{0,38}[A-Za-z0-9_+#]"
+_DIGIT_RUN = r"\d+(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])\d+"
 _CJK_RUN = r"[\u4e00-\u9fff]+"
-_COMBINED_RE = re.compile(_ASCII_TOKEN + "|" + _CJK_RUN)
+_COMBINED_RE = re.compile(_ASCII_TOKEN + "|" + _DIGIT_RUN + "|" + _CJK_RUN)
 _CJK_ONLY_RE = re.compile(_CJK_RUN)
+_DIGIT_ONLY_RE = re.compile(r"^\d+$")
 # Back-compat: the old single-token regex (ASCII branch + bounded CJK run).
 # Retained for :func:`extract_chunk_keywords` callers that expect the pure
 # regex behaviour without a jieba dependency at call time.
@@ -698,11 +700,19 @@ def _tokenise_chunk(
 
 
 def _keywords_from_tokens(tokens: Iterable[str]) -> Counter:
-    """Casefold + stopword-filter a token list into ``{keyword: count}``."""
+    """Casefold + stopword-filter a token list into ``{keyword: count}``.
+
+    Pure-digit tokens (``^\\d+$``) are excluded from the index layer —
+    they participate in n-gram detection (so ``404避难所`` can be
+    discovered) but never become standalone keywords, preventing digit
+    hub pollution of ``keyword_pairs`` (plan-2026-09-11 §3.3).
+    """
     counts: Counter = Counter()
     for tok in tokens:
         key = tok.casefold()
         if key in _INDEX_STOPWORDS:
+            continue
+        if _DIGIT_ONLY_RE.fullmatch(key):
             continue
         counts[key] += 1
     return counts

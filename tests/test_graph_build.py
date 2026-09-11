@@ -1120,3 +1120,139 @@ def test_step4_glued_drop_parity(tmp_path):
     assert ("a", "c") in sql_keys, "non-glued (a,c) should survive"
     assert ("b", "c") in sql_keys, "non-glued (b,c) should survive"
 
+
+# ---------------------------------------------------------------------------
+# Digit + CJK mixed phrase support (plan-2026-09-11, variant 甲)
+# ---------------------------------------------------------------------------
+
+def test_tokenize_hybrid_digit_before_cjk():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    result = tokenize_hybrid("404避难所", tok)
+    assert result == ["404", "避难所"]
+
+
+def test_tokenize_hybrid_digit_before_cjk_with_middle_char():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    result = tokenize_hybrid("404号避难所", tok)
+    assert result == ["404", "号", "避难所"]
+
+
+def test_tokenize_hybrid_digit_after_cjk():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    result = tokenize_hybrid("避难所404", tok)
+    assert result == ["避难所", "404"]
+
+
+def test_tokenize_hybrid_digit_between_cjk():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    result = tokenize_hybrid("第404章", tok)
+    assert result == ["第", "404", "章"]
+
+
+def test_tokenize_hybrid_trailing_digit_after_cjk():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer(["三体"])
+    result = tokenize_hybrid("三体3", tok)
+    assert result == ["三体", "3"]
+
+
+def test_tokenize_hybrid_bare_digits_not_in_stream():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    assert tokenize_hybrid("404", tok) == []
+    assert tokenize_hybrid("3.3", tok) == []
+    assert tokenize_hybrid("2024", tok) == []
+    assert tokenize_hybrid("foo 404 bar", tok) == ["foo", "bar"]
+
+
+def test_tokenize_hybrid_code_identifiers_no_regression():
+    from grga.graph.build import _new_jieba_tokenizer, tokenize_hybrid
+    tok = _new_jieba_tokenizer([])
+    result = tokenize_hybrid("A404B v1.2.3", tok)
+    assert "A404B" in result
+    assert "v1.2.3" in result
+    assert "404" not in result
+
+
+def test_keywords_from_tokens_drops_pure_digit_tokens():
+    from grga.graph.build import _keywords_from_tokens
+    counts = _keywords_from_tokens(["404", "避难所"])
+    assert "404" not in counts
+    assert "避难所" in counts
+
+
+def test_keywords_from_tokens_keeps_mixed_digit_cjk_phrases():
+    from grga.graph.build import _keywords_from_tokens
+    counts = _keywords_from_tokens(["404避难所", "三体3"])
+    assert "404避难所" in counts
+    assert "三体3" in counts
+
+
+def test_join_by_pair_rule_digit_and_cjk():
+    from grga.graph.build import _join_by_pair_rule
+    assert _join_by_pair_rule(("404", "避难所")) == "404避难所"
+    assert _join_by_pair_rule(("三体", "3")) == "三体3"
+    assert _join_by_pair_rule(("第", "404", "章")) == "第404章"
+
+
+def test_build_digit_cjk_phrases_in_auto_ngram_dict(sidecar_env, tmp_path):
+    """End-to-end: repeated digit+CJK compounds should land in auto_ngram_dict."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    lines = [
+        "404避难所位于地下深处",
+        "进入404避难所需要验证身份",
+        "404避难所居民都很团结",
+        "我们参观404避难所的博物馆",
+        "听说404避难所科技最发达",
+        "404避难所建立于末日之后",
+        "走出404避难所探索荒芜地表",
+        "404避难所储存了大量物资",
+    ]
+    (scope / "santi.txt").write_text("\n".join(lines) * 3, encoding="utf-8")
+    db = tmp_path / "graph.db"
+    stats = build_graph_index(
+        "test-scope", directory=scope, db_path=db,
+        min_pair_count=1, min_npmi=0.0, ngram_iters=2,
+    )
+    assert stats.ngram_phrases_written >= 1
+
+    conn = connect(db)
+    try:
+        phrases = {r[0] for r in conn.execute(
+            "SELECT phrase FROM auto_ngram_dict")}
+    finally:
+        conn.close()
+    assert "404避难所" in phrases, f"expected 404避难所 in dict, got {sorted(phrases)}"
+
+
+def test_build_pure_digits_not_in_keyword_stats(sidecar_env, tmp_path):
+    """Index-layer gate: pure digit tokens must not appear as keywords."""
+    scope = tmp_path / "corpus"
+    scope.mkdir()
+    body = (
+        "2024年发生了很多大事\n"
+        "2024年的春天来得很早\n"
+        "2024年夏天异常炎热\n"
+        "到了2024年秋天天气转凉\n"
+        "寒冷的2024年冬天终于结束\n"
+    )
+    (scope / "years.txt").write_text(body * 3, encoding="utf-8")
+    db = tmp_path / "graph.db"
+    build_graph_index(
+        "test-scope", directory=scope, db_path=db,
+        min_pair_count=1, min_npmi=0.0,
+    )
+
+    conn = connect(db)
+    try:
+        kws = {r[0] for r in conn.execute("SELECT kw FROM keywords")}
+    finally:
+        conn.close()
+    assert "2024" not in kws, "pure digit '2024' must be excluded from keyword index"
+
+

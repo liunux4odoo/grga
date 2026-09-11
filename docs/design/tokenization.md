@@ -9,18 +9,34 @@
 
 ## 0. TL;DR
 
-`grga index build` tokenises with a **two-branch hybrid**:
+`grga index build` tokenises with a **three-branch hybrid**:
 
 - **ASCII / code identifiers** — regex `[A-Za-z][A-Za-z0-9_+#.-]{0,38}[A-Za-z0-9_+#]`.
   Preserves programming tokens (`foo-bar`, `v1.2.3`, `c++`, `install_docs.md`,
   `self.x`) as single units. Identical to the previous mainline regex ASCII
   branch, so code-search callers see **zero regression**.
+- **CJK-adjacent digit runs** — regex `\d+(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])\d+`.
+  Digit strings are emitted as tokens only when immediately adjacent to a CJK
+  character (e.g. `404` in `404避难所` / `三体3`). Bare digits (`404`, `3.3`,
+  `2024`) are **not** tokenised — this is variant 甲 (保守), covering the core
+  use case of digit+CJK mixed phrases without flooding the stream with
+  context-free number tokens.
 - **CJK runs** — `jieba` in precise mode, seeded with a **per-scope auto
   dictionary** discovered by unsupervised n-gram phrase mining (frequency +
   NPMI + branch entropy). Long entities like `章北海` / `面壁者` /
   `万有引力号` / `联合国行星防御理事会` / `赫尔辛根默斯肯` / `PDC主席` /
-  `艾AA` end up as one token instead of being greedily glued into 2-20 char
-  garbage blobs.
+  `艾AA` / `404避难所` end up as one token instead of being greedily glued
+  into 2-20 char garbage blobs.
+
+Alternation order is `ASCII | digit | CJK` so `A404B` still matches as a
+single ASCII token (code zero-regression).
+
+Pure-digit tokens participate in n-gram **detection** (so mixed phrases like
+`404避难所` can be discovered) but are **excluded from the index layer**
+(`_keywords_from_tokens` drops `^\d+$`), preventing digit hub pollution of
+`keyword_pairs`. The detection/index two-layer split is preserved — detection
+admits them for windowing, the index gate filters them out of stored
+keywords.
 
 The auto dictionary lives in the new `auto_ngram_dict` SQL table
 (one row per phrase, per scope). Each `build` refines it in place (default
@@ -115,8 +131,10 @@ space-separated (`nano center`), rejoin **per adjacent pair**:
 |---|---|:---:|---|
 | CJK | CJK | (none) | `章`+`北海` → `章北海` |
 | CJK | ASCII | (none) | `艾`+`AA` → `艾AA` |
+| CJK | digit | (none) | `三体`+`3` → `三体3` |
 | ASCII | CJK | (none) | `PDC`+`主席` → `PDC主席` |
 | ASCII | ASCII | single space | `nano`+`center` → `nano center` |
+| digit | CJK | (none) | `404`+`避难所` → `404避难所` |
 
 The experiment tried two whole-window rules (`"".join` and `" ".join`) and
 both failed; **only** the pair-by-pair rule handles all four adjacencies

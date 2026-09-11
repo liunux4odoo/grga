@@ -4,6 +4,67 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-09-11 · 数字+汉字混合短语支持（变体甲：数字仅在 CJK 邻接时成 token）
+
+**Plan doc**：`docs/design/plan-2026-09-11-digit-cjk-ngram.md`
+
+**背景**：`404避难所` / `三体3` 这类数字+汉字混合短语在语料里反复出现，
+但因为 `_ASCII_TOKEN` 首字符必须是 `[A-Za-z]`，数字串在分词阶段被当作
+噪声丢弃，根本走不到 n-gram 检测。字母+汉字混合（`PDC主席` / `艾AA`）
+已经支持，数字被排除纯粹是 code-search 时代的历史遗留。
+
+**Decision**：在 `_COMBINED_RE` 增加**第三分支**——数字仅在紧邻 CJK 字符
+时产出为 token（变体甲，保守方案）。配套**索引层闸**：纯数字 token
+参与 n-gram 检测（让混合短语能被发现），但**不单独落为 keyword**
+（防止 `404` 变成共现图 hub 污染 `keyword_pairs`）。
+
+具体：
+
+1. **检测层**：新增 `_DIGIT_RUN = r"\d+(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])\d+"`，
+   组合顺序 `_ASCII_TOKEN | _DIGIT_RUN | _CJK_RUN`（ASCII 最前保证
+   `A404B` 整体匹配不拆出 `404`）。双向邻接（数字在汉字前/后都支持）。
+2. **索引层闸**：`_keywords_from_tokens` 增加纯数字过滤
+   （`^\d+$` 不落 keyword）。混合短语（`404避难所`）不受影响。
+3. **不动**：`_TOKEN_RE` / `extract_chunk_keywords`（back-compat 纯
+   regex 路径冻结，tokenization.md §8 兼容承诺）；`_join_by_pair_rule`
+   （数字 token 非 ASCII → 直接拼接无空格，符合中文排版习惯）。
+
+**已拍板的决策点**：
+
+| # | 决策点 | 结论 |
+|---|---|---|
+| D1 | 短语形式是否必须符合 code 变量命名 | 否。形式不该预设，统计闸决定 |
+| D2 | 检测判据 | 按当前统计规则（freq≥3 + NPMI≥0.3 + 熵≥1.0） |
+| D3 | 数字 token 产出条件 | 变体甲（仅 CJK 邻接时产出） |
+| D4 | 邻接方向 | 双向（数字在前/后都支持） |
+| D5 | `extract_chunk_keywords` / `_TOKEN_RE` | 不改（冻结） |
+
+**Rationale**：
+
+- **为什么是变体甲（保守）而非放开整个正则（变体乙）**：裸数字
+  （`404`、`3.3`、`2024`）天然高频且上下文无关，若全部进流会成
+  `keyword_pairs` hub（R28 教训的加强版）。变体甲保留"裸数字不进流"，
+  零风险覆盖核心诉求（`404避难所` / `三体3`）。
+- **为什么需要索引层闸**：即使变体甲已最小化数字 token 量，高频
+  CJK 邻接数字（如 `2024年` → `2024` 若没合并成短语）仍会有 df。
+  索引层闸是防御性兜底，延续检测层≠索引层的两层分离设计。
+- **为什么 `extract_chunk_keywords` 不改**：back-compat 纯 regex 路径
+  专供外部 caller，v6 起已与内部 pipeline 分离；改动会破坏
+  tokenization.md §8 兼容承诺。
+- **为什么双向邻接**：`三体3`、`避难所404` 这类后缀数字实体在设定集
+  里常见；与 rejoin 表 CJK|ASCII 对称。
+
+**Impact**：additive MINOR。schema 不变、CLI 不变、契约不变。新 token
+类型只出现在内部 pipeline 里，对外可见的只有 `auto_ngram_dict`
+多了数字+汉字混合短语条目。代码搜索零回归（`A404B` / `v1.2.3` 行为
+不变）。
+
+**Files**：
+- `src/grga/graph/build.py`（`_DIGIT_RUN` 常量 + `_COMBINED_RE` 组合 +
+  `_DIGIT_ONLY_RE` + `_keywords_from_tokens` 数字过滤）
+- `docs/design/tokenization.md`（§0 TL;DR 补数字分支说明、§4 rejoin 表补数字行）
+- `tests/test_graph_build.py`（11 个新用例：tokenization 7 + 索引层闸 2 + rejoin 1 + E2E auto_ngram_dict 1）
+
 ## 2026-07-13 · build 期写入门槛自适应（Gate 1 独立性 + Gate 2 阶梯）
 
 **Plan step**：resolved_seeds 探针发布后从 caller 视角复盘"已知但孤立"的
