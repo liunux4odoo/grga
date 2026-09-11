@@ -492,11 +492,12 @@ def search_directory(
             _log_debug(debug, f"可忽略的错误: {error[:200]}")
             skipped = _parse_skipped_files(error)
             _log_debug(debug, f"跳过文件数: {len(skipped)}")
+            warning_msg = f"{len(skipped)} file(s) skipped due to preprocessing errors"
             response = {
                 "ok": True,
                 "patterns": patterns,
                 "directory": str(target),
-                "warning": error,
+                "warning": warning_msg,
                 "skipped_files": skipped,
                 "matches": matches,
                 "truncated": truncated,
@@ -669,10 +670,10 @@ def _parse_skipped_files(stderr):
         if key in seen:
             continue
         seen.add(key)
-        skipped.append({"path": current_path, "reason": reason, "detail": line})
+        skipped.append({"path": current_path, "reason": reason})
 
     if not skipped:
-        skipped.append({"path": None, "reason": "部分文件预处理失败", "detail": stderr})
+        skipped.append({"path": None, "reason": "部分文件预处理失败"})
     return skipped
 
 

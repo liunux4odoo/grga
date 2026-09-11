@@ -952,22 +952,18 @@ class GrgaSearchApp(tk.Tk):
     def _format_warning_details(self, warning, skipped):
         lines = []
         if skipped:
-            lines.append(f"共有 {len(skipped)} 条跳过记录：")
+            lines.append(f"共有 {len(skipped)} 个文件被跳过：")
             lines.append("")
             for index, item in enumerate(skipped, 1):
                 path = item.get("path") or "未知文件"
                 reason = item.get("reason") or "未知原因"
-                detail = item.get("detail") or ""
                 lines.append(f"{index}. {path}")
                 lines.append(f"   原因：{reason}")
-                if detail:
-                    lines.append(f"   详情：{detail}")
                 lines.append("")
         else:
             lines.append("部分文件已跳过，但无法解析出具体文件清单。")
             lines.append("")
         if warning:
-            lines.append("原始警告：")
             lines.append(warning)
         return "\n".join(lines).strip()
 

@@ -395,8 +395,8 @@ def _count_per_file(rga_path, target, query, case_sensitive, multiline, glob_pat
     if completed.returncode not in (0, 1):
         error = stderr_text.strip()
         if error and _is_ignorable_search_error(error):
-            warning = error
             skipped_files = _parse_skipped_files(error)
+            warning = f"{len(skipped_files)} file(s) skipped due to preprocessing errors"
         else:
             return {"ok": False, "warning": error or None}
 
