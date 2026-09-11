@@ -2,6 +2,11 @@
 
 All notable changes to `grga` are recorded here.
 
+## [0.4.0.post1] - 2026-09-11
+
+- 新增英文版 README（`README.en.md`），中文版 README 页首添加语言切换链接。
+- MANIFEST.in 包含 `README.en.md`，sdist 同步分发。
+
 ## [0.4.0] - 2026-09-11
 
 ### `--max-total` 默认 1000 → 100

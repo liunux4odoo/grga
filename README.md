@@ -35,6 +35,8 @@ grga 侧的具体命令与依赖：
 >
 > **许可证**：`grga` 本身以 **MIT** 许可证发布（见 [LICENSE](LICENSE)）。它调用的外部工具各自遵循其上游许可证（`rg`：MIT/Unlicense；`rga`：AGPL；`pandoc`：GPL；`fzf`：MIT），请分别遵守。
 
+中文版 · [English](README.en.md)
+
 
 ### 与其它 GraphRAG 有什么不同
 - 不依赖 LLM 抽实体
