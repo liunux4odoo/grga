@@ -1,6 +1,6 @@
 # grga 互补对噪声过滤开发方案
 
-> **状态**：✅ 已实现（commit `ceda059`）。实现 PR 覆盖 `src/grga/graph/build.py`、`src/grga/cli.py`、测试与文档。
+> **状态**：✅ 已实现（commit `942e923`）。迭代 3 已落地：互补对从用户可见功能降级为内部静默数据通道。实现覆盖 `src/grga/graph/build.py`、`src/grga/probe.py`、`src/grga/related.py`、schemas、测试与文档。
 > **CLI 开关**：`--no-filter-comp-segregation` 已同时加到 `grga index build` 和 `grga index rebuild`，默认关闭（即过滤默认开启）。
 > **Iteration 2**：✅ 已实现（commit `ceda059`）。c/E 强度门槛（`COMPLEMENTARY_MAX_C_OVER_E = 0.25`）+ 互补对专用停用词表 `_COMPLEMENTARY_STOPWORDS`。scope `work` rebuild 后 `complementary_pairs` 从 12,495 降至 **295 条**。
 > **Iteration 2.1**：❌ 废弃。用户决定不继续净化输出层，改为内部静默数据通道（见 §迭代 3）。
