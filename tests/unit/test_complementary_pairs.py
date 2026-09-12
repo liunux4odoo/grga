@@ -852,3 +852,827 @@ class TestPositiveSideUnchanged:
         # Results are sorted by npmi desc
         nmpis = [r.npmi for r in result.results]
         assert nmpis == sorted(nmpis, reverse=True)
+
+
+# ======================================================================
+# 7. Complementary noise filtering (plan-2026-09-12)
+# ======================================================================
+
+def _seed_synthetic_segregation_scope(conn, scope_name: str = "synth-seg"):
+    """Seed a scope with deterministic chunk/doc statistics.
+
+    Two "file universes" with zero document overlap:
+
+    * fiction: 史强 (docs 1..50), 大史 (docs 1..50)
+    * tech:    设计 (docs 51..90), 系统 (docs 51..90)
+
+    All three pairs have identical, strongly negative chunk npmi, so the
+    only discriminant is the segregation gate:
+
+    * 史强↔设计 — zero shared docs → Gate A fails → filtered
+    * 史强↔大史 — 50 shared docs → survives
+    * 设计↔系统 — 40 shared docs → survives
+
+    Returns the scope id.
+    """
+    interner = IdInterner(conn)
+    sid = interner.scope_id(scope_name)
+    kw = interner.kw_ids(["史强", "大史", "设计", "系统"])
+
+    n_chunks, n_docs = 1000, 100
+    conn.execute(
+        "INSERT OR REPLACE INTO scope_stats "
+        "(scope_id, n_chunks, n_docs, vocab_size, updated_at) "
+        "VALUES (?, ?, ?, 4, '2026-01-01T00:00:00Z')",
+        (sid, n_chunks, n_docs),
+    )
+    stats = [
+        (kw["史强"], 400, 50),
+        (kw["大史"], 350, 50),
+        (kw["设计"], 400, 40),
+        (kw["系统"], 350, 40),
+    ]
+    conn.executemany(
+        "INSERT OR REPLACE INTO keyword_stats "
+        "(scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z')",
+        [(sid, k, cdf, ddf, cdf * 2) for k, cdf, ddf in stats],
+    )
+
+    def _pair(a_kw, b_kw, co):
+        a, b = sorted((kw[a_kw], kw[b_kw]))
+        conn.execute(
+            "INSERT OR REPLACE INTO keyword_pairs "
+            "(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+            "VALUES (?, ?, ?, 'chunk_cooccur', ?, -0.5, '2026-01-01T00:00:00Z')",
+            (sid, a, b, co),
+        )
+
+    _pair("史强", "大史", 5)
+    _pair("史强", "设计", 5)
+    _pair("设计", "系统", 5)
+
+    conn.executemany(
+        "INSERT OR IGNORE INTO docs "
+        "(id, scope_id, doc_path, n_chunks_with_kw) VALUES (?, ?, ?, 1)",
+        [(i, sid, f"doc_{i}.txt") for i in range(1, 101)],
+    )
+
+    def _seed_docs(kw_id, doc_ids):
+        conn.executemany(
+            "INSERT OR REPLACE INTO keyword_docs "
+            "(scope_id, kw_id, doc_id, occurrence_count, chunk_count) "
+            "VALUES (?, ?, ?, 4, 2)",
+            [(sid, kw_id, d) for d in doc_ids],
+        )
+
+    _seed_docs(kw["史强"], range(1, 51))
+    _seed_docs(kw["大史"], range(1, 51))
+    _seed_docs(kw["设计"], range(51, 91))
+    _seed_docs(kw["系统"], range(51, 91))
+    conn.commit()
+    return sid
+
+
+class TestComplementaryStopwordFilter:
+    """Phase 1: stopword gate at complementary-pair entry."""
+
+    def test_stopword_pair_filtered_via_direct_insert(self, sidecar_env, tmp_path):
+        """Construct a stopword + non-stopword pair directly in
+        keyword_pairs with negative npmi, verify it does NOT enter
+        complementary_pairs after recompute.
+        """
+        from grga.graph.build import _INDEX_STOPWORDS, _recompute_scope_pairs
+
+        scope_dir = tmp_path / "corpus"
+        db = tmp_path / "g.db"
+        _build_alias_corpus(scope_dir)
+        _build_db(scope_dir, db, scope_name="test-stop")
+
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            interner = IdInterner(conn)
+            sid = interner.scope_id_ro("test-stop")
+            assert sid is not None
+
+            assert "也" in _INDEX_STOPWORDS
+
+            kw_ye_id = interner.kw_id("也")
+            kw_shiqiang_id = interner.kw_id_ro("史强")
+            assert kw_shiqiang_id is not None
+
+            conn.execute(
+                "INSERT OR REPLACE INTO keyword_stats "
+                "(scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+                "VALUES (?, ?, 50, 1, 100, '2026-01-01T00:00:00Z')",
+                (sid, kw_ye_id),
+            )
+            conn.commit()
+
+            a_id = min(kw_shiqiang_id, kw_ye_id)
+            b_id = max(kw_shiqiang_id, kw_ye_id)
+            conn.execute(
+                "INSERT OR REPLACE INTO keyword_pairs "
+                "(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+                "VALUES (?, ?, ?, 'chunk_cooccur', 1, -0.5, '2026-01-01T00:00:00Z')",
+                (sid, a_id, b_id),
+            )
+            conn.commit()
+
+            _recompute_scope_pairs(conn, sid, min_npmi=0.0)
+
+            row = conn.execute(
+                """
+                SELECT 1 FROM complementary_pairs cp
+                JOIN keywords ka ON ka.id = cp.kw_a_id
+                JOIN keywords kb ON kb.id = cp.kw_b_id
+                WHERE cp.scope_id = ?
+                  AND (
+                    (ka.kw = '史强' AND kb.kw = '也')
+                    OR (ka.kw = '也' AND kb.kw = '史强')
+                  )
+                """,
+                (sid,),
+            ).fetchone()
+            assert row is None, (
+                "Stopword pair 史强↔也 should be filtered from complementary_pairs"
+            )
+
+            row2 = conn.execute(
+                """
+                SELECT 1 FROM complementary_pairs cp
+                JOIN keywords ka ON ka.id = cp.kw_a_id
+                JOIN keywords kb ON kb.id = cp.kw_b_id
+                WHERE cp.scope_id = ?
+                  AND (
+                    (ka.kw = '史强' AND kb.kw = '大史')
+                    OR (ka.kw = '大史' AND kb.kw = '史强')
+                  )
+                """,
+                (sid,),
+            ).fetchone()
+            assert row2 is not None, (
+                "Non-stopword pair 史强↔大史 should remain in complementary_pairs"
+            )
+        finally:
+            conn.close()
+
+
+class TestSegregationPairUnit:
+    """Unit tests for _is_segregation_pair (pure math, no DB)."""
+
+    def test_small_n_docs_short_circuits_false(self):
+        """n_docs <= 2 → not segregation (statistically meaningless)."""
+        from grga.graph.build import _is_segregation_pair
+        assert _is_segregation_pair(
+            co_doc=1, doc_df_a=1, doc_df_b=1,
+            n_docs=1, npmi_chunk=-0.5,
+        ) is False
+        assert _is_segregation_pair(
+            co_doc=1, doc_df_a=1, doc_df_b=1,
+            n_docs=2, npmi_chunk=-0.5,
+        ) is False
+
+    def test_zero_df_is_segregation(self):
+        """Zero df → undefined → treated as segregation (safe drop)."""
+        from grga.graph.build import _is_segregation_pair
+        assert _is_segregation_pair(
+            co_doc=0, doc_df_a=0, doc_df_b=5,
+            n_docs=10, npmi_chunk=-0.5,
+        ) is True
+
+    def test_low_co_doc_fails_gate_a(self):
+        """co_doc below the minimum threshold → segregation."""
+        from grga.graph.build import _is_segregation_pair
+        assert _is_segregation_pair(
+            co_doc=1, doc_df_a=100, doc_df_b=100,
+            n_docs=200, npmi_chunk=-0.3,
+        ) is True
+
+    def test_high_co_doc_passes_gate_a(self):
+        """co_doc above threshold → Gate A passes, check Gate B."""
+        from grga.graph.build import _is_segregation_pair
+        assert _is_segregation_pair(
+            co_doc=50, doc_df_a=100, doc_df_b=100,
+            n_docs=200, npmi_chunk=-0.3,
+        ) is False
+
+    def test_gate_b_npmi_gap_boundary(self):
+        """Gate B fires only when doc npmi drops more than the gap below
+        chunk npmi; a doc npmi within the gap must survive."""
+        from grga.graph.build import _is_segregation_pair
+        # npmi_doc ≈ -0.40, chunk npmi -0.10 → -0.40 < -0.20 → segregation
+        assert _is_segregation_pair(
+            co_doc=10, doc_df_a=50, doc_df_b=50,
+            n_docs=100, npmi_chunk=-0.1,
+        ) is True
+        # npmi_doc ≈ -0.14, chunk npmi -0.10 → within the 0.1 gap → survives
+        assert _is_segregation_pair(
+            co_doc=12, doc_df_a=40, doc_df_b=40,
+            n_docs=100, npmi_chunk=-0.1,
+        ) is False
+
+
+class TestComplementarySegregationFilter:
+    """Phase 2: file-type segregation detection (integration tests)."""
+
+    def test_segregation_filter_reduces_pair_count(self, sidecar_env, tmp_path):
+        """Integration test: segregation filter removes file-isolated pairs.
+
+        Uses ``_seed_synthetic_segregation_scope`` so the two gates are
+        exercised deterministically:
+
+        * 史强↔设计 — zero shared docs → Gate A fails → filtered
+        * 史强↔大史 — 50 shared docs → survives
+        * 设计↔系统 — 40 shared docs → survives
+        """
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_synthetic_segregation_scope(conn)
+
+            def _pair_present(a_kw, b_kw):
+                return conn.execute(
+                    """
+                    SELECT 1 FROM complementary_pairs cp
+                    JOIN keywords ka ON ka.id = cp.kw_a_id
+                    JOIN keywords kb ON kb.id = cp.kw_b_id
+                    WHERE cp.scope_id = ?
+                      AND (
+                        (ka.kw = ? AND kb.kw = ?)
+                        OR (ka.kw = ? AND kb.kw = ?)
+                      )
+                    """,
+                    (sid, a_kw, b_kw, b_kw, a_kw),
+                ).fetchone() is not None
+
+            # --- Filter ON ---
+            _recompute_scope_pairs(
+                conn, sid, min_npmi=0.0, filter_comp_segregation=True,
+            )
+            assert not _pair_present("史强", "设计"), (
+                "Segregation pair 史强↔设计 (zero shared docs) should be filtered"
+            )
+            assert _pair_present("史强", "大史"), (
+                "Same-universe pair 史强↔大史 should survive"
+            )
+            assert _pair_present("设计", "系统"), (
+                "Same-universe pair 设计↔系统 should survive"
+            )
+            count_on = conn.execute(
+                "SELECT COUNT(*) FROM complementary_pairs WHERE scope_id = ?",
+                (sid,),
+            ).fetchone()[0]
+
+            # --- Filter OFF ---
+            _recompute_scope_pairs(
+                conn, sid, min_npmi=0.0, filter_comp_segregation=False,
+            )
+            assert _pair_present("史强", "设计"), (
+                "With the filter off, 史强↔设计 should be present"
+            )
+            count_off = conn.execute(
+                "SELECT COUNT(*) FROM complementary_pairs WHERE scope_id = ?",
+                (sid,),
+            ).fetchone()[0]
+
+            assert count_on < count_off, (
+                f"Filter should reduce count: on={count_on}, off={count_off}"
+            )
+        finally:
+            conn.close()
+
+    def test_flag_default_on(self, sidecar_env, tmp_path):
+        """build_graph_index defaults to filter_comp_segregation=True."""
+        import inspect
+        from grga.graph.build import build_graph_index
+        sig = inspect.signature(build_graph_index)
+        assert sig.parameters["filter_comp_segregation"].default is True
+
+    def test_no_doc_evidence_skips_segregation(self, sidecar_env, tmp_path):
+        """Knowledge-only scope (no ``keyword_docs``) must not have every
+        pair wiped by the segregation gate — the evidence is unknowable,
+        so the gate is skipped (post-``import`` / forget--all scenario)."""
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_synthetic_segregation_scope(conn, "no-evidence")
+            # Simulate a knowledge-only scope: wipe the evidence layer but
+            # keep scope_stats.n_docs (as ``forget --all --keep-pairs`` does).
+            conn.execute(
+                "DELETE FROM keyword_docs WHERE scope_id = ?", (sid,)
+            )
+            conn.commit()
+
+            _recompute_scope_pairs(
+                conn, sid, min_npmi=0.2, filter_comp_segregation=True,
+            )
+            count = conn.execute(
+                "SELECT COUNT(*) FROM complementary_pairs WHERE scope_id = ?",
+                (sid,),
+            ).fetchone()[0]
+            assert count == 3, (
+                "Segregation must be skipped without doc evidence; "
+                f"expected 3 pairs, got {count}"
+            )
+        finally:
+            conn.close()
+
+    def test_sql_and_batch_backends_agree_with_filter(
+        self, sidecar_env, tmp_path, monkeypatch,
+    ):
+        """With the segregation filter enabled, the SQL and batch backends
+        must write the same ``complementary_pairs`` rows (the gate is now
+        a shared helper, so this guards regressions)."""
+        import grga.graph.build as build_mod
+        from grga.graph.build import _recompute_scope_pairs
+
+        def _run(force_batch: bool):
+            db = tmp_path / ("batch.db" if force_batch else "sql.db")
+            conn = connect(db)
+            try:
+                ensure_schema(conn)
+                sid = _seed_synthetic_segregation_scope(conn, "parity")
+                if force_batch:
+                    monkeypatch.setattr(
+                        build_mod, "_sqlite_has_ln", lambda c: False,
+                    )
+                _recompute_scope_pairs(
+                    conn, sid, min_npmi=0.2, filter_comp_segregation=True,
+                )
+                conn.commit()
+                return conn.execute(
+                    """
+                    SELECT ka.kw AS kw_a, kb.kw AS kw_b,
+                           cp.cooccur_count, cp.expected_count,
+                           cp.npmi, cp.p_value
+                    FROM complementary_pairs cp
+                    JOIN keywords ka ON ka.id = cp.kw_a_id
+                    JOIN keywords kb ON kb.id = cp.kw_b_id
+                    WHERE cp.scope_id = ?
+                    ORDER BY kw_a, kw_b
+                    """,
+                    (sid,),
+                ).fetchall()
+            finally:
+                conn.close()
+
+        sql_rows = _run(force_batch=False)
+        batch_rows = _run(force_batch=True)
+
+        assert [r["kw_a"] for r in sql_rows] == [r["kw_a"] for r in batch_rows]
+        assert [r["kw_b"] for r in sql_rows] == [r["kw_b"] for r in batch_rows]
+        for s, b in zip(sql_rows, batch_rows):
+            assert s["cooccur_count"] == b["cooccur_count"]
+            assert abs(s["expected_count"] - b["expected_count"]) < 1e-9
+            assert abs(s["npmi"] - b["npmi"]) < 1e-9
+            assert abs(s["p_value"] - b["p_value"]) < 1e-9
+
+
+class TestSegregationIsPureSubtraction:
+    """The segregation filter only removes pairs — it never changes
+    statistics for surviving pairs or adds new ones."""
+
+    def test_surviving_pairs_unchanged(self, sidecar_env, tmp_path):
+        """Pairs that survive the segregation filter have identical
+        npmi / p_value / cooccur_count as without the filter."""
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_synthetic_segregation_scope(conn)
+
+            _recompute_scope_pairs(
+                conn, sid, min_npmi=0.0, filter_comp_segregation=True,
+            )
+            rows_on = conn.execute(
+                """
+                SELECT ka.kw AS kw_a, kb.kw AS kw_b,
+                       cp.cooccur_count, cp.expected_count, cp.npmi, cp.p_value
+                FROM complementary_pairs cp
+                JOIN keywords ka ON ka.id = cp.kw_a_id
+                JOIN keywords kb ON kb.id = cp.kw_b_id
+                WHERE cp.scope_id = ?
+                ORDER BY kw_a, kw_b
+                """,
+                (sid,),
+            ).fetchall()
+            assert rows_on, "expected surviving pairs to make this test meaningful"
+
+            _recompute_scope_pairs(
+                conn, sid, min_npmi=0.0, filter_comp_segregation=False,
+            )
+
+            for r_on in rows_on:
+                row_off = conn.execute(
+                    """
+                    SELECT cp.cooccur_count, cp.expected_count, cp.npmi, cp.p_value
+                    FROM complementary_pairs cp
+                    JOIN keywords ka ON ka.id = cp.kw_a_id
+                    JOIN keywords kb ON kb.id = cp.kw_b_id
+                    WHERE cp.scope_id = ?
+                      AND ka.kw = ? AND kb.kw = ?
+                    """,
+                    (sid, r_on["kw_a"], r_on["kw_b"]),
+                ).fetchone()
+                assert row_off is not None, (
+                    f"Pair {r_on['kw_a']}↔{r_on['kw_b']} present in filtered "
+                    "but missing from unfiltered (violates pure-subtraction)"
+                )
+                assert r_on["cooccur_count"] == row_off["cooccur_count"]
+                assert abs(r_on["expected_count"] - row_off["expected_count"]) < 1e-9
+                assert abs(r_on["npmi"] - row_off["npmi"]) < 1e-9
+                assert abs(r_on["p_value"] - row_off["p_value"]) < 1e-9
+        finally:
+            conn.close()
+
+
+# ======================================================================
+# 8. Batch fallback path (_step4_batch) honours both gates
+# ======================================================================
+
+class TestBatchFallbackFilters:
+    """The non-SQL fallback (_step4_batch) applies the same stopword and
+    segregation gates as the SQL backend (_step4_sql)."""
+
+    def test_batch_path_stopword_filter(self, sidecar_env, tmp_path, monkeypatch):
+        import grga.graph.build as build_mod
+        from grga.graph.build import _recompute_scope_pairs, _INDEX_STOPWORDS
+
+        monkeypatch.setattr(build_mod, "_sqlite_has_ln", lambda conn: False)
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_synthetic_segregation_scope(conn, "batch-stop")
+            interner = IdInterner(conn)
+
+            assert "也" in _INDEX_STOPWORDS
+            kw_ye = interner.kw_id("也")
+            kw_shiqiang = interner.kw_id_ro("史强")
+            assert kw_shiqiang is not None
+
+            conn.execute(
+                "INSERT OR REPLACE INTO keyword_stats "
+                "(scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+                "VALUES (?, ?, 400, 50, 800, '2026-01-01T00:00:00Z')",
+                (sid, kw_ye),
+            )
+            a, b = sorted((kw_shiqiang, kw_ye))
+            conn.execute(
+                "INSERT OR REPLACE INTO keyword_pairs "
+                "(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+                "VALUES (?, ?, ?, 'chunk_cooccur', 5, -0.5, '2026-01-01T00:00:00Z')",
+                (sid, a, b),
+            )
+            conn.commit()
+
+            _recompute_scope_pairs(
+                conn, sid, min_npmi=0.2, filter_comp_segregation=True,
+            )
+            row = conn.execute(
+                """
+                SELECT 1 FROM complementary_pairs cp
+                JOIN keywords ka ON ka.id = cp.kw_a_id
+                JOIN keywords kb ON kb.id = cp.kw_b_id
+                WHERE cp.scope_id = ?
+                  AND (
+                    (ka.kw = '史强' AND kb.kw = '也')
+                    OR (ka.kw = '也' AND kb.kw = '史强')
+                  )
+                """,
+                (sid,),
+            ).fetchone()
+            assert row is None, (
+                "Batch path: stopword pair 史强↔也 should be filtered"
+            )
+        finally:
+            conn.close()
+
+    def test_batch_path_segregation_filter(self, sidecar_env, tmp_path, monkeypatch):
+        import grga.graph.build as build_mod
+        from grga.graph.build import _recompute_scope_pairs
+
+        monkeypatch.setattr(build_mod, "_sqlite_has_ln", lambda conn: False)
+
+        def _build(filter_on: bool):
+            db = tmp_path / ("on.db" if filter_on else "off.db")
+            conn = connect(db)
+            ensure_schema(conn)
+            sid = _seed_synthetic_segregation_scope(conn, "batch-seg")
+            _recompute_scope_pairs(
+                conn, sid, min_npmi=0.2, filter_comp_segregation=filter_on,
+            )
+            conn.commit()
+            return conn, sid
+
+        def _present(conn, sid, a_kw, b_kw):
+            return conn.execute(
+                """
+                SELECT 1 FROM complementary_pairs cp
+                JOIN keywords ka ON ka.id = cp.kw_a_id
+                JOIN keywords kb ON kb.id = cp.kw_b_id
+                WHERE cp.scope_id = ?
+                  AND (
+                    (ka.kw = ? AND kb.kw = ?)
+                    OR (ka.kw = ? AND kb.kw = ?)
+                  )
+                """,
+                (sid, a_kw, b_kw, b_kw, a_kw),
+            ).fetchone() is not None
+
+        conn_on, sid_on = _build(True)
+        conn_off, sid_off = _build(False)
+        try:
+            assert not _present(conn_on, sid_on, "史强", "设计"), (
+                "Batch path: segregation pair 史强↔设计 should be filtered"
+            )
+            assert _present(conn_on, sid_on, "史强", "大史"), (
+                "Batch path: same-universe pair 史强↔大史 should survive"
+            )
+            assert _present(conn_off, sid_off, "史强", "设计"), (
+                "Batch path: with filter off, 史强↔设计 should be present"
+            )
+        finally:
+            conn_on.close()
+            conn_off.close()
+
+
+# ======================================================================
+# 9. Iteration 2 — c/E strength gate + complementary-only stopwords
+# ======================================================================
+
+
+def _seed_chunk_scope(
+    conn,
+    *,
+    scope_name: str,
+    stats,
+    pairs,
+    n_chunks: int = 2000,
+    n_docs: int = 0,
+) -> int:
+    """Seed chunk-level stats + pair rows for gate tests.
+
+    No ``keyword_docs`` rows are written, so the segregation gate is
+    skipped and only the stopword / strength gates are exercised.
+    ``expected_count`` is ``chunk_df_a * chunk_df_b / n_chunks``, so the
+    caller picks ``co`` to hit a target c/E.
+    """
+    interner = IdInterner(conn)
+    sid = interner.scope_id(scope_name)
+    conn.execute(
+        "INSERT OR REPLACE INTO scope_stats "
+        "(scope_id, n_chunks, n_docs, vocab_size, updated_at) "
+        "VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z')",
+        (sid, n_chunks, n_docs, len(stats)),
+    )
+    kw = interner.kw_ids([name for name, _ in stats])
+    conn.executemany(
+        "INSERT OR REPLACE INTO keyword_stats "
+        "(scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+        "VALUES (?, ?, ?, 0, ?, '2026-01-01T00:00:00Z')",
+        [(sid, kw[name], df, df * 2) for name, df in stats],
+    )
+    for a_kw, b_kw, co in pairs:
+        a, b = sorted((kw[a_kw], kw[b_kw]))
+        conn.execute(
+            "INSERT OR REPLACE INTO keyword_pairs "
+            "(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+            "VALUES (?, ?, ?, 'chunk_cooccur', ?, -0.5, '2026-01-01T00:00:00Z')",
+            (sid, a, b, co),
+        )
+    conn.commit()
+    return sid
+
+
+def _comp_pair_present(conn, sid: int, a_kw: str, b_kw: str) -> bool:
+    return conn.execute(
+        """
+        SELECT 1 FROM complementary_pairs cp
+        JOIN keywords ka ON ka.id = cp.kw_a_id
+        JOIN keywords kb ON kb.id = cp.kw_b_id
+        WHERE cp.scope_id = ?
+          AND (
+            (ka.kw = ? AND kb.kw = ?)
+            OR (ka.kw = ? AND kb.kw = ?)
+          )
+        """,
+        (sid, a_kw, b_kw, b_kw, a_kw),
+    ).fetchone() is not None
+
+
+def _keyword_pair_count(conn, sid: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM keyword_pairs "
+        "WHERE scope_id = ? AND source = 'chunk_cooccur'",
+        (sid,),
+    ).fetchone()[0]
+
+
+class TestStrengthGateUnit:
+    """Unit tests for _passes_strength_gate (pure math, no DB)."""
+
+    def test_boundary_is_exclusive(self):
+        from grga.graph.build import (
+            COMPLEMENTARY_MAX_C_OVER_E,
+            _passes_strength_gate,
+        )
+        # Exactly at the threshold does NOT pass (strict <).
+        assert _passes_strength_gate(
+            COMPLEMENTARY_MAX_C_OVER_E * 10, 10.0,
+        ) is False
+        # Just below passes.
+        assert _passes_strength_gate(
+            COMPLEMENTARY_MAX_C_OVER_E * 10 - 1e-9, 10.0,
+        ) is True
+
+    def test_non_positive_expected_never_passes(self):
+        from grga.graph.build import _passes_strength_gate
+        assert _passes_strength_gate(0, 0.0) is False
+        assert _passes_strength_gate(5, -1.0) is False
+
+
+class TestComplementaryStrengthGate:
+    """Iteration 2.1: c/E strength gate (pure subtraction, always on)."""
+
+    def test_weak_pair_filtered_strong_pair_kept(self, sidecar_env, tmp_path):
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            # 甲-乙: expected = 200*200/2000 = 20, co = 6 → c/E = 0.30
+            # 丙-丁: expected = 20, co = 4 → c/E = 0.20
+            sid = _seed_chunk_scope(
+                conn,
+                scope_name="strength",
+                stats=[("甲", 200), ("乙", 200), ("丙", 200), ("丁", 200)],
+                pairs=[("甲", "乙", 6), ("丙", "丁", 4)],
+            )
+            _recompute_scope_pairs(conn, sid, min_npmi=0.0)
+
+            assert not _comp_pair_present(conn, sid, "甲", "乙"), (
+                "c/E=0.30 pair should be filtered by the strength gate"
+            )
+            assert _comp_pair_present(conn, sid, "丙", "丁"), (
+                "c/E=0.20 pair should survive the strength gate"
+            )
+        finally:
+            conn.close()
+
+    def test_strength_gate_leaves_keyword_pairs_untouched(
+        self, sidecar_env, tmp_path,
+    ):
+        """Pure subtraction: the gate must not delete / rewrite keyword_pairs."""
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_chunk_scope(
+                conn,
+                scope_name="strength-pure",
+                stats=[("甲", 200), ("乙", 200), ("丙", 200), ("丁", 200)],
+                pairs=[("甲", "乙", 6), ("丙", "丁", 4)],
+            )
+            _recompute_scope_pairs(conn, sid, min_npmi=0.0)
+
+            # Both pairs remain in keyword_pairs with their original counts,
+            # including the one the strength gate blocked from complementary.
+            rows = conn.execute(
+                """
+                SELECT ka.kw AS kw_a, kb.kw AS kw_b, kp.cooccur_count
+                FROM keyword_pairs kp
+                JOIN keywords ka ON ka.id = kp.kw_a_id
+                JOIN keywords kb ON kb.id = kp.kw_b_id
+                WHERE kp.scope_id = ? AND kp.source = 'chunk_cooccur'
+                """,
+                (sid,),
+            ).fetchall()
+            got = {(r["kw_a"], r["kw_b"]): r["cooccur_count"] for r in rows}
+            assert got == {("甲", "乙"): 6, ("丙", "丁"): 4}, got
+        finally:
+            conn.close()
+
+    def test_batch_backend_applies_strength_gate(
+        self, sidecar_env, tmp_path, monkeypatch,
+    ):
+        import grga.graph.build as build_mod
+        from grga.graph.build import _recompute_scope_pairs
+
+        monkeypatch.setattr(build_mod, "_sqlite_has_ln", lambda conn: False)
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_chunk_scope(
+                conn,
+                scope_name="strength-batch",
+                stats=[("甲", 200), ("乙", 200), ("丙", 200), ("丁", 200)],
+                pairs=[("甲", "乙", 6), ("丙", "丁", 4)],
+            )
+            # min_npmi > 0 puts both negative pairs on the drop path, which
+            # is the only path the batch backend scans for complementary
+            # candidates.
+            _recompute_scope_pairs(conn, sid, min_npmi=0.2)
+
+            assert not _comp_pair_present(conn, sid, "甲", "乙"), (
+                "Batch backend: c/E=0.30 pair should be filtered"
+            )
+            assert _comp_pair_present(conn, sid, "丙", "丁"), (
+                "Batch backend: c/E=0.20 pair should survive"
+            )
+            # Both pairs are below min_npmi, so keyword_pairs maintenance
+            # removes them identically — the strength gate only steers the
+            # complementary-pair decision.
+            assert _keyword_pair_count(conn, sid) == 0, (
+                "Batch backend: strength gate must not alter keyword_pairs"
+            )
+        finally:
+            conn.close()
+
+
+class TestComplementaryStopwords:
+    """Iteration 2.2: complementary-only narrative stopword set."""
+
+    def test_membership_and_disjointness(self):
+        from grga.graph.build import (
+            _COMPLEMENTARY_STOPWORDS,
+            _INDEX_STOPWORDS,
+        )
+        # Narrative pronouns / markers are covered.
+        for w in ("他", "他们", "第", "章", "顿时", "吗", "说道"):
+            assert w in _COMPLEMENTARY_STOPWORDS, w
+        # "他" is NOT in the main-index stopword set — this is the whole
+        # point of a complementary-only set (no tokenisation change).
+        assert "他" not in _INDEX_STOPWORDS
+
+    def test_narrative_stopword_pair_filtered(self, sidecar_env, tmp_path):
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            # c/E = 4/20 = 0.20 → would pass the strength gate, so only the
+            # narrative stopword gate can remove 史强↔他.
+            sid = _seed_chunk_scope(
+                conn,
+                scope_name="comp-stop",
+                stats=[("史强", 200), ("他", 200), ("大史", 200)],
+                pairs=[("史强", "他", 4), ("史强", "大史", 4)],
+            )
+            _recompute_scope_pairs(conn, sid, min_npmi=0.0)
+
+            assert not _comp_pair_present(conn, sid, "史强", "他"), (
+                "Narrative stopword 他 should be filtered at the "
+                "complementary entry point"
+            )
+            assert _comp_pair_present(conn, sid, "史强", "大史"), (
+                "Non-stopword control pair should survive"
+            )
+        finally:
+            conn.close()
+
+    def test_batch_backend_applies_complementary_stopwords(
+        self, sidecar_env, tmp_path, monkeypatch,
+    ):
+        import grga.graph.build as build_mod
+        from grga.graph.build import _recompute_scope_pairs
+
+        monkeypatch.setattr(build_mod, "_sqlite_has_ln", lambda conn: False)
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_chunk_scope(
+                conn,
+                scope_name="comp-stop-batch",
+                stats=[("史强", 200), ("他", 200), ("大史", 200)],
+                pairs=[("史强", "他", 4), ("史强", "大史", 4)],
+            )
+            _recompute_scope_pairs(conn, sid, min_npmi=0.2)
+
+            assert not _comp_pair_present(conn, sid, "史强", "他"), (
+                "Batch backend: narrative stopword 他 should be filtered"
+            )
+            assert _comp_pair_present(conn, sid, "史强", "大史"), (
+                "Batch backend: control pair should survive"
+            )
+        finally:
+            conn.close()

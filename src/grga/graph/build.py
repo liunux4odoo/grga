@@ -42,7 +42,9 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union,
+)
 
 from grga.file_read import (
     RGA_SUPPORTED_SUFFIXES,
@@ -137,6 +139,50 @@ _STOPWORDS = frozenset(
 # _derive_scope_stopword_candidates + _filter_chunk_kws_for_pairs 在
 # build 期语料自适应地决定，见 Pass 1.5 / Pass 3。
 _INDEX_STOPWORDS = _STOPWORDS | _CORE_STOP_BOUNDARIES
+
+# Complementary-pair noise filtering (plan-2026-09-12-complementary-noise-filtering).
+# Phase 1: global stopword gate — pairs touching an _INDEX_STOPWORDS member
+# are dropped before any significance testing.
+# Phase 2 (segregation): pairs whose negative npmi is driven mainly by
+# "file-type isolation" (two words live in different document genres) are
+# filtered out, keeping only true semantic-complementarity signals.
+COMP_SEGREGATION_NPMI_GAP = 0.1
+COMP_SEGREGATION_MIN_CO_DOC_RATIO = 0.1
+COMP_SEGREGATION_MIN_CO_DOC_FLOOR = 2
+
+# Iteration 2 (plan §迭代 2): strength gate. With large corpora, pairs whose
+# observed/expected co-occurrence ratio is only mildly below 1 still reach a
+# significant p-value via sample size alone; they are "statistically
+# significant weak negative correlation", not semantic complementarity. A
+# pair must satisfy cooccur_count / expected_count < this constant to be
+# written to ``complementary_pairs``. Pure subtraction, always on, no CLI
+# switch, and independent of ``--no-filter-comp-segregation``.
+COMPLEMENTARY_MAX_C_OVER_E = 0.25
+
+# Iteration 2: complementary-pair-only narrative stopwords. Unlike
+# ``_INDEX_STOPWORDS`` this set is NOT applied during tokenisation — the main
+# index and pair statistics keep collecting these words — it only blocks the
+# complementary extraction. It targets high-frequency, near-zero-content
+# fiction/narrative words (pronouns, chapter markers, discourse particles,
+# speech verbs) that the code/general-corpus-oriented ``_INDEX_STOPWORDS``
+# never covered. Kept separate so single-CJK-char scope-adaptive policy for
+# the main index is untouched.
+_COMPLEMENTARY_STOPWORDS = frozenset(
+    {
+        # 人称代词
+        "他", "他们", "她", "她们", "它", "它们",
+        "我", "你", "你们", "我们", "咱们", "自己", "本人",
+        # 疑问 / 语气助词
+        "吗", "呢", "吧", "啊", "哦", "嗯", "呀",
+        # 章节 / 量词标记
+        "第", "章", "回", "节", "卷", "篇",
+        # 叙事高频副词
+        "顿时", "忽然", "突然", "然后", "接着", "之后", "后来",
+        "这时", "此刻", "那时", "当时",
+        # 叙事高频动词（言说 / 视角）
+        "说道", "问道", "回答", "说", "道", "看", "见", "只见", "看来",
+    }
+)
 
 _MARKDOWN_SUFFIXES = {".md", ".markdown", ".mdown", ".mkd"}
 # Legacy alias: prior code used this local set both for the enumeration
@@ -1623,6 +1669,269 @@ def _hypergeom_lower_tail(k: int, N: int, K: int, n: int) -> float:
     return min(1.0, total)
 
 
+def _npmi_doc(co_doc: int, doc_df_a: int, doc_df_b: int, n_docs: int) -> Optional[float]:
+    """Document-level npmi.
+
+    Thin delegate to :func:`_npmi` so both granularities share identical
+    edge-case semantics — gate B compares the two values, so any drift in
+    one would silently change which pairs are filtered.
+    """
+    return _npmi(co_doc, doc_df_a, doc_df_b, n_docs)
+
+
+def _kw_ids_for(conn, words: FrozenSet[str]) -> FrozenSet[int]:
+    """Map a set of keyword texts to the set of matching keyword ids."""
+    if not words:
+        return frozenset()
+    ph = ",".join("?" for _ in words)
+    rows = conn.execute(
+        f"SELECT id FROM keywords WHERE kw IN ({ph})",
+        tuple(words),
+    ).fetchall()
+    return frozenset(int(r[0]) for r in rows)
+
+
+def _get_complementary_stopword_kw_ids(conn) -> FrozenSet[int]:
+    """Keyword ids blocked at the complementary-pair entry point.
+
+    Union of :data:`_INDEX_STOPWORDS` (phase-1 gate) and
+    :data:`_COMPLEMENTARY_STOPWORDS` (iteration-2 narrative stopwords).
+    The complementary extractor is the only consumer: the narrative set
+    must not leak into main-index tokenisation / pair statistics.
+    """
+    return _kw_ids_for(conn, _INDEX_STOPWORDS | _COMPLEMENTARY_STOPWORDS)
+
+
+def _passes_strength_gate(cooccur_count: float, expected_count: float) -> bool:
+    """Iteration-2 c/E strength gate (plan §迭代 2).
+
+    A pair is only complementary enough when its observed/expected
+    co-occurrence ratio is *below* :data:`COMPLEMENTARY_MAX_C_OVER_E`.
+    In a large corpus a mildly-below-random pair still reaches a
+    significant p-value through sample size alone, so the p-value gate
+    cannot tell weak negative correlation from semantic complementarity.
+    Pure subtraction and independent of the segregation switch. Shared by
+    both backends so the two can never drift.
+    """
+    if expected_count <= 0:
+        return False
+    return cooccur_count / expected_count < COMPLEMENTARY_MAX_C_OVER_E
+
+
+def _evaluate_complementary_candidate(
+    *,
+    cooccur_count: int,
+    df_a: int,
+    df_b: int,
+    npmi: Optional[float],
+    n_chunks: int,
+) -> Optional[Tuple[float, float]]:
+    """Shared per-candidate gate for both complementary backends.
+
+    Returns ``(npmi, p_value)`` when the pair passes the glued,
+    negative-npmi, c/E strength and significance gates, else ``None``.
+    Callers keep stopword filtering and their own row-streaming control
+    flow; everything that decides *which statistics get stored* lives
+    here so the SQL and batch backends cannot drift.
+    """
+    if n_chunks <= 0 or df_a <= 0 or df_b <= 0:
+        return None
+    if npmi is None or npmi >= 0.0:
+        return None
+    if df_a == df_b == cooccur_count:
+        return None
+    if not _passes_strength_gate(cooccur_count, df_a * df_b / n_chunks):
+        return None
+    p_val = _hypergeom_lower_tail(cooccur_count, n_chunks, df_a, df_b)
+    if p_val >= BUILD_COMPLEMENTARY_MAX_P:
+        return None
+    return (float(npmi), float(p_val))
+
+
+def _complementary_rows(
+    *,
+    scope_id: int,
+    candidates: Sequence[Tuple[int, int, float, float, float]],
+    chunk_df: Dict[int, int],
+    n_chunks: int,
+    now: str,
+) -> List[Tuple[int, int, int, float, float, float, float, str]]:
+    """Build the ``complementary_pairs`` INSERT tuples for survivors.
+
+    Shared by both backends so the stored columns (including the
+    recomputed ``expected_count``) are assembled identically.
+    """
+    return [
+        (
+            scope_id, a, b, float(co),
+            float(chunk_df.get(a, 0) * chunk_df.get(b, 0) / n_chunks),
+            float(npmi_val), float(p_val), now,
+        )
+        for a, b, co, npmi_val, p_val in candidates
+    ]
+
+
+def _has_doc_evidence(conn, scope_id: int) -> bool:
+    """True when the scope has doc-level evidence (``keyword_docs``).
+
+    The evidence layer is machine-local and is intentionally wiped on a
+    knowledge-pack transfer or by ``grga index forget --all``. When it is
+    absent, document-level co-occurrence is unknowable and the
+    segregation gate must be skipped (never used to filter everything
+    out). Knowledge-only scopes (post-``import``) hit this path.
+    """
+    return conn.execute(
+        "SELECT 1 FROM keyword_docs WHERE scope_id = ? LIMIT 1",
+        (scope_id,),
+    ).fetchone() is not None
+
+
+def _compute_co_doc_batch(
+    conn,
+    scope_id: int,
+    pairs: Sequence[Tuple[int, int]],
+) -> Dict[Tuple[int, int], int]:
+    """Compute document-level co-occurrence for a batch of keyword pairs.
+
+    Uses a temp-table + self-join on ``keyword_docs``. Returns a dict
+    ``{(a, b): co_doc}`` keyed by the *normalised* pair (smaller id
+    first) because ``keyword_docs`` is undirected. Pairs with zero
+    co-doc are not included in the result.
+    """
+    if not pairs:
+        return {}
+    conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _comp_pair_probe ("
+        "  kw_a_id INTEGER NOT NULL,"
+        "  kw_b_id INTEGER NOT NULL"
+        ")"
+    )
+    conn.execute("DELETE FROM _comp_pair_probe")
+    conn.executemany(
+        "INSERT INTO _comp_pair_probe (kw_a_id, kw_b_id) VALUES (?, ?)",
+        [(int(a), int(b)) for a, b in pairs],
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS _idx_comp_probe_a "
+        "ON _comp_pair_probe (kw_a_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS _idx_comp_probe_b "
+        "ON _comp_pair_probe (kw_b_id)"
+    )
+    rows = conn.execute(
+        """
+        SELECT p.kw_a_id, p.kw_b_id, COUNT(*) AS co_doc
+        FROM _comp_pair_probe p
+        CROSS JOIN keyword_docs ka
+          ON ka.scope_id = ? AND ka.kw_id = p.kw_a_id
+        CROSS JOIN keyword_docs kb
+          ON kb.scope_id = ? AND kb.kw_id = p.kw_b_id
+         AND kb.doc_id = ka.doc_id
+        GROUP BY p.kw_a_id, p.kw_b_id
+        """,
+        (scope_id, scope_id),
+    ).fetchall()
+    result: Dict[Tuple[int, int], int] = {}
+    for r in rows:
+        a, b = int(r[0]), int(r[1])
+        key = (a, b) if a < b else (b, a)
+        result[key] = int(r[2])
+    return result
+
+
+def _is_segregation_pair(
+    *,
+    co_doc: int,
+    doc_df_a: int,
+    doc_df_b: int,
+    n_docs: int,
+    npmi_chunk: float,
+) -> bool:
+    """Return True if the pair's negative npmi is driven by document-type
+    segregation rather than semantic complementarity.
+
+    Two-gate check (plan-2026-09-12 §阶段 2):
+    - Gate A (weak): co_doc must be at least a small fraction of the
+      smaller doc_df, with a hard floor (capped at 3) — purely an
+      existence-of-overlap sanity check, not a quality gate on its own.
+    - Gate B (strong): if doc-level npmi is significantly *lower*
+      (more negative) than chunk-level npmi, the negative signal is
+      dominated by file-type separation → drop.
+
+    For very small document counts (≤2), segregation detection is
+    statistically meaningless; we short-circuit to False (not
+    segregation) so all complementary pairs survive.
+    """
+    if n_docs <= 0 or doc_df_a <= 0 or doc_df_b <= 0:
+        return True
+    if n_docs <= 2:
+        return False
+    min_df = min(doc_df_a, doc_df_b)
+    min_co_doc = max(
+        COMP_SEGREGATION_MIN_CO_DOC_FLOOR,
+        int(math.floor(math.sqrt(min_df) * COMP_SEGREGATION_MIN_CO_DOC_RATIO)),
+    )
+    min_co_doc = min(3, min_co_doc)
+    if co_doc < min_co_doc:
+        return True
+    npmi_doc = _npmi_doc(co_doc, doc_df_a, doc_df_b, n_docs)
+    if npmi_doc is None:
+        return True
+    if npmi_doc < npmi_chunk - COMP_SEGREGATION_NPMI_GAP:
+        return True
+    return False
+
+
+def _filter_segregation_candidates(
+    conn,
+    *,
+    scope_id: int,
+    n_docs: int,
+    candidates: Sequence[Tuple[int, int, float, float, float]],
+    doc_df: Optional[Dict[int, int]] = None,
+) -> List[Tuple[int, int, float, float, float]]:
+    """Drop complementary candidates driven by file-type segregation.
+
+    Shared by both complementary backends (SQL and batch) so the gate can
+    never drift between them. ``candidates`` are 5-tuples
+    ``(kw_a_id, kw_b_id, cooccur, npmi_chunk, p_value)``; survivors are
+    returned in the same shape with identical statistics (pure
+    subtraction). Lazily computes document-level co-occurrence only for
+    the candidates handed in.
+
+    ``doc_df`` is the scope's ``{kw_id: doc_df}`` map. Callers that invoke
+    this per pagination batch should load it once and pass it in, so the
+    full ``keyword_stats`` scan is not repeated per batch; when omitted it
+    is read here (direct/test callers).
+    """
+    if not candidates:
+        return []
+    if doc_df is None:
+        doc_df = {
+            int(r[0]): int(r[1]) for r in conn.execute(
+                "SELECT kw_id, doc_df FROM keyword_stats WHERE scope_id = ?",
+                (scope_id,),
+            )
+        }
+    co_doc_map = _compute_co_doc_batch(
+        conn, scope_id, [(a, b) for a, b, *_ in candidates],
+    )
+    survivors: List[Tuple[int, int, float, float, float]] = []
+    for a, b, co, npmi_chunk, p_val in candidates:
+        key = (a, b) if a < b else (b, a)
+        if _is_segregation_pair(
+            co_doc=co_doc_map.get(key, 0),
+            doc_df_a=doc_df.get(a, 0),
+            doc_df_b=doc_df.get(b, 0),
+            n_docs=n_docs,
+            npmi_chunk=npmi_chunk,
+        ):
+            continue
+        survivors.append((a, b, co, npmi_chunk, p_val))
+    return survivors
+
+
 def _load_structure(path: Path):
     """Return a StructureDoc or None (Markdown only, best-effort)."""
     suffix = path.suffix.lower()
@@ -2529,6 +2838,7 @@ def build_graph_index(
     keep_dict: bool = False,
     keep_pairs: bool = False,
     recompute_pairs: bool = False,
+    filter_comp_segregation: bool = True,
 ) -> BuildStats:
     """Build the v10 knowledge asset + evidence layers for ``scope``.
 
@@ -3542,6 +3852,7 @@ def build_graph_index(
                 else int(min_pair_count)
             )
             _emit("pairs_start", candidate_pairs=0, surviving_pairs=0)
+            stopword_kw_ids = _get_complementary_stopword_kw_ids(conn)
             if batch_chunks > 0:
                 # Batched path: per-batch self-join already ran. Apply
                 # global floor DELETE + npmi recompute (steps 3-4 of
@@ -3554,13 +3865,17 @@ def build_graph_index(
                 if _sqlite_has_ln(conn):
                     _step4_sql(
                         conn, scope_id=scope_id, min_npmi=float(min_npmi),
-                        n_chunks=n_chunks, now=now, on_event=on_event,
+                        n_chunks=n_chunks, n_docs=n_docs, now=now, on_event=on_event,
+                        stopword_kw_ids=stopword_kw_ids,
+                        filter_segregation=filter_comp_segregation,
                     )
                 else:
                     _step4_batch(
                         conn, scope_id=scope_id, min_npmi=float(min_npmi),
-                        n_chunks=n_chunks, now=now, on_event=on_event,
+                        n_chunks=n_chunks, n_docs=n_docs, now=now, on_event=on_event,
                         batch_size=_NPMI_BATCH_SIZE,
+                        stopword_kw_ids=stopword_kw_ids,
+                        filter_segregation=filter_comp_segregation,
                     )
                 surviving = int(conn.execute(
                     "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
@@ -3574,8 +3889,11 @@ def build_graph_index(
                     min_pair_count=effective_min_pair_count,
                     min_npmi=float(min_npmi),
                     n_chunks=n_chunks,
+                    n_docs=n_docs,
                     now=now,
                     on_event=on_event,
+                    stopword_kw_ids=stopword_kw_ids,
+                    filter_segregation=filter_comp_segregation,
                 )
             stats.pairs_written = surviving
         else:
@@ -3604,6 +3922,7 @@ def build_graph_index(
         if keep_pairs and recompute_pairs:
             _recompute_scope_pairs(
                 conn, scope_id, min_npmi=float(min_npmi),
+                filter_comp_segregation=filter_comp_segregation,
             )
             stats.pairs_written = int(conn.execute(
                 "SELECT COUNT(*) FROM keyword_pairs "
@@ -3756,8 +4075,11 @@ def _finalize_pairs_from_temp(
     min_pair_count: int,
     min_npmi: float,
     n_chunks: int,
+    n_docs: int,
     now: str,
     on_event: Optional[Callable[[dict], None]] = None,
+    stopword_kw_ids: FrozenSet[int],
+    filter_segregation: bool,
 ) -> int:
     """Aggregate ``_build_chunk_kws`` into ``keyword_pairs`` and refresh npmi.
 
@@ -3862,13 +4184,17 @@ def _finalize_pairs_from_temp(
     if _sqlite_has_ln(conn):
         _step4_sql(
             conn, scope_id=scope_id, min_npmi=min_npmi,
-            n_chunks=n_chunks, now=now, on_event=on_event,
+            n_chunks=n_chunks, n_docs=n_docs, now=now, on_event=on_event,
+            stopword_kw_ids=stopword_kw_ids,
+            filter_segregation=filter_segregation,
         )
     else:
         _step4_batch(
             conn, scope_id=scope_id, min_npmi=min_npmi,
-            n_chunks=n_chunks, now=now, on_event=on_event,
+            n_chunks=n_chunks, n_docs=n_docs, now=now, on_event=on_event,
             batch_size=_NPMI_BATCH_SIZE,
+            stopword_kw_ids=stopword_kw_ids,
+            filter_segregation=filter_segregation,
         )
 
     return int(conn.execute(
@@ -3925,8 +4251,11 @@ def _extract_complementary_sql(
     *,
     scope_id: int,
     n_chunks: int,
+    n_docs: int,
     batch_size: int,
     now: str,
+    stopword_kw_ids: FrozenSet[int],
+    filter_segregation: bool,
 ) -> None:
     """Move significantly complementary (negative-npmi) pairs into
     ``complementary_pairs`` before they are deleted from ``keyword_pairs``.
@@ -3941,21 +4270,45 @@ def _extract_complementary_sql(
     are stored.  Glued pairs (df_a == df_b == cooccur_count) are
     skipped — they are trivially correlated, not complementary.
 
+    Noise filters applied on the way to ``complementary_pairs``, all pure
+    subtraction (surviving pairs keep identical statistics):
+
+    * **Stopword gate** (phase 1 + iteration 2, always on), before the
+      p-value test: pairs where either keyword is a member of
+      ``_INDEX_STOPWORDS`` or the complementary-only
+      ``_COMPLEMENTARY_STOPWORDS`` are dropped.
+    * **Strength gate** (iteration 2, always on), before the p-value
+      test: pairs whose c/E is not below ``COMPLEMENTARY_MAX_C_OVER_E``
+      are dropped.
+    * **Segregation gate** (phase 2, ``filter_segregation=True``), after
+      the p-value test: pairs whose negative npmi is driven mainly by
+      file-type isolation (different document genres) rather than
+      semantic complementarity are dropped.
+
     The batch size bounds peak Python heap the same way ``_step4_batch``
     does.
     """
     if n_chunks <= 0:
         return
-    # Pull chunk_df for all keywords in this scope once.  The dict is
-    # reused across batches.  For scopes with a huge vocabulary this
-    # could be large, but ``_step4_batch`` already does the same thing
-    # so this is no additional memory vs. the fallback path.
     chunk_df: Dict[int, int] = {
         int(r[0]): int(r[1]) for r in conn.execute(
             "SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?",
             (scope_id,),
         )
     }
+
+    use_segregation = filter_segregation and n_docs > 0 and _has_doc_evidence(
+        conn, scope_id
+    )
+    # Loaded once (not per batch) — see _filter_segregation_candidates.
+    doc_df: Optional[Dict[int, int]] = None
+    if use_segregation:
+        doc_df = {
+            int(r[0]): int(r[1]) for r in conn.execute(
+                "SELECT kw_id, doc_df FROM keyword_stats WHERE scope_id = ?",
+                (scope_id,),
+            )
+        }
 
     last_a = -1
     last_b = -1
@@ -3975,48 +4328,43 @@ def _extract_complementary_sql(
         if not rows:
             break
 
-        comp_rows: List[Tuple[int, int, int, float, float, float, str]] = []
+        candidate_pairs: List[Tuple[int, int, float, float, float]] = []
         for row in rows:
             a, b, co = int(row[0]), int(row[1]), float(row[2])
             npmi_val = float(row[3]) if row[3] is not None else None
-            df_a = chunk_df.get(a, 0)
-            df_b = chunk_df.get(b, 0)
             co_int = int(co)
-            # Gate 1 (glued): skip — same rationale as _step4_batch.
-            glued = (
-                df_a > 0 and df_b > 0
-                and df_a == df_b == co_int
+            # Phase 1: stopword gate — either side is a stopword → skip
+            if stopword_kw_ids and (a in stopword_kw_ids or b in stopword_kw_ids):
+                last_a, last_b = a, b
+                continue
+            evaluated = _evaluate_complementary_candidate(
+                cooccur_count=co_int,
+                df_a=chunk_df.get(a, 0),
+                df_b=chunk_df.get(b, 0),
+                npmi=npmi_val,
+                n_chunks=n_chunks,
             )
-            if (
-                npmi_val is not None
-                and npmi_val < 0.0
-                and not glued
-                and df_a > 0
-                and df_b > 0
-            ):
-                expected = df_a * df_b / n_chunks
-                if expected > 0:
-                    p_val = _hypergeom_lower_tail(
-                        co_int, n_chunks, df_a, df_b
-                    )
-                    if p_val < BUILD_COMPLEMENTARY_MAX_P:
-                        comp_rows.append((
-                            scope_id, a, b,
-                            float(co),
-                            float(expected),
-                            float(npmi_val),
-                            float(p_val),
-                            now,
-                        ))
+            if evaluated is not None:
+                npmi_out, p_val = evaluated
+                candidate_pairs.append((a, b, co, npmi_out, p_val))
             last_a, last_b = a, b
 
-        if comp_rows:
+        if use_segregation and candidate_pairs:
+            candidate_pairs = _filter_segregation_candidates(
+                conn, scope_id=scope_id, n_docs=n_docs,
+                candidates=candidate_pairs, doc_df=doc_df,
+            )
+
+        if candidate_pairs:
             conn.executemany(
                 "INSERT OR REPLACE INTO complementary_pairs "
                 "(scope_id, kw_a_id, kw_b_id, cooccur_count, "
                 " expected_count, npmi, p_value, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                comp_rows,
+                _complementary_rows(
+                    scope_id=scope_id, candidates=candidate_pairs,
+                    chunk_df=chunk_df, n_chunks=n_chunks, now=now,
+                ),
             )
 
 
@@ -4026,8 +4374,11 @@ def _step4_sql(
     scope_id: int,
     min_npmi: float,
     n_chunks: int,
+    n_docs: int,
     now: str,
     on_event: Optional[Callable[[dict], None]],
+    stopword_kw_ids: FrozenSet[int],
+    filter_segregation: bool,
 ) -> None:
     """Recompute npmi via one UPDATE + delete degenerates via one DELETE.
 
@@ -4110,7 +4461,10 @@ def _step4_sql(
     # are simply deleted with the rest of the below-threshold rows.
     _extract_complementary_sql(
         conn, scope_id=scope_id, n_chunks=n_chunks,
+        n_docs=n_docs,
         batch_size=_NPMI_BATCH_SIZE, now=now,
+        stopword_kw_ids=stopword_kw_ids,
+        filter_segregation=filter_segregation,
     )
     conn.execute(
         """
@@ -4153,9 +4507,12 @@ def _step4_batch(
     scope_id: int,
     min_npmi: float,
     n_chunks: int,
+    n_docs: int,
     now: str,
     on_event: Optional[Callable[[dict], None]],
     batch_size: int,
+    stopword_kw_ids: FrozenSet[int],
+    filter_segregation: bool,
 ) -> None:
     """Fallback: paginate through surviving pairs in ``batch_size`` chunks.
 
@@ -4182,6 +4539,19 @@ def _step4_batch(
         )
     }
 
+    use_segregation = filter_segregation and n_docs > 0 and _has_doc_evidence(
+        conn, scope_id
+    )
+    # Loaded once (not per batch) — see _filter_segregation_candidates.
+    doc_df: Optional[Dict[int, int]] = None
+    if use_segregation:
+        doc_df = {
+            int(r[0]): int(r[1]) for r in conn.execute(
+                "SELECT kw_id, doc_df FROM keyword_stats WHERE scope_id = ?",
+                (scope_id,),
+            )
+        }
+
     total = int(conn.execute(
         "SELECT COUNT(*) FROM keyword_pairs WHERE scope_id = ? AND source = ?",
         (scope_id, CHUNK_COOCCUR_SOURCE),
@@ -4193,21 +4563,11 @@ def _step4_batch(
     last_b = -1
 
     # Rebuild complementary_pairs for this scope from scratch.
-    # Same rationale as the SQL backend: pairs can transition between
-    # complementary and positive across incremental builds, so we clear
-    # first and re-populate.
     conn.execute(
         "DELETE FROM complementary_pairs WHERE scope_id = ?",
         (scope_id,),
     )
     while True:
-        # Row-value tuple compare is index-aware since SQLite 3.15 (2016):
-        # ``(kw_a_id, kw_b_id) > (?, ?)`` becomes a true PK-range seek. The
-        # OR-expanded form (``kw_a_id > ? OR (kw_a_id = ? AND kw_b_id > ?)``)
-        # does **not** — the planner leaves it as a filter after
-        # ``PRIMARY KEY (scope_id=?)``, so every batch re-scans the whole
-        # scope, giving O(N²/batch_size) total cost that defeats the OOM
-        # bound the fallback exists to enforce.
         rows = conn.execute(
             """
             SELECT kw_a_id, kw_b_id, cooccur_count
@@ -4224,52 +4584,48 @@ def _step4_batch(
 
         updates: List[Tuple[float, int, int, int]] = []
         drops: List[Tuple[int, int, int]] = []
-        comp_rows: List[Tuple[int, int, int, float, float, float, str]] = []
+        comp_candidates: List[Tuple[int, int, int, float, float]] = []
         for row in rows:
             a, b, co = int(row[0]), int(row[1]), int(row[2])
             df_a = chunk_df.get(a, 0)
             df_b = chunk_df.get(b, 0)
             npmi = _npmi(co, df_a, df_b, n_chunks)
-            # Gate 1 (glued): int-strict three-way equality; see mainline
-            # comment in the pre-refactor loop for the incremental-mode
-            # rationale (must not confuse legitimate one-way attachments
-            # with the true glued artefact).
             glued = df_a > 0 and df_b > 0 and df_a == df_b == co
             if npmi is None or glued or (min_npmi > 0.0 and npmi < min_npmi):
                 drops.append((scope_id, a, b))
                 # Complementary-pair gate: only for pairs that have
-                # negative npmi (truly anti-co-occurring) and that are
-                # being dropped by the positive npmi filter.  Glued pairs
-                # are skipped — they are trivially correlated, not
-                # complementary.
-                if (
-                    npmi is not None
-                    and npmi < 0.0
-                    and not glued
-                    and n_chunks > 0
-                    and df_a > 0
-                    and df_b > 0
-                ):
-                    expected = df_a * df_b / n_chunks
-                    if expected > 0:
-                        p_val = _hypergeom_lower_tail(
-                            co, n_chunks, df_a, df_b
-                        )
-                        if p_val < BUILD_COMPLEMENTARY_MAX_P:
-                            comp_rows.append((
-                                scope_id, a, b,
-                                float(co),
-                                float(expected),
-                                float(npmi),
-                                float(p_val),
-                                now,
-                            ))
+                # negative npmi and that are being dropped by the positive
+                # npmi filter.
+                if stopword_kw_ids and (a in stopword_kw_ids or b in stopword_kw_ids):
+                    last_a, last_b = a, b
+                    processed += 1
+                    if processed == total or processed % step_emit == 0:
+                        _emit("pairs_advance", current=processed, total=total)
+                    continue
+                evaluated = _evaluate_complementary_candidate(
+                    cooccur_count=co, df_a=df_a, df_b=df_b,
+                    npmi=npmi, n_chunks=n_chunks,
+                )
+                if evaluated is not None:
+                    npmi_out, p_val = evaluated
+                    comp_candidates.append((a, b, co, npmi_out, p_val))
             else:
                 updates.append((float(npmi), scope_id, a, b))
             last_a, last_b = a, b
             processed += 1
             if processed == total or processed % step_emit == 0:
                 _emit("pairs_advance", current=processed, total=total)
+
+        if use_segregation and comp_candidates:
+            comp_candidates = _filter_segregation_candidates(
+                conn, scope_id=scope_id, n_docs=n_docs,
+                candidates=comp_candidates, doc_df=doc_df,
+            )
+
+        comp_rows = _complementary_rows(
+            scope_id=scope_id, candidates=comp_candidates,
+            chunk_df=chunk_df, n_chunks=n_chunks, now=now,
+        )
 
         if drops:
             conn.executemany(
@@ -4342,6 +4698,7 @@ def _recompute_scope_pairs(
     scope_id: int,
     *,
     min_npmi: float = BUILD_MIN_NPMI,
+    filter_comp_segregation: bool = True,
 ) -> None:
     """Recompute ``npmi`` (and complementary pairs) for all
     ``chunk_cooccur`` pairs in ``scope_id`` using the current
@@ -4357,6 +4714,10 @@ def _recompute_scope_pairs(
         "SELECT COALESCE(n_chunks, 0) FROM scope_stats WHERE scope_id = ?",
         (scope_id,),
     ).fetchone()[0])
+    n_docs = int(conn.execute(
+        "SELECT COALESCE(n_docs, 0) FROM scope_stats WHERE scope_id = ?",
+        (scope_id,),
+    ).fetchone()[0])
     if n_chunks <= 0:
         conn.execute(
             "UPDATE keyword_pairs SET npmi = NULL "
@@ -4368,14 +4729,18 @@ def _recompute_scope_pairs(
             (scope_id,),
         )
         return
+    stopword_kw_ids = _get_complementary_stopword_kw_ids(conn)
     if _sqlite_has_ln(conn):
         _step4_sql(
             conn,
             scope_id=scope_id,
             min_npmi=min_npmi,
             n_chunks=n_chunks,
+            n_docs=n_docs,
             now=now,
             on_event=None,
+            stopword_kw_ids=stopword_kw_ids,
+            filter_segregation=filter_comp_segregation,
         )
     else:
         _step4_batch(
@@ -4383,9 +4748,12 @@ def _recompute_scope_pairs(
             scope_id=scope_id,
             min_npmi=min_npmi,
             n_chunks=n_chunks,
+            n_docs=n_docs,
             now=now,
             on_event=None,
             batch_size=_NPMI_BATCH_SIZE,
+            stopword_kw_ids=stopword_kw_ids,
+            filter_segregation=filter_comp_segregation,
         )
 
 

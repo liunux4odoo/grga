@@ -1225,6 +1225,7 @@ def index_build_command(
     no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default exclusion globs (archives, executables, node_modules/__pycache__/... that search also skips). The build's own transient-dir safety net (ignore_dirs: .git/.grga/.venv/node_modules/__pycache__) still applies."),
     batch_chunks: int = typer.Option(50000, "--batch-chunks", help="Enable batched build with target N chunks per batch. Default 50000 (batched is the default pipeline). 0 = disabled = legacy single-pass (bit-exact, no per-batch phrase drift / top-N kw cap, but higher peak memory). >0 processes files in RAM-bounded batches with per-batch phrase detection + top-N per-chunk kw cap (see --top-n-kw). refresh_ngram=append (default) unions new phrases; =never reuses the dict as-is. See experiments/batched_build_2026_07_16/FINDINGS.md."),
     top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="Only used with --batch-chunks>0. Per-chunk keyword cap for pair enumeration (higher=more pairs, more RAM). Default via env GRGA_BATCH_TOP_N (default 64)."),
+    no_filter_comp_segregation: bool = typer.Option(False, "--no-filter-comp-segregation", help="Disable complementary-pair segregation filtering. By default, pairs whose negative npmi is driven mainly by file-type isolation (different document genres) are filtered out from complementary_pairs."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Incrementally update the graph index for a scope.
@@ -1310,6 +1311,7 @@ def index_build_command(
             top_n_kw=top_n_kw,
             text_progress=text_progress,
             rich_on_event=rich_on_event,
+            filter_comp_segregation=not no_filter_comp_segregation,
         )
     finally:
         if rich_close is not None:
@@ -1345,6 +1347,7 @@ def index_rebuild_command(
     no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default exclusion globs (archives, executables, node_modules/__pycache__/... that search also skips). The build's own transient-dir safety net (ignore_dirs: .git/.grga/.venv/node_modules/__pycache__) still applies."),
     batch_chunks: int = typer.Option(50000, "--batch-chunks", help="Enable batched build with target N chunks per batch. Default 50000 (batched is the default pipeline). 0 = disabled = legacy single-pass (bit-exact, no per-batch phrase drift / top-N kw cap, but higher peak memory). >0 activates a fundamentally different pipeline: per-batch phrase detection + top-N per-chunk kw cap (see --top-n-kw). Faster + lower peak on large corpora BUT produces a different phrase/pair set (per-batch phrase drift ~27%; top-N discards low-rank kws). Use for corpora too large for single-pass. See experiments/batched_build_2026_07_16/FINDINGS.md."),
     top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="Only used with --batch-chunks>0. Per-chunk keyword cap for pair enumeration (higher=more pairs, more RAM). Default via env GRGA_BATCH_TOP_N (default 64)."),
+    no_filter_comp_segregation: bool = typer.Option(False, "--no-filter-comp-segregation", help="Disable complementary-pair segregation filtering. By default, pairs whose negative npmi is driven mainly by file-type isolation (different document genres) are filtered out from complementary_pairs."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
     """Full-scope re-scan: clear evidence layers, then rebuild.
@@ -1432,6 +1435,7 @@ def index_rebuild_command(
             keep_dict=keep_dict,
             keep_pairs=keep_pairs,
             recompute_pairs=recompute_pairs,
+            filter_comp_segregation=not no_filter_comp_segregation,
         )
     finally:
         if rich_close is not None:
@@ -1469,6 +1473,7 @@ def _run_index_build(
     keep_dict: bool = False,
     keep_pairs: bool = False,
     recompute_pairs: bool = False,
+    filter_comp_segregation: bool = True,
 ):
     """Shared runner for `index build` and `index rebuild`.
 
@@ -1520,6 +1525,7 @@ def _run_index_build(
         keep_dict=keep_dict,
         keep_pairs=keep_pairs,
         recompute_pairs=recompute_pairs,
+        filter_comp_segregation=filter_comp_segregation,
     )
 
 

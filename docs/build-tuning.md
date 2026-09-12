@@ -39,6 +39,7 @@
 | `--batch-chunks` | `50000`（分批） | 内存不够 / 语料过大想降峰值 → 保持默认或调更小；想要 bit-exact 单遍行为 → `0` | 默认就是分批，不用特意设 |
 | `--top-n-kw` | `64` | 仅在 `--batch-chunks > 0` 时才生效；想保更多 pair → `256` | 用 `--batch-chunks 0` 就无需考虑 |
 | `--include-glob` / `--exclude-glob` | 空（全收 / 不排除） | 只想索引部分文件 / 想排除"永远不进库"的目录（日志、临时、生成物） | 过滤是**弱语义**：被排除文件本次不读入，但既有索引行保留，见 §9 |
+| `--no-filter-comp-segregation` | 不传（=开过滤） | 想让 `complementary_pairs` 保留跨语体负相关对（诊断用） | 混合语体（网文+科技+行政）默认过滤更干净，见 §10 |
 
 ### 0.3 常见"跑挂了怎么办"
 
@@ -524,7 +525,70 @@ grga index build --scope X --directory /path \
 
 ---
 
-## 10. 参考
+## 10. 互补对（complementary）噪声过滤
+
+`complementary_pairs` 存的是**显著负相关**的词对（见
+[`design/plan-2026-09-11-complementary-pairs.md`](design/plan-2026-09-11-complementary-pairs.md)）。
+混合语体（网文 + 科技文献 + 行政文档同处一个 scope）里，异质语体的高频词
+会互相形成统计负相关，把真正语义互补的信号淹没。为此 build 期有三层默认
+开启的过滤（[`design/plan-2026-09-12-complementary-noise-filtering.md`](design/plan-2026-09-12-complementary-noise-filtering.md)）：
+
+### 10.1 阶段 1 / 迭代 2：停用词门槛
+
+候选 pair 中任一关键词命中 `_INDEX_STOPWORDS`（全局结构虚词）或
+`_COMPLEMENTARY_STOPWORDS`（迭代 2 新增的**互补对专用叙事词表**：人称代词
+`他/他们/你/我…`、章节标记 `第/章/回…`、叙事副词 `顿时/然后…`、言说动词
+`说道/问道…`）就直接丢弃，不进入 `complementary_pairs`。**默认总是开启，无
+开关**。
+
+`_COMPLEMENTARY_STOPWORDS` 只在互补对提取阶段生效，不参与 tokenisation，
+因此不改变主索引的 pair 统计；全局停用词那部分则因主 build 管线已在
+tokenisation 阶段过滤而偏防御性（例如通过 `promote` / `import` 路径引入的
+关键词）。
+
+### 10.2 迭代 2：c/E 强度门槛
+
+在 p-value 检验**之前**加一条纯减法门槛：只有 `cooccur_count / expected_count`
+小于 `COMPLEMENTARY_MAX_C_OVER_E`（默认 `0.25`）的 pair 才继续做显著性检验。
+大语料里"共现略低于随机期望"的弱负相关会被样本量推到显著 p-value，这层把
+互补对从"统计显著"收紧到"强度足够"。**默认总是开启，无独立开关，也不受
+`--no-filter-comp-segregation` 影响。**
+
+### 10.3 阶段 2：语体隔离检测
+
+过滤"负 npmi 主要由文件类型隔离驱动"的 pair，保留真正语义层面的互补信号。
+两条判据同时生效：
+
+- **判据 A（文件重叠下限）**：pair 至少在少量文件里真实共同出现过，
+  门槛与较小 `doc_df` 成比例但对小语料放宽。
+- **判据 B（chunk-vs-file npmi 偏离）**：若文件级 npmi 显著低于 chunk 级
+  npmi（默认差 > 0.1），说明负相关主要来自"两个词落在不同文件里" → 丢弃。
+
+三层过滤都是**纯减法**：不改留下来 pair 的任何统计量，也不回写
+`keyword_pairs`。实现走按需惰性计算（只对 chunk 级 npmi < 0 的候选查证据
+层），不引入新持久表。
+
+### 10.4 关闭开关
+
+```bash
+# 默认开启；仅在诊断"哪些对被隔离逻辑吃掉了"时关闭
+grga index rebuild --scope 混合库 --directory /path --no-filter-comp-segregation
+```
+
+该开关只关闭阶段 2（语体隔离）；阶段 1（停用词）与 §10.2（c/E 强度）仍生效。
+两类命令（`index build` / `index rebuild`）都支持该开关。
+
+> 注意：过滤在每次 pair finalization 阶段生效。`index rebuild` 一定触发；
+> `index build` 在存在文件增删改（`index_layer_changed`）时也会触发，并
+> 重建该 scope 的 `complementary_pairs`。因此——若 scope 本次没有任何变更，
+> `build` 不跑 finalization，需要一次 `rebuild` 才能把过滤**追溯**应用到
+> 存量互补对；反之，例行增量 `build` 处理到变更文件时就会顺带套用过滤。
+> 被过滤掉的负相关对同时会按 `--min-npmi-build` 地板从 `keyword_pairs`
+> 删除，只能靠 `rebuild` 从源语料重建。
+
+---
+
+## 11. 参考
 
 - 存储对比（0.2 vs 0.6 地板）的完整数据推导：本项目 chat log 2026-07-17
 - 内存优化的设计文档：[`design/plan-2026-07-15-build-memory-oom.md`](design/plan-2026-07-15-build-memory-oom.md)
