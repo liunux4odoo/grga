@@ -597,15 +597,6 @@ def probe_command(
         parts = [f"{n['kw']}({round(float(n['npmi']), 2)})" for n in neighbors]
         typer.echo(f"neighbors:   {', '.join(parts)}")
 
-    comp = result.get("complementary")
-    if comp:
-        parts = [
-            f"{c['kw']}(c/E={round(float(c['c_over_e']), 3)}, "
-            f"p={float(c['p_value']):.1e})"
-            for c in comp
-        ]
-        typer.echo(f"complementary: {', '.join(parts)}")
-
     notice = result.get("implicit_notice")
     if notice:
         typer.echo(f"[grga] {notice}", err=True)
@@ -2053,15 +2044,6 @@ def related_command(
                 typer.echo(
                     f"{r.npmi:.4f}  {r.kw}"
                     f"  (via {r.via_seed}, co={int(r.cooccur_count)}, df={r.chunk_df})"
-                )
-        comp_results = kw_result.complementary
-        if comp_results:
-            typer.echo()
-            typer.echo("complementary:")
-            for c in comp_results:
-                typer.echo(
-                    f"{c.c_over_e:.4f}  {c.kw}"
-                    f"  (via {c.via_seed}, co={int(c.cooccur_count)}, p={c.p_value:.2e})"
                 )
         produced = {r.via_seed for r in kw_results}
         unknown = [s.seed for s in kw_result.resolved_seeds if not s.in_index]

@@ -1,27 +1,18 @@
-"""Tests for complementary pairs (plan-2026-09-11-complementary-pairs).
+"""Tests for complementary pairs (plan-2026-09-12 §迭代 3).
+
+Iteration 3 turns ``complementary_pairs`` into an internal, silent data
+channel: the build pipeline still writes it (with tightened gates), but no
+user-facing surface (``related`` text/JSON, ``probe`` text/JSON) exposes it.
 
 Covers:
-- Build: complementary_pairs table gets populated with significant negative edges
-- Related: RelatedKeywordsResult.complementary field + shape + ordering
-- Probe: _lookup_complementary + _attach_complementary best-effort attachment
+- Build: complementary_pairs table gets populated with significant negative
+  edges that satisfy the iteration-2/3 gates (c/E < 0.10, keyword quality,
+  stopwords, segregation)
+- Related: ``complementary`` is NOT in ``to_dict()`` / results
+- Probe: JSON has no ``complementary`` key
 - Probe: elapsed_ms removal from JSON + text output
 - Pack export/import: complementary_pairs travels with the knowledge pack
 - Scope removal: purge_knowledge=True wipes complementary_pairs
-
-Acceptance anchors (design doc §5):
-  A1  Alias pairs captured (related)     — p_value < 1e-6, c_over_e < 0.3
-  A2  Noise pairs NOT captured           — build gate filters p > 0.05
-  A3  Positive pairs not in complementary + positive side unchanged
-  A4  Key-absent semantics               — seed in vocab but no comp → [];
-                                            seed not in vocab → resolved_seeds;
-                                            no index → probe no comp key
-  A5  Minimal field set + no judgement fields
-  A6  probe no elapsed_ms                — JSON + text both clean
-  A7  probe complementary                — has index → key present;
-                                            no index → key absent, probe ok
-  A8  Existing tests pass                — (run full suite)
-  A9  Query overhead same order of magnitude
-  A10 Docs updated                       — (manual / docs update step)
 """
 from __future__ import annotations
 
@@ -34,11 +25,7 @@ import pytest
 from grga.graph.build import build_graph_index
 from grga.graph.ids import IdInterner
 from grga.graph.schema import connect, ensure_schema
-from grga.related import (
-    ComplementaryKeyword,
-    RelatedKeywordsResult,
-    related_keywords,
-)
+from grga.related import RelatedKeywordsResult, related_keywords
 
 
 # ---------------------------------------------------------------------------
@@ -55,37 +42,36 @@ def sidecar_env(monkeypatch, tmp_path):
 def _build_alias_corpus(scope_dir: Path) -> None:
     """Build a corpus with a known alias (complementary) structure.
 
-    史强 ↔ 大史: co-occur rarely (c=3 out of ~123 chunks) but each appears
-    often individually → strong complementary signal.
+    史强 ↔ 大史: co-occur once out of ~123 chunks while each appears often
+    individually → strong negative signal with c/E < 0.10.
+
+    行动 / 警官 are glued strong-positive partners of 史强 / 大史
+    (npmi ≈ 1.0), so both endpoints clear the iteration-3 keyword-quality
+    gate (max npmi > 0.70).
 
     汪淼 ↔ 史强: co-occur often → positive (not complementary).
-
-    会议 ↔ 第0段: weak negative (p ≈ 0.09) → should NOT pass the gate.
     """
     scope_dir.mkdir(parents=True, exist_ok=True)
     lines = []
 
-    # 史强 only (~50)
+    # 史强 + 行动, glued (~50)
     for i in range(50):
-        lines.append(f"史强 行动 第{i}段")
-    # 大史 only (~30)
+        lines.append(f"史强 行动 任务 第{i}段")
+    # 大史 + 警官, glued (~30)
     for i in range(30):
-        lines.append(f"大史 警官 第{i+50}段")
+        lines.append(f"大史 警官 调查 第{i+50}段")
     # 史强 + 汪淼 (positive, 20)
     for i in range(20):
-        lines.append(f"史强 汪淼 对话 第{i+80}段")
-    # 史强 + 大史 co-occur (only 3 — alias pattern)
-    for i in range(3):
-        lines.append(f"史强（大史） 出场 第{i+100}段")
+        lines.append(f"史强 行动 汪淼 对话 第{i+80}段")
+    # 史强 + 大史 co-occur exactly once — alias pattern, c/E < 0.10
+    lines.append("史强 行动 大史 警官 出场 第100段")
     # 大史 + 汪淼 (7)
     for i in range(7):
-        lines.append(f"大史 汪淼 见面 第{i+103}段")
-
-    # 会议 noise: 会议 appears ~12 times, 第0段 only 1 time
-    # (weak complementary, p > 0.05, should not pass gate)
-    lines.append("会议 第0段 开场")
-    for i in range(1, 12):
-        lines.append(f"会议 第{i}段 讨论")
+        lines.append(f"大史 警官 汪淼 见面 第{i+103}段")
+    # 行动 occurs a few times WITHOUT 史强, so 史强↔行动 is not glued
+    # (glued pairs are dropped from keyword_pairs) yet still npmi > 0.70.
+    for i in range(5):
+        lines.append(f"行动 总结 记录 {i}")
 
     # Fillers
     remaining = 123 - len(lines)
@@ -166,8 +152,8 @@ class TestBuildComplementaryPairs:
                 f"A1 FAIL: p_value={row['p_value']} not < 1e-6"
             )
             c_over_e = row["cooccur_count"] / row["expected_count"]
-            assert c_over_e < 0.3, (
-                f"A1 FAIL: c/E={c_over_e} not < 0.3"
+            assert c_over_e < 0.10, (
+                f"A1 FAIL: c/E={c_over_e} not < 0.10 (iteration-3 strength gate)"
             )
             assert row["npmi"] < 0, "npmi should be negative for complementary"
         finally:
@@ -384,10 +370,10 @@ class TestBuildComplementaryPairs:
             conn.close()
 
 
-class TestRelatedComplementary:
-    """Verify related_keywords returns complementary pairs."""
+class TestRelatedComplementaryHidden:
+    """Iteration 3: related no longer exposes complementary pairs."""
 
-    def test_result_has_complementary_field(self, sidecar_env, tmp_path):
+    def test_result_complementary_field_stays_empty(self, sidecar_env, tmp_path):
         scope_dir = tmp_path / "corpus"
         db = tmp_path / "g.db"
         _build_alias_corpus(scope_dir)
@@ -401,138 +387,10 @@ class TestRelatedComplementary:
             scopes=["test-scope"],
         )
         assert isinstance(result, RelatedKeywordsResult)
-        assert hasattr(result, "complementary")
-        assert isinstance(result.complementary, list)
-        assert len(result.complementary) > 0
-        for c in result.complementary:
-            assert isinstance(c, ComplementaryKeyword)
-
-    def test_complementary_row_fields_minimal(self, sidecar_env, tmp_path):
-        """A5: exactly {kw, cooccur_count, c_over_e, p_value, via_seed}."""
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        result = related_keywords(
-            ["史强"],
-            limit_per_seed=30,
-            min_npmi=0.0,
-            db_path=db,
-            scopes=["test-scope"],
-        )
-        assert result.complementary, "need at least one pair for this test"
-        d = result.complementary[0].to_dict()
-        expected_keys = {"kw", "cooccur_count", "c_over_e", "p_value", "via_seed"}
-        assert set(d.keys()) == expected_keys, (
-            f"A5 FAIL: got keys {set(d.keys())}, expected {expected_keys}"
-        )
-        # No forbidden fields (judgement fields or redundant fields)
-        forbidden = {"expected_count", "npmi", "is_alias", "quality",
-                      "confidence", "semantic_tag"}
-        assert not (set(d.keys()) & forbidden), (
-            f"A5 FAIL: forbidden fields present: {set(d.keys()) & forbidden}"
-        )
-
-    def test_alias_pair_in_complementary(self, sidecar_env, tmp_path):
-        """A1: related returns 大史 in complementary with right stats."""
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        result = related_keywords(
-            ["史强"],
-            limit_per_seed=30,
-            min_npmi=0.0,
-            db_path=db,
-            scopes=["test-scope"],
-        )
-        comp_kws = {c.kw for c in result.complementary}
-        assert "大史" in comp_kws, f"A1 FAIL: 大史 not in complementary, got {comp_kws}"
-        dash = next(c for c in result.complementary if c.kw == "大史")
-        assert dash.via_seed == "史强"
-        assert dash.p_value < 1e-6, f"p_value={dash.p_value}"
-        assert dash.c_over_e < 0.3, f"c_over_e={dash.c_over_e}"
-
-    def test_positive_pair_not_in_complementary(self, sidecar_env, tmp_path):
-        """A3: 汪淼 should be in results, not in complementary."""
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        result = related_keywords(
-            ["史强"],
-            limit_per_seed=30,
-            min_npmi=0.0,
-            db_path=db,
-            scopes=["test-scope"],
-        )
-        result_kws = {r.kw for r in result.results}
-        comp_kws = {c.kw for c in result.complementary}
-        assert "汪淼" in result_kws, "汪淼 should be in positive results"
-        assert "汪淼" not in comp_kws, "汪淼 should NOT be in complementary"
-
-    def test_complementary_sorted_by_c_over_e_ascending(self, sidecar_env, tmp_path):
-        """Default sort: c/E ascending (most complementary first)."""
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        result = related_keywords(
-            ["史强"],
-            limit_per_seed=30,
-            min_npmi=0.0,
-            db_path=db,
-            scopes=["test-scope"],
-        )
-        if len(result.complementary) >= 2:
-            ratios = [c.c_over_e for c in result.complementary]
-            assert ratios == sorted(ratios), (
-                f"complementary not sorted by c_over_e asc: {ratios}"
-            )
-
-    def test_empty_complementary_for_unknown_seed(self, sidecar_env, tmp_path):
-        """A4: unknown seed → empty complementary, resolved_seeds reports unknown."""
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        result = related_keywords(
-            ["不存在的词"],
-            limit_per_seed=30,
-            min_npmi=0.0,
-            db_path=db,
-            scopes=["test-scope"],
-        )
+        # Field retained for backward compatibility, but never populated.
         assert result.complementary == []
-        assert result.results == []
-        assert len(result.resolved_seeds) == 1
-        assert result.resolved_seeds[0].in_index is False
 
-    def test_complementary_per_seed_independent(self, sidecar_env, tmp_path):
-        """Multi-seed: each seed has its own complementary rows, via_seed disambiguates."""
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        result = related_keywords(
-            ["史强", "大史"],
-            limit_per_seed=30,
-            min_npmi=0.0,
-            db_path=db,
-            scopes=["test-scope"],
-        )
-        via_seeds = {c.via_seed for c in result.complementary}
-        # Both seeds should produce some complementary rows
-        assert "史强" in via_seeds
-        assert "大史" in via_seeds
-
-    def test_to_dict_includes_complementary(self, sidecar_env, tmp_path):
+    def test_to_dict_omits_complementary(self, sidecar_env, tmp_path):
         scope_dir = tmp_path / "corpus"
         db = tmp_path / "g.db"
         _build_alias_corpus(scope_dir)
@@ -546,140 +404,50 @@ class TestRelatedComplementary:
             scopes=["test-scope"],
         )
         d = result.to_dict()
-        assert "complementary" in d
-        assert isinstance(d["complementary"], list)
-        assert len(d["complementary"]) > 0
-        # Results are untouched (positive side zero change)
+        assert "complementary" not in d, (
+            "Iteration 3: complementary must not appear in related JSON"
+        )
         assert "results" in d
         assert "resolved_seeds" in d
+
+    def test_positive_side_unchanged(self, sidecar_env, tmp_path):
+        """Positive-side results are unaffected by hiding complementary."""
+        scope_dir = tmp_path / "corpus"
+        db = tmp_path / "g.db"
+        _build_alias_corpus(scope_dir)
+        _build_db(scope_dir, db)
+
+        result = related_keywords(
+            ["史强"],
+            limit_per_seed=30,
+            min_npmi=0.0,
+            db_path=db,
+            scopes=["test-scope"],
+        )
+        result_kws = {r.kw for r in result.results}
+        assert "汪淼" in result_kws, "汪淼 should still be a positive neighbour"
+        nmpis = [r.npmi for r in result.results]
+        assert nmpis == sorted(nmpis, reverse=True)
 
 
 # ======================================================================
 # 3. Probe — complementary attachment + elapsed_ms removal
 # ======================================================================
 
-class TestProbeComplementary:
-    """Verify probe attaches complementary pairs (best-effort)."""
+class TestProbeComplementaryHidden:
+    """Iteration 3: probe exposes no complementary data."""
 
-    def test_lookup_complementary_returns_right_shape(self, sidecar_env, tmp_path):
-        from grga.probe import _lookup_complementary
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
+    def test_probe_module_has_no_complementary_helpers(self):
+        import grga.probe as probe
+        assert not hasattr(probe, "_attach_complementary")
+        assert not hasattr(probe, "_lookup_complementary")
 
-        conn = connect(db)
-        try:
-            ensure_schema(conn)
-            interner = IdInterner(conn)
-            scope_id = interner.scope_id_ro("test-scope")
-        finally:
-            conn.close()
-        assert scope_id is not None
-
-        result = _lookup_complementary("史强", scope_id, db)
-        assert result is not None
-        assert isinstance(result, list)
-        assert len(result) > 0
-        for item in result:
-            assert set(item.keys()) == {
-                "kw", "cooccur_count", "c_over_e", "p_value", "via_seed"
-            }
-
-    def test_lookup_unknown_seed_returns_empty_list(self, sidecar_env, tmp_path):
-        from grga.probe import _lookup_complementary
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        conn = connect(db)
-        try:
-            ensure_schema(conn)
-            interner = IdInterner(conn)
-            scope_id = interner.scope_id_ro("test-scope")
-        finally:
-            conn.close()
-        assert scope_id is not None
-
-        result = _lookup_complementary("不存在的词", scope_id, db)
-        assert result == []  # key present, empty
-
-    def test_lookup_silent_failure_bad_db(self, tmp_path):
-        from grga.probe import _lookup_complementary
-        bogus = tmp_path / "bad.db"
-        bogus.write_text("not a db")
-        result = _lookup_complementary("anything", 1, bogus)
-        assert result is None  # silent degradation
-
-    def test_attach_complementary_pipeline(self, sidecar_env, tmp_path):
-        """A7: full pipeline attaches complementary when index is available."""
-        from grga.probe import _attach_complementary
-        scope_dir = tmp_path / "corpus"
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        import grga.deep_search as ds_mod
-        original = ds_mod.DEFAULT_DB_PATH
-        ds_mod.DEFAULT_DB_PATH = db
-        try:
-            base = {"ok": True, "total_lines": 0, "file_count": 0}
-            query = {
-                "patterns": ["史强"],
-                "terms": [{"kind": "term", "value": "史强", "pattern": "史强"}],
-            }
-            result = _attach_complementary(base, scope_dir, query, debug=False)
-            assert "complementary" in result
-            comp = result["complementary"]
-            assert isinstance(comp, list)
-            assert len(comp) > 0
-            kws = {c["kw"] for c in comp}
-            assert "大史" in kws
-        finally:
-            ds_mod.DEFAULT_DB_PATH = original
-
-    def test_no_complementary_key_when_no_scope(self, sidecar_env, tmp_path):
-        """A4 / A7: directory not bound → no complementary key."""
-        from grga.probe import _attach_complementary
-        scope_dir = tmp_path / "corpus"
-        other_dir = tmp_path / "other"
-        other_dir.mkdir()
-        db = tmp_path / "g.db"
-        _build_alias_corpus(scope_dir)
-        _build_db(scope_dir, db)
-
-        import grga.deep_search as ds_mod
-        original = ds_mod.DEFAULT_DB_PATH
-        ds_mod.DEFAULT_DB_PATH = db
-        try:
-            base = {"ok": True, "total_lines": 0, "file_count": 0}
-            query = {
-                "patterns": ["史强"],
-                "terms": [{"kind": "term", "value": "史强", "pattern": "史强"}],
-            }
-            result = _attach_complementary(base, other_dir, query, debug=False)
-            assert "complementary" not in result
-        finally:
-            ds_mod.DEFAULT_DB_PATH = original
-
-    def test_attach_complementary_silent_failure(self, tmp_path):
-        """A7: bad DB → no key, no exception."""
-        from grga.probe import _attach_complementary
-        import grga.deep_search as ds_mod
-        original = ds_mod.DEFAULT_DB_PATH
-        ds_mod.DEFAULT_DB_PATH = tmp_path / "nope.db"
-        try:
-            base = {"ok": True, "total_lines": 0, "file_count": 0}
-            query = {
-                "patterns": ["anything"],
-                "terms": [{"kind": "term", "value": "anything", "pattern": "anything"}],
-            }
-            result = _attach_complementary(base, tmp_path, query, debug=False)
-            assert "complementary" not in result
-            assert result["ok"] is True
-        finally:
-            ds_mod.DEFAULT_DB_PATH = original
+    def test_error_json_has_no_complementary(self):
+        from grga.probe import _error
+        import time
+        base = {"ok": True, "total_lines": 0, "file_count": 0, "patterns": ["x"]}
+        result = json.loads(_error("test error", base, time.monotonic()))
+        assert "complementary" not in result
 
 
 class TestProbeNoElapsedMs:
@@ -760,7 +528,31 @@ class TestComplementaryInPack:
         )
         assert stats.n_complementary_pairs > 0
 
-        # Query the destination and check we can find the alias pair
+        # Iteration 3: the table travels in the pack (internal channel),
+        # but the read path still hides it — verify the DB rows, not related.
+        conn = connect(dst_db)
+        try:
+            ensure_schema(conn)
+            interner = IdInterner(conn)
+            sid = interner.scope_id_ro("dst")
+            assert sid is not None
+            row = conn.execute(
+                """
+                SELECT 1 FROM complementary_pairs cp
+                JOIN keywords ka ON ka.id = cp.kw_a_id
+                JOIN keywords kb ON kb.id = cp.kw_b_id
+                WHERE cp.scope_id = ?
+                  AND (
+                    (ka.kw = '史强' AND kb.kw = '大史')
+                    OR (ka.kw = '大史' AND kb.kw = '史强')
+                  )
+                """,
+                (sid,),
+            ).fetchone()
+            assert row is not None, "alias pair should survive the pack round-trip"
+        finally:
+            conn.close()
+
         result = related_keywords(
             ["史强"],
             limit_per_seed=30,
@@ -768,8 +560,8 @@ class TestComplementaryInPack:
             db_path=dst_db,
             scopes=["dst"],
         )
-        comp_kws = {c.kw for c in result.complementary}
-        assert "大史" in comp_kws
+        assert result.complementary == []
+        assert "complementary" not in result.to_dict()
 
 
 # ======================================================================
@@ -877,13 +669,15 @@ def _seed_synthetic_segregation_scope(conn, scope_name: str = "synth-seg"):
     """
     interner = IdInterner(conn)
     sid = interner.scope_id(scope_name)
-    kw = interner.kw_ids(["史强", "大史", "设计", "系统"])
+    base = ["史强", "大史", "设计", "系统"]
+    anchors = [f"{k}__q" for k in base]
+    kw = interner.kw_ids(base + anchors)
 
     n_chunks, n_docs = 1000, 100
     conn.execute(
         "INSERT OR REPLACE INTO scope_stats "
         "(scope_id, n_chunks, n_docs, vocab_size, updated_at) "
-        "VALUES (?, ?, ?, 4, '2026-01-01T00:00:00Z')",
+        "VALUES (?, ?, ?, 8, '2026-01-01T00:00:00Z')",
         (sid, n_chunks, n_docs),
     )
     stats = [
@@ -898,6 +692,25 @@ def _seed_synthetic_segregation_scope(conn, scope_name: str = "synth-seg"):
         "VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z')",
         [(sid, k, cdf, ddf, cdf * 2) for k, cdf, ddf in stats],
     )
+    # Strong-positive anchors (npmi > 0.70). The anchor's chunk_df is
+    # deliberately higher than the co-occurrence count so the pair is not
+    # "glued" (glued pairs are dropped by step 4, which would erase the
+    # quality signal on a re-run).
+    for name, df in (("史强", 400), ("大史", 350), ("设计", 400), ("系统", 350)):
+        anchor = f"{name}__q"
+        conn.execute(
+            "INSERT OR REPLACE INTO keyword_stats "
+            "(scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+            "VALUES (?, ?, ?, 0, ?, '2026-01-01T00:00:00Z')",
+            (sid, kw[anchor], df + 20, (df + 20) * 2),
+        )
+        a, b = sorted((kw[name], kw[anchor]))
+        conn.execute(
+            "INSERT OR REPLACE INTO keyword_pairs "
+            "(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+            "VALUES (?, ?, ?, 'chunk_cooccur', ?, 1.0, '2026-01-01T00:00:00Z')",
+            (sid, a, b, df),
+        )
 
     def _pair(a_kw, b_kw, co):
         a, b = sorted((kw[a_kw], kw[b_kw]))
@@ -1421,29 +1234,56 @@ def _seed_chunk_scope(
     pairs,
     n_chunks: int = 2000,
     n_docs: int = 0,
+    with_quality: bool = True,
 ) -> int:
     """Seed chunk-level stats + pair rows for gate tests.
 
     No ``keyword_docs`` rows are written, so the segregation gate is
-    skipped and only the stopword / strength gates are exercised.
+    skipped and only the stopword / strength / quality gates are exercised.
     ``expected_count`` is ``chunk_df_a * chunk_df_b / n_chunks``, so the
     caller picks ``co`` to hit a target c/E.
+
+    By default every keyword gets a glued strong-positive twin
+    (``<name>__q``, npmi ≈ 1.0) so candidates clear the iteration-3
+    keyword-quality gate. Pass ``with_quality=False`` to test that gate.
     """
     interner = IdInterner(conn)
     sid = interner.scope_id(scope_name)
+    df_map = {name: df for name, df in stats}
+    if with_quality:
+        for name, df in stats:
+            df_map[f"{name}__q"] = df
+    kw = interner.kw_ids(list(df_map))
     conn.execute(
         "INSERT OR REPLACE INTO scope_stats "
         "(scope_id, n_chunks, n_docs, vocab_size, updated_at) "
         "VALUES (?, ?, ?, ?, '2026-01-01T00:00:00Z')",
-        (sid, n_chunks, n_docs, len(stats)),
+        (sid, n_chunks, n_docs, len(df_map)),
     )
-    kw = interner.kw_ids([name for name, _ in stats])
     conn.executemany(
         "INSERT OR REPLACE INTO keyword_stats "
         "(scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
         "VALUES (?, ?, ?, 0, ?, '2026-01-01T00:00:00Z')",
-        [(sid, kw[name], df, df * 2) for name, df in stats],
+        [(sid, kw[name], df, df * 2) for name, df in df_map.items()],
     )
+    if with_quality:
+        for name, df in stats:
+            anchor = f"{name}__q"
+            # Anchor df > cooccur so the pair is not glued (glued pairs are
+            # dropped by step 4, which would erase the quality signal).
+            conn.execute(
+                "INSERT OR REPLACE INTO keyword_stats "
+                "(scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at) "
+                "VALUES (?, ?, ?, 0, ?, '2026-01-01T00:00:00Z')",
+                (sid, kw[anchor], df + 20, (df + 20) * 2),
+            )
+            a, b = sorted((kw[name], kw[anchor]))
+            conn.execute(
+                "INSERT OR REPLACE INTO keyword_pairs "
+                "(scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at) "
+                "VALUES (?, ?, ?, 'chunk_cooccur', ?, 1.0, '2026-01-01T00:00:00Z')",
+                (sid, a, b, df),
+            )
     for a_kw, b_kw, co in pairs:
         a, b = sorted((kw[a_kw], kw[b_kw]))
         conn.execute(
@@ -1513,21 +1353,72 @@ class TestComplementaryStrengthGate:
         conn = connect(db)
         try:
             ensure_schema(conn)
-            # 甲-乙: expected = 200*200/2000 = 20, co = 6 → c/E = 0.30
-            # 丙-丁: expected = 20, co = 4 → c/E = 0.20
+            # expected = 200*200/2000 = 20.
+            # 甲-乙: co = 3 → c/E = 0.15 → filtered (>= 0.10)
+            # 丙-丁: co = 1 → c/E = 0.05 → kept (< 0.10)
             sid = _seed_chunk_scope(
                 conn,
                 scope_name="strength",
                 stats=[("甲", 200), ("乙", 200), ("丙", 200), ("丁", 200)],
-                pairs=[("甲", "乙", 6), ("丙", "丁", 4)],
+                pairs=[("甲", "乙", 3), ("丙", "丁", 1)],
             )
             _recompute_scope_pairs(conn, sid, min_npmi=0.0)
 
             assert not _comp_pair_present(conn, sid, "甲", "乙"), (
-                "c/E=0.30 pair should be filtered by the strength gate"
+                "c/E=0.15 pair should be filtered by the strength gate"
             )
             assert _comp_pair_present(conn, sid, "丙", "丁"), (
-                "c/E=0.20 pair should survive the strength gate"
+                "c/E=0.05 pair should survive the strength gate"
+            )
+        finally:
+            conn.close()
+
+    def test_keyword_quality_gate_filters_unanchored_pair(
+        self, sidecar_env, tmp_path,
+    ):
+        """Iteration 3: a pair whose endpoints have no npmi > 0.70 partner
+        is filtered even when c/E and significance pass."""
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_chunk_scope(
+                conn,
+                scope_name="quality",
+                stats=[("甲", 200), ("乙", 200)],
+                pairs=[("甲", "乙", 1)],
+                with_quality=False,
+            )
+            _recompute_scope_pairs(conn, sid, min_npmi=0.0)
+            assert not _comp_pair_present(conn, sid, "甲", "乙"), (
+                "Pair without a strong positive anchor should fail the "
+                "keyword-quality gate"
+            )
+        finally:
+            conn.close()
+
+    def test_keyword_quality_gate_keeps_anchored_pair(
+        self, sidecar_env, tmp_path,
+    ):
+        from grga.graph.build import _recompute_scope_pairs
+
+        db = tmp_path / "g.db"
+        conn = connect(db)
+        try:
+            ensure_schema(conn)
+            sid = _seed_chunk_scope(
+                conn,
+                scope_name="quality-ok",
+                stats=[("甲", 200), ("乙", 200)],
+                pairs=[("甲", "乙", 1)],
+                with_quality=True,
+            )
+            _recompute_scope_pairs(conn, sid, min_npmi=0.0)
+            assert _comp_pair_present(conn, sid, "甲", "乙"), (
+                "Pair with strong positive anchors should pass the "
+                "keyword-quality gate"
             )
         finally:
             conn.close()
@@ -1546,12 +1437,13 @@ class TestComplementaryStrengthGate:
                 conn,
                 scope_name="strength-pure",
                 stats=[("甲", 200), ("乙", 200), ("丙", 200), ("丁", 200)],
-                pairs=[("甲", "乙", 6), ("丙", "丁", 4)],
+                pairs=[("甲", "乙", 3), ("丙", "丁", 1)],
             )
             _recompute_scope_pairs(conn, sid, min_npmi=0.0)
 
             # Both pairs remain in keyword_pairs with their original counts,
             # including the one the strength gate blocked from complementary.
+            # (Ignore the auto-seeded ``__q`` quality anchors.)
             rows = conn.execute(
                 """
                 SELECT ka.kw AS kw_a, kb.kw AS kw_b, kp.cooccur_count
@@ -1559,11 +1451,12 @@ class TestComplementaryStrengthGate:
                 JOIN keywords ka ON ka.id = kp.kw_a_id
                 JOIN keywords kb ON kb.id = kp.kw_b_id
                 WHERE kp.scope_id = ? AND kp.source = 'chunk_cooccur'
+                  AND ka.kw NOT LIKE '%__q' AND kb.kw NOT LIKE '%__q'
                 """,
                 (sid,),
             ).fetchall()
             got = {(r["kw_a"], r["kw_b"]): r["cooccur_count"] for r in rows}
-            assert got == {("甲", "乙"): 6, ("丙", "丁"): 4}, got
+            assert got == {("甲", "乙"): 3, ("丙", "丁"): 1}, got
         finally:
             conn.close()
 
@@ -1583,7 +1476,7 @@ class TestComplementaryStrengthGate:
                 conn,
                 scope_name="strength-batch",
                 stats=[("甲", 200), ("乙", 200), ("丙", 200), ("丁", 200)],
-                pairs=[("甲", "乙", 6), ("丙", "丁", 4)],
+                pairs=[("甲", "乙", 3), ("丙", "丁", 1)],
             )
             # min_npmi > 0 puts both negative pairs on the drop path, which
             # is the only path the batch backend scans for complementary
@@ -1591,15 +1484,26 @@ class TestComplementaryStrengthGate:
             _recompute_scope_pairs(conn, sid, min_npmi=0.2)
 
             assert not _comp_pair_present(conn, sid, "甲", "乙"), (
-                "Batch backend: c/E=0.30 pair should be filtered"
+                "Batch backend: c/E=0.15 pair should be filtered"
             )
             assert _comp_pair_present(conn, sid, "丙", "丁"), (
-                "Batch backend: c/E=0.20 pair should survive"
+                "Batch backend: c/E=0.05 pair should survive"
             )
-            # Both pairs are below min_npmi, so keyword_pairs maintenance
-            # removes them identically — the strength gate only steers the
-            # complementary-pair decision.
-            assert _keyword_pair_count(conn, sid) == 0, (
+            # Both candidate pairs are below min_npmi, so keyword_pairs
+            # maintenance removes them; only the positive quality anchors
+            # remain. The strength gate only steers the complementary
+            # decision.
+            remaining = conn.execute(
+                """
+                SELECT COUNT(*) FROM keyword_pairs kp
+                JOIN keywords ka ON ka.id = kp.kw_a_id
+                JOIN keywords kb ON kb.id = kp.kw_b_id
+                WHERE kp.scope_id = ? AND kp.source = 'chunk_cooccur'
+                  AND ka.kw NOT LIKE '%__q' AND kb.kw NOT LIKE '%__q'
+                """,
+                (sid,),
+            ).fetchone()[0]
+            assert remaining == 0, (
                 "Batch backend: strength gate must not alter keyword_pairs"
             )
         finally:
@@ -1628,13 +1532,13 @@ class TestComplementaryStopwords:
         conn = connect(db)
         try:
             ensure_schema(conn)
-            # c/E = 4/20 = 0.20 → would pass the strength gate, so only the
+            # c/E = 1/20 = 0.05 → passes the strength gate, so only the
             # narrative stopword gate can remove 史强↔他.
             sid = _seed_chunk_scope(
                 conn,
                 scope_name="comp-stop",
                 stats=[("史强", 200), ("他", 200), ("大史", 200)],
-                pairs=[("史强", "他", 4), ("史强", "大史", 4)],
+                pairs=[("史强", "他", 1), ("史强", "大史", 1)],
             )
             _recompute_scope_pairs(conn, sid, min_npmi=0.0)
 
@@ -1664,7 +1568,7 @@ class TestComplementaryStopwords:
                 conn,
                 scope_name="comp-stop-batch",
                 stats=[("史强", 200), ("他", 200), ("大史", 200)],
-                pairs=[("史强", "他", 4), ("史强", "大史", 4)],
+                pairs=[("史强", "他", 1), ("史强", "大史", 1)],
             )
             _recompute_scope_pairs(conn, sid, min_npmi=0.2)
 

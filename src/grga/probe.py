@@ -196,55 +196,6 @@ def _lookup_neighbors(seed: str, scope_id: int, db_path) -> Optional[List[Dict[s
         return None
 
 
-def _lookup_complementary(seed: str, scope_id: int, db_path) -> Optional[List[Dict[str, Any]]]:
-    """Return top-N complementary pairs for *seed* in *scope_id*.
-
-    Shape of each item: ``{kw, cooccur_count, c_over_e, p_value}``.
-    Sorted by ``c_over_e`` ascending (most complementary first).
-
-    Returns ``None`` on any failure (silent degradation).  Returns ``[]``
-    when the seed is known but has no qualifying complementary pairs.
-    """
-    try:
-        from grga.graph.schema import connect, ensure_schema
-        from grga.graph.ids import IdInterner
-        from grga.related import _related_keywords_impl
-
-        conn = connect(db_path)
-        try:
-            ensure_schema(conn)
-            interner = IdInterner(conn)
-            scope_name = interner.scope_name(scope_id)
-            from grga.related import _resolve_seed_args
-            seed_folded = _resolve_seed_args(conn, [seed])
-            if not seed_folded:
-                return []
-            from grga.related import _default_min_npmi
-            result = _related_keywords_impl(
-                conn,
-                seed_folded,
-                limit_per_seed=_PROBE_NEIGHBORS_LIMIT,
-                min_npmi=_default_min_npmi(),
-                scope_names=[scope_name],
-                tag_names=None,
-                tag_logic="or",
-            )
-            return [
-                {
-                    "kw": c.kw,
-                    "cooccur_count": float(c.cooccur_count),
-                    "c_over_e": round(float(c.c_over_e), 6),
-                    "p_value": float(c.p_value),
-                    "via_seed": c.via_seed,
-                }
-                for c in result.complementary
-            ]
-        finally:
-            conn.close()
-    except Exception:
-        return None
-
-
 def _first_seed_from_query(query: dict) -> Optional[str]:
     """Extract the first user-supplied keyword from a compiled query.
 
@@ -295,35 +246,6 @@ def _attach_neighbors(base: dict, target: Path, query: dict, debug: bool) -> dic
         return base
 
 
-def _attach_complementary(base: dict, target: Path, query: dict, debug: bool) -> dict:
-    """Attach the ``complementary`` field to *base* in-place, best-effort.
-
-    Same lifecycle and degradation guarantees as :func:`_attach_neighbors`.
-    Uses the **first** seed only — probe is a focused probe; multi-seed
-    complementary pairs belong to ``related``.
-
-    plan-2026-09-11-complementary-pairs.
-    """
-    try:
-        from grga.deep_search import DEFAULT_DB_PATH
-        first_seed = _first_seed_from_query(query)
-        if not first_seed:
-            return base
-        directory_str = str(target)
-
-        scope_id = _try_resolve_scope_for_directory(directory_str, DEFAULT_DB_PATH)
-        if scope_id is None:
-            return base
-
-        comp = _lookup_complementary(first_seed, scope_id, DEFAULT_DB_PATH)
-        if comp is None:
-            return base
-        base["complementary"] = comp
-        return base
-    except Exception:
-        return base
-
-
 def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns, deadline, sample, per_file, debug, started, office_adapters=True):
     rga_path = _find_rga_command()
     if rga_path is None:
@@ -366,7 +288,6 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
         base["warning"] = per_file_counts.get("warning")
         base["skipped_files"] = per_file_counts.get("skipped_files", [])
         _attach_neighbors(base, target, query, debug)
-        _attach_complementary(base, target, query, debug)
         return json.dumps(base, ensure_ascii=False)
 
     files = per_file_counts["files"]
@@ -408,7 +329,6 @@ def _probe_content(base, target, query, case_sensitive, multiline, glob_patterns
                 base["sample"] = sample_info
 
     _attach_neighbors(base, target, query, debug)
-    _attach_complementary(base, target, query, debug)
     return json.dumps(base, ensure_ascii=False)
 
 

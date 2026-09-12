@@ -150,14 +150,23 @@ COMP_SEGREGATION_NPMI_GAP = 0.1
 COMP_SEGREGATION_MIN_CO_DOC_RATIO = 0.1
 COMP_SEGREGATION_MIN_CO_DOC_FLOOR = 2
 
-# Iteration 2 (plan §迭代 2): strength gate. With large corpora, pairs whose
-# observed/expected co-occurrence ratio is only mildly below 1 still reach a
-# significant p-value via sample size alone; they are "statistically
+# Iteration 2 / 3 (plan §迭代 3): strength gate. With large corpora, pairs
+# whose observed/expected co-occurrence ratio is only mildly below 1 still
+# reach a significant p-value via sample size alone; they are "statistically
 # significant weak negative correlation", not semantic complementarity. A
 # pair must satisfy cooccur_count / expected_count < this constant to be
 # written to ``complementary_pairs``. Pure subtraction, always on, no CLI
 # switch, and independent of ``--no-filter-comp-segregation``.
-COMPLEMENTARY_MAX_C_OVER_E = 0.25
+# Iteration 3 tightens this from 0.25 -> 0.10 to keep the internal channel
+# high-confidence only.
+COMPLEMENTARY_MAX_C_OVER_E = 0.10
+
+# Iteration 3 (plan §迭代 3): keyword-quality gate. Complementary pairs are
+# kept only when *both* keywords have at least one positive npmi partner in
+# ``keyword_pairs`` with npmi > this threshold. This prevents low-content
+# hub words / tokenisation artefacts from entering the internal silent
+# channel even when they happen to show strong negative correlation.
+COMPLEMENTARY_MIN_KEYWORD_MAX_NPMI = 0.70
 
 # Iteration 2: complementary-pair-only narrative stopwords. Unlike
 # ``_INDEX_STOPWORDS`` this set is NOT applied during tokenisation — the main
@@ -1702,6 +1711,91 @@ def _get_complementary_stopword_kw_ids(conn) -> FrozenSet[int]:
     return _kw_ids_for(conn, _INDEX_STOPWORDS | _COMPLEMENTARY_STOPWORDS)
 
 
+def _get_complementary_quality_kw_ids(
+    conn, scope_id: int,
+) -> FrozenSet[int]:
+    """Keyword ids that pass the iteration-3 quality gate (SQL backend).
+
+    A keyword is "quality" for complementary purposes when it has at least
+    one co-occurrence partner in this scope's ``keyword_pairs`` with
+    ``npmi`` strictly greater than :data:`COMPLEMENTARY_MIN_KEYWORD_MAX_NPMI`.
+    This filters low-content tokens that only appear in negative
+    correlations, keeping the internal silent channel focused on
+    high-confidence anchors.
+
+    Scope-local: ``npmi`` is a per-scope statistic, so a strong partner in
+    another scope must not legitimise a pair here. The query is
+    index-only on ``idx_kp_a_npmi`` / ``idx_kp_b_npmi`` (both lead with
+    ``scope_id``) rather than scanning the whole multi-scope table.
+
+    Requires the ``keyword_pairs.npmi`` column to be populated. The SQL
+    backend calls this after its npmi ``UPDATE``; the no-``ln()`` backend
+    cannot use it and uses :func:`_scan_complementary_quality_kw_ids`.
+    """
+    threshold = COMPLEMENTARY_MIN_KEYWORD_MAX_NPMI
+    rows = conn.execute(
+        """
+        SELECT kw_id, MAX(npmi) AS max_npmi FROM (
+            SELECT kw_a_id AS kw_id, npmi FROM keyword_pairs
+            WHERE scope_id = ? AND npmi > ?
+            UNION ALL
+            SELECT kw_b_id AS kw_id, npmi FROM keyword_pairs
+            WHERE scope_id = ? AND npmi > ?
+        )
+        GROUP BY kw_id
+        """,
+        (scope_id, threshold, scope_id, threshold),
+    ).fetchall()
+    return frozenset(int(r[0]) for r in rows if r[1] is not None)
+
+
+def _scan_complementary_quality_kw_ids(
+    conn,
+    scope_id: int,
+    chunk_df: Dict[int, int],
+    n_chunks: int,
+    batch_size: int,
+) -> FrozenSet[int]:
+    """Keyword ids that pass the iteration-3 quality gate (batch backend).
+
+    Equivalent to :func:`_get_complementary_quality_kw_ids` but computes
+    npmi in Python, because the no-``ln()`` fallback cannot express the
+    ``npmi > threshold`` predicate in SQL. It must not read
+    ``keyword_pairs.npmi``: the batch backend computes npmi as it
+    paginates, so on a fresh build that column is still NULL when the
+    candidate loop runs.
+
+    Scope-local and memory-bounded by ``batch_size``, mirroring the
+    npmi-recompute pagination.
+    """
+    threshold = COMPLEMENTARY_MIN_KEYWORD_MAX_NPMI
+    quality: set = set()
+    last_a = -1
+    last_b = -1
+    while True:
+        rows = conn.execute(
+            """
+            SELECT kw_a_id, kw_b_id, cooccur_count
+            FROM keyword_pairs
+            WHERE scope_id = ? AND source = ?
+              AND (kw_a_id, kw_b_id) > (?, ?)
+            ORDER BY kw_a_id, kw_b_id
+            LIMIT ?
+            """,
+            (scope_id, CHUNK_COOCCUR_SOURCE, last_a, last_b, batch_size),
+        ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            a, b, co = int(row[0]), int(row[1]), int(row[2])
+            value = _npmi(co, chunk_df.get(a, 0), chunk_df.get(b, 0), n_chunks)
+            if value is not None and value > threshold:
+                quality.add(a)
+                quality.add(b)
+            last_a, last_b = a, b
+    return frozenset(quality)
+
+
 def _passes_strength_gate(cooccur_count: float, expected_count: float) -> bool:
     """Iteration-2 c/E strength gate (plan §迭代 2).
 
@@ -1720,19 +1814,27 @@ def _passes_strength_gate(cooccur_count: float, expected_count: float) -> bool:
 
 def _evaluate_complementary_candidate(
     *,
+    kw_a_id: int,
+    kw_b_id: int,
     cooccur_count: int,
     df_a: int,
     df_b: int,
     npmi: Optional[float],
     n_chunks: int,
+    quality_kw_ids: Optional[FrozenSet[int]] = None,
 ) -> Optional[Tuple[float, float]]:
     """Shared per-candidate gate for both complementary backends.
 
     Returns ``(npmi, p_value)`` when the pair passes the glued,
-    negative-npmi, c/E strength and significance gates, else ``None``.
-    Callers keep stopword filtering and their own row-streaming control
-    flow; everything that decides *which statistics get stored* lives
-    here so the SQL and batch backends cannot drift.
+    negative-npmi, c/E strength, keyword-quality and significance gates,
+    else ``None``. Callers keep stopword filtering and their own
+    row-streaming control flow; everything that decides *which statistics
+    get stored* lives here so the SQL and batch backends cannot drift.
+
+    ``quality_kw_ids`` is the iteration-3 gate: both endpoints must be
+    present in the set for the pair to survive. ``None`` disables the
+    gate (used only in narrow legacy/unit contexts that pre-seed the
+    table directly); an empty frozenset filters everything.
     """
     if n_chunks <= 0 or df_a <= 0 or df_b <= 0:
         return None
@@ -1741,6 +1843,10 @@ def _evaluate_complementary_candidate(
     if df_a == df_b == cooccur_count:
         return None
     if not _passes_strength_gate(cooccur_count, df_a * df_b / n_chunks):
+        return None
+    if quality_kw_ids is not None and (
+        kw_a_id not in quality_kw_ids or kw_b_id not in quality_kw_ids
+    ):
         return None
     p_val = _hypergeom_lower_tail(cooccur_count, n_chunks, df_a, df_b)
     if p_val >= BUILD_COMPLEMENTARY_MAX_P:
@@ -4277,9 +4383,13 @@ def _extract_complementary_sql(
       p-value test: pairs where either keyword is a member of
       ``_INDEX_STOPWORDS`` or the complementary-only
       ``_COMPLEMENTARY_STOPWORDS`` are dropped.
-    * **Strength gate** (iteration 2, always on), before the p-value
+    * **Strength gate** (iteration 2/3, always on), before the p-value
       test: pairs whose c/E is not below ``COMPLEMENTARY_MAX_C_OVER_E``
       are dropped.
+    * **Keyword-quality gate** (iteration 3, always on), before the
+      p-value test: both keywords must have a positive npmi partner
+      with ``npmi > COMPLEMENTARY_MIN_KEYWORD_MAX_NPMI`` in
+      ``keyword_pairs``.
     * **Segregation gate** (phase 2, ``filter_segregation=True``), after
       the p-value test: pairs whose negative npmi is driven mainly by
       file-type isolation (different document genres) rather than
@@ -4296,6 +4406,9 @@ def _extract_complementary_sql(
             (scope_id,),
         )
     }
+
+    # Iteration 3: precompute quality keywords once per scope.
+    quality_kw_ids = _get_complementary_quality_kw_ids(conn, scope_id)
 
     use_segregation = filter_segregation and n_docs > 0 and _has_doc_evidence(
         conn, scope_id
@@ -4338,11 +4451,14 @@ def _extract_complementary_sql(
                 last_a, last_b = a, b
                 continue
             evaluated = _evaluate_complementary_candidate(
+                kw_a_id=a,
+                kw_b_id=b,
                 cooccur_count=co_int,
                 df_a=chunk_df.get(a, 0),
                 df_b=chunk_df.get(b, 0),
                 npmi=npmi_val,
                 n_chunks=n_chunks,
+                quality_kw_ids=quality_kw_ids,
             )
             if evaluated is not None:
                 npmi_out, p_val = evaluated
@@ -4539,6 +4655,13 @@ def _step4_batch(
         )
     }
 
+    # Iteration 3: precompute quality keywords once per scope. The batch
+    # backend cannot use the table-based query — it recomputes npmi as it
+    # paginates, so the column is still NULL on a fresh build.
+    quality_kw_ids = _scan_complementary_quality_kw_ids(
+        conn, scope_id, chunk_df, n_chunks, batch_size,
+    )
+
     use_segregation = filter_segregation and n_docs > 0 and _has_doc_evidence(
         conn, scope_id
     )
@@ -4603,8 +4726,10 @@ def _step4_batch(
                         _emit("pairs_advance", current=processed, total=total)
                     continue
                 evaluated = _evaluate_complementary_candidate(
+                    kw_a_id=a, kw_b_id=b,
                     cooccur_count=co, df_a=df_a, df_b=df_b,
                     npmi=npmi, n_chunks=n_chunks,
+                    quality_kw_ids=quality_kw_ids,
                 )
                 if evaluated is not None:
                     npmi_out, p_val = evaluated

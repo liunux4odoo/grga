@@ -91,17 +91,14 @@ def test_related_graph_v3_envelope_shape(graph_scope, schema):
     _validate(payload, schema)
 
     # v3 graph envelope base is {results, resolved_seeds}.
-    # v3.2 adds ``complementary`` (plan-2026-09-11-complementary-pairs)
-    # as an additive field. Everything from v2 is gone.
+    # v3.3 (iteration 3) removes the v3.2 ``complementary`` field — pairs
+    # are now an internal, silent data channel.
     assert {"results", "resolved_seeds"}.issubset(set(payload.keys()))
     for banned in (
         "expansion", "crossed_scopes_preview", "trace_signals_version",
-        "graph_actions",
+        "graph_actions", "complementary",
     ):
-        assert banned not in payload, f"v2 field {banned!r} leaked into v3"
-    # complementary is always present (empty list when no pairs)
-    assert "complementary" in payload
-    assert isinstance(payload["complementary"], list)
+        assert banned not in payload, f"removed field {banned!r} leaked into v3"
     # resolved_seeds probe: fixture builds "brew" into the vocabulary
     # deterministically (min_pair_count=1, min_npmi=0.0), so in_index=True
     # is the only correct outcome for this happy path.

@@ -2,25 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://grga.dev/schemas/related-signals-v3.json",
   "title": "grga related signals v3",
-  "description": "Contract for `grga related --json` under the v9 keyword-primary architecture. See docs/design/related-signals-v3.md. v3.0 (2026-07-13): `--mode graph` now returns candidate *keywords* (RelatedKeyword) instead of documents; the pre-v3 `expansion` block, `crossed_scopes_preview`, `keyword_contributions`, and `graph_signals` are all gone (PPR + doc aggregation removed in Phase 3b-2). v3.1 (2026-07-13): graph envelope adds `resolved_seeds` — per-seed vocabulary probe that disambiguates empty results (unknown seed vs. isolated / over-filtered seed). v3.1a (2026-07-14, plan-2026-07-14 §5.3): `related_keyword` gains `scopes` — the logical scope names within the caller's query range that carry this pair (MINOR bump, caller ignoring the new field is safe); `related_doc.directory` → `scope` and `qualified_path` removed (v10 knowledge / evidence split rename). `--mode heading` retains the doc-oriented shape minus the removed fields. `--mode dir` is removed entirely (raises at CLI level; use `grga search --json | aggregate` instead). v3.2 (2026-09-12, plan-2026-09-11-complementary-pairs): graph envelope adds `complementary` — significantly anti-co-occurring keyword pairs as a complement to co-occurrence candidates. Replaces schemas/related-signals-v2.json.",
+  "description": "Contract for `grga related --json` under the v9 keyword-primary architecture. See docs/design/related-signals-v3.md. v3.0 (2026-07-13): `--mode graph` now returns candidate *keywords* (RelatedKeyword) instead of documents; the pre-v3 `expansion` block, `crossed_scopes_preview`, `keyword_contributions`, and `graph_signals` are all gone (PPR + doc aggregation removed in Phase 3b-2). v3.1 (2026-07-13): graph envelope adds `resolved_seeds` — per-seed vocabulary probe that disambiguates empty results (unknown seed vs. isolated / over-filtered seed). v3.1a (2026-07-14, plan-2026-07-14 §5.3): `related_keyword` gains `scopes` — the logical scope names within the caller's query range that carry this pair (MINOR bump, caller ignoring the new field is safe); `related_doc.directory` → `scope` and `qualified_path` removed (v10 knowledge / evidence split rename). `--mode heading` retains the doc-oriented shape minus the removed fields. `--mode dir` is removed entirely (raises at CLI level; use `grga search --json | aggregate` instead). v3.3 (2026-09-12, plan-2026-09-12-complementary-noise-filtering §迭代 3): the v3.2 `complementary` envelope field is REMOVED — complementary pairs are now an internal, silent data channel and no user-facing surface exposes them. Replaces schemas/related-signals-v2.json.",
   "anyOf": [
     {
       "$comment": "graph mode envelope — candidate keywords with association evidence + a per-seed vocabulary probe (resolved_seeds). An empty results array is also valid.",
       "type": "object",
-      "required": ["results", "complementary", "resolved_seeds"],
+      "required": ["results", "resolved_seeds"],
       "additionalProperties": false,
       "properties": {
         "results": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/related_keyword"
-          }
-        },
-        "complementary": {
-          "description": "v3.2 (plan-2026-09-11-complementary-pairs): significantly anti-co-occurring keyword pairs — co-occurrence is *significantly below* random expectation (negative npmi + low hypergeometric p-value). Sorted by c_over_e ascending (most complementary first). Same per-seed, no-fusion semantics as `results`: each row carries `via_seed`. Intended as a complement to co-occurrence candidates — callers decide what the signal means (alias / category poles / timeline naming / etc.).",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/complementary_keyword"
           }
         },
         "resolved_seeds": {
@@ -105,40 +98,6 @@
           "type": "array",
           "items": {"type": "string", "minLength": 1},
           "minItems": 1
-        }
-      }
-    },
-    "complementary_keyword": {
-      "description": "v3.2 (plan-2026-09-11-complementary-pairs): one complementary keyword — a word whose chunk co-occurrence with the seed is significantly *below* random expectation. Field surface is intentionally smaller than related_keyword: only what a caller needs to decide whether the pair is interesting. NOT an alias detector — the semantic interpretation is left to the caller.",
-      "type": "object",
-      "required": ["kw", "cooccur_count", "c_over_e", "p_value", "via_seed"],
-      "additionalProperties": false,
-      "properties": {
-        "kw": {
-          "description": "Casefolded candidate keyword.",
-          "type": "string",
-          "minLength": 1
-        },
-        "cooccur_count": {
-          "description": "Raw chunk co-occurrence count (evidence量: p-value same but c=1 vs c=50 carries different trust).",
-          "type": "number",
-          "minimum": 0
-        },
-        "c_over_e": {
-          "description": "cooccur / expected — the deviation-from-expectation ratio. Primary sort key (ascending: most complementary first).",
-          "type": "number",
-          "minimum": 0
-        },
-        "p_value": {
-          "description": "Hypergeometric lower-tail significance P(共现 ≤ c | 独立假设). Caller-side significance filter. Write-time gate is p < 0.05; caller can tighten further.",
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "via_seed": {
-          "description": "Which seed produced this candidate. Same per-seed, no-fusion semantics as results.",
-          "type": "string",
-          "minLength": 1
         }
       }
     },
