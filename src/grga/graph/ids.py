@@ -70,8 +70,8 @@ class IdInterner:
         self._scope_name: Dict[int, str] = {}
         self._kw_id: Dict[str, int] = {}
         self._kw_text: Dict[int, str] = {}
-        self._doc_id: Dict[Tuple[int, str], int] = {}
-        self._doc_text: Dict[int, Tuple[int, str]] = {}
+        self._doc_id: Dict[Tuple[int, str, str], int] = {}
+        self._doc_text: Dict[int, Tuple[int, str, str]] = {}
 
     # -- scopes ---------------------------------------------------------
 
@@ -571,44 +571,54 @@ class IdInterner:
 
     # -- docs -----------------------------------------------------------
 
-    def doc_id(self, scope_id: int, doc_path: str) -> int:
-        """Get-or-insert a doc row, return its id."""
-        key = (scope_id, doc_path)
+    def doc_id(self, scope_id: int, doc_path: str, *, directory: str = "") -> int:
+        """Get-or-insert a doc row, return its id.
+
+        ``directory`` is the directory binding this doc belongs to
+        (matches ``scope_directories.directory``).  The doc's identity
+        is ``(scope_id, directory, doc_path)`` so a single scope can
+        safely bind multiple directories with potentially overlapping
+        relative paths.
+        """
+        key = (scope_id, directory, doc_path)
         hit = self._doc_id.get(key)
         if hit is not None:
             return hit
         self._conn.execute(
-            "INSERT OR IGNORE INTO docs (scope_id, doc_path) VALUES (?, ?)",
-            (scope_id, doc_path),
+            "INSERT OR IGNORE INTO docs (scope_id, directory, doc_path) "
+            "VALUES (?, ?, ?)",
+            (scope_id, directory, doc_path),
         )
         row = self._conn.execute(
-            "SELECT id FROM docs WHERE scope_id = ? AND doc_path = ?",
-            (scope_id, doc_path),
+            "SELECT id FROM docs WHERE scope_id = ? AND directory = ? "
+            "AND doc_path = ?",
+            (scope_id, directory, doc_path),
         ).fetchone()
         did = int(row[0])
         self._doc_id[key] = did
         self._doc_text[did] = key
         return did
 
-    def doc_row(self, doc_id: int) -> Tuple[int, str]:
-        """Reverse-lookup doc: return ``(scope_id, doc_path)``."""
+    def doc_row(self, doc_id: int) -> Tuple[int, str, str]:
+        """Reverse-lookup doc: return ``(scope_id, directory, doc_path)``."""
         hit = self._doc_text.get(doc_id)
         if hit is not None:
             return hit
         row = self._conn.execute(
-            "SELECT scope_id, doc_path FROM docs WHERE id = ?", (doc_id,)
+            "SELECT scope_id, directory, doc_path FROM docs WHERE id = ?",
+            (doc_id,),
         ).fetchone()
         if row is None:
             raise KeyError(f"unknown doc_id: {doc_id}")
-        key = (int(row[0]), str(row[1]))
+        key = (int(row[0]), str(row[1]), str(row[2]))
         self._doc_text[doc_id] = key
         self._doc_id[key] = doc_id
         return key
 
-    def doc_rows(self, doc_ids: Iterable[int]) -> Dict[int, Tuple[int, str]]:
-        """Batched doc reverse-lookup: ``{doc_id: (scope_id, doc_path)}``."""
+    def doc_rows(self, doc_ids: Iterable[int]) -> Dict[int, Tuple[int, str, str]]:
+        """Batched doc reverse-lookup: ``{doc_id: (scope_id, directory, doc_path)}``."""
         need: List[int] = []
-        out: Dict[int, Tuple[int, str]] = {}
+        out: Dict[int, Tuple[int, str, str]] = {}
         for did in doc_ids:
             hit = self._doc_text.get(did)
             if hit is not None:
@@ -618,12 +628,13 @@ class IdInterner:
         for chunk in sql_var_chunks(need):
             placeholders = ",".join("?" for _ in chunk)
             rows = self._conn.execute(
-                f"SELECT id, scope_id, doc_path FROM docs WHERE id IN ({placeholders})",
+                f"SELECT id, scope_id, directory, doc_path FROM docs "
+                f"WHERE id IN ({placeholders})",
                 chunk,
             ).fetchall()
             for row in rows:
                 did = int(row[0])
-                key = (int(row[1]), str(row[2]))
+                key = (int(row[1]), str(row[2]), str(row[3]))
                 self._doc_text[did] = key
                 self._doc_id[key] = did
                 out[did] = key

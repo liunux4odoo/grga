@@ -1727,22 +1727,35 @@ def _classify_doc(
 
 
 def _load_scope_doc_rows(
-    conn, scope_id: int
+    conn, scope_id: int, directory: Optional[str] = None,
 ) -> Dict[str, Dict[str, object]]:
     """Load ``{doc_path: {id, size, mtime, content_hash}}`` for a scope.
+
+    When ``directory`` is provided, only rows for that binding are
+    returned — otherwise the incremental-build classifier would mix up
+    docs from other directory bindings attached to the same scope.
+    When ``directory`` is ``None`` (legacy / caller convenience) all
+    scope docs are loaded; callers that participate in incremental
+    builds should always pass the binding they are scanning.
 
     Used by ``mode='build'`` to classify each file on disk against the
     stored record without an N+1 SELECT loop. ``id`` is included so
     per-doc DELETEs (removed / updated) do not need a second lookup.
     """
-    rows = conn.execute(
-        "SELECT id, doc_path, size, mtime, content_hash "
-        "FROM docs WHERE scope_id = ?",
-        (scope_id,),
-    ).fetchall()
+    if directory is not None:
+        rows = conn.execute(
+            "SELECT id, doc_path, size, mtime, content_hash "
+            "FROM docs WHERE scope_id = ? AND directory = ?",
+            (scope_id, directory),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, doc_path, size, mtime, content_hash "
+            "FROM docs WHERE scope_id = ?",
+            (scope_id,),
+        ).fetchall()
     out: Dict[str, Dict[str, object]] = {}
     for row in rows:
-        # sqlite3.Row supports dict-like access via keys.
         out[str(row["doc_path"])] = {
             "id": int(row["id"]),
             "size": row["size"],
@@ -2513,6 +2526,9 @@ def build_graph_index(
     exclude_globs: Iterable[str] = (),
     progress: Optional[Callable[[str], None]] = None,
     on_event: Optional[Callable[[dict], None]] = None,
+    keep_dict: bool = False,
+    keep_pairs: bool = False,
+    recompute_pairs: bool = False,
 ) -> BuildStats:
     """Build the v10 knowledge asset + evidence layers for ``scope``.
 
@@ -2675,27 +2691,52 @@ def build_graph_index(
         # ------------------------------------------------------------------
         existing_docs: Dict[str, Dict[str, object]] = {}
         if mode == "build":
-            existing_docs = _load_scope_doc_rows(conn, scope_id)
+            existing_docs = _load_scope_doc_rows(
+                conn, scope_id, directory=directory_str,
+            )
 
         if mode == "rebuild":
             # Full clear of index + derived layers for this scope.
             # ``keyword_chunks`` / ``chunks`` / ``heading_docs`` are keyed
             # by ``doc_id`` which resolves through ``docs.scope_id``. The
             # shared helper keeps the three-table set in one place.
+            #
+            # With --keep-pairs, keyword_pairs / complementary_pairs /
+            # keyword_stats / scope_stats are preserved (knowledge
+            # assets); new evidence is merged in via UPSERT-add
+            # semantics in the pair finalization step.
+            #
+            # With --keep-dict, auto_ngram_dict is preserved (equivalent
+            # to refresh_ngram='never' but expressed as a high-level
+            # knowledge-preservation flag).
             _delete_scope_index_rows(conn, scope_id)
-            conn.execute(
-                "DELETE FROM keyword_pairs WHERE scope_id = ? AND source = ?",
-                (scope_id, CHUNK_COOCCUR_SOURCE),
-            )
-            conn.execute(
-                "DELETE FROM complementary_pairs WHERE scope_id = ?",
-                (scope_id,),
-            )
-            if refresh_ngram == "replace":
+            if not keep_pairs:
+                conn.execute(
+                    "DELETE FROM keyword_pairs WHERE scope_id = ? AND source = ?",
+                    (scope_id, CHUNK_COOCCUR_SOURCE),
+                )
+                conn.execute(
+                    "DELETE FROM complementary_pairs WHERE scope_id = ?",
+                    (scope_id,),
+                )
+                conn.execute(
+                    "DELETE FROM keyword_stats WHERE scope_id = ?",
+                    (scope_id,),
+                )
+                conn.execute(
+                    "DELETE FROM scope_stats WHERE scope_id = ?",
+                    (scope_id,),
+                )
+            if not keep_dict and refresh_ngram == "replace":
                 conn.execute(
                     "DELETE FROM auto_ngram_dict WHERE scope_id = ?",
                     (scope_id,),
                 )
+            if keep_dict and refresh_ngram == "replace":
+                # --keep-dict overrides refresh_ngram=replace — keep the
+                # dict and use it as-is (same as refresh_ngram='never').
+                refresh_ngram = "never"
+                stats.refresh_ngram = "never"
             conn.commit()
 
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2762,7 +2803,7 @@ def build_graph_index(
                     st_mtime = path.stat().st_mtime
                 except OSError:
                     continue
-                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_id, rel_path)
+                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_id, rel_path, directory=directory_str)
                 metadata_only_updates.append(
                     (doc_id, st_size, st_mtime, new_hash)
                 )
@@ -2779,10 +2820,10 @@ def build_graph_index(
                 max_chars=chunk_max_chars, min_chars=chunk_min_chars,
             )
             if kind == DOC_ADDED:
-                doc_id = interner.doc_id(scope_id, rel_path)
+                doc_id = interner.doc_id(scope_id, rel_path, directory=directory_str)
                 stats.docs_added += 1
             else:  # DOC_UPDATED
-                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_id, rel_path)
+                doc_id = int(prev_row["id"]) if prev_row else interner.doc_id(scope_id, rel_path, directory=directory_str)
                 stats.docs_updated += 1
             try:
                 st_size = path.stat().st_size
@@ -3555,6 +3596,21 @@ def build_graph_index(
         # rows into the next build.
         conn.execute("DROP TABLE IF EXISTS _build_chunk_kws")
 
+        # --keep-pairs --recompute-pairs: after the build merged in new
+        # evidence, re-derive npmi for ALL pairs in this scope (not just
+        # the ones touched by this build).  Used when callers want to
+        # refresh statistics after rebuilding evidence while preserving
+        # the knowledge asset as a whole.
+        if keep_pairs and recompute_pairs:
+            _recompute_scope_pairs(
+                conn, scope_id, min_npmi=float(min_npmi),
+            )
+            stats.pairs_written = int(conn.execute(
+                "SELECT COUNT(*) FROM keyword_pairs "
+                "WHERE scope_id = ? AND source = ?",
+                (scope_id, CHUNK_COOCCUR_SOURCE),
+            ).fetchone()[0])
+
         # ------------------------------------------------------------------
         # Toolchain fingerprint: emit a warning if it changed vs. the
         # previous build recorded in ``meta``. Never a judgement input;
@@ -4263,6 +4319,8 @@ class ForgetStats:
     pairs_recomputed: int = 0
     phrases_missing: List[str] = field(default_factory=list)
     all_wiped: bool = False
+    keep_dict: bool = False
+    keep_pairs: bool = False
     elapsed_seconds: float = 0.0
 
     def to_dict(self) -> dict:
@@ -4273,8 +4331,62 @@ class ForgetStats:
             "pairs_recomputed": self.pairs_recomputed,
             "phrases_missing": list(self.phrases_missing),
             "all_wiped": self.all_wiped,
+            "keep_dict": self.keep_dict,
+            "keep_pairs": self.keep_pairs,
             "elapsed_seconds": round(self.elapsed_seconds, 4),
         }
+
+
+def _recompute_scope_pairs(
+    conn,
+    scope_id: int,
+    *,
+    min_npmi: float = BUILD_MIN_NPMI,
+) -> None:
+    """Recompute ``npmi`` (and complementary pairs) for all
+    ``chunk_cooccur`` pairs in ``scope_id`` using the current
+    ``keyword_stats.chunk_df`` and ``scope_stats.n_chunks``.
+
+    Used by ``--keep-pairs --recompute-pairs`` in forget and rebuild
+    paths.  Mirrors the build pipeline's step-4 logic: UPDATE npmi
+    in place, drop rows that fall below ``min_npmi`` or are degenerate,
+    and rebuild ``complementary_pairs`` for this scope.
+    """
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n_chunks = int(conn.execute(
+        "SELECT COALESCE(n_chunks, 0) FROM scope_stats WHERE scope_id = ?",
+        (scope_id,),
+    ).fetchone()[0])
+    if n_chunks <= 0:
+        conn.execute(
+            "UPDATE keyword_pairs SET npmi = NULL "
+            "WHERE scope_id = ? AND source = ?",
+            (scope_id, CHUNK_COOCCUR_SOURCE),
+        )
+        conn.execute(
+            "DELETE FROM complementary_pairs WHERE scope_id = ?",
+            (scope_id,),
+        )
+        return
+    if _sqlite_has_ln(conn):
+        _step4_sql(
+            conn,
+            scope_id=scope_id,
+            min_npmi=min_npmi,
+            n_chunks=n_chunks,
+            now=now,
+            on_event=None,
+        )
+    else:
+        _step4_batch(
+            conn,
+            scope_id=scope_id,
+            min_npmi=min_npmi,
+            n_chunks=n_chunks,
+            now=now,
+            on_event=None,
+            batch_size=_NPMI_BATCH_SIZE,
+        )
 
 
 def forget_scope_phrases(
@@ -4283,6 +4395,9 @@ def forget_scope_phrases(
     db_path: Union[str, Path, None] = None,
     phrases: Optional[Sequence[str]] = None,
     all_phrases: bool = False,
+    keep_dict: bool = False,
+    keep_pairs: bool = False,
+    recompute_pairs: bool = False,
 ) -> ForgetStats:
     """Remove entries from the asset layer with cascading cleanup.
 
@@ -4300,6 +4415,10 @@ def forget_scope_phrases(
     * ``all_phrases=True`` — nuke every asset row for this scope:
       ``auto_ngram_dict`` + the index layer + ``chunk_cooccur`` pairs.
       Follow with ``grga index build`` to relearn from scratch.
+      With ``--keep-dict`` / ``--keep-pairs`` / ``--keep-assets``
+      the corresponding knowledge-layer tables are preserved
+      (frozen: npmi / cooccur counts are left as-is unless
+      ``recompute_pairs=True``).
 
     ``phrases`` that do not exist in ``auto_ngram_dict`` for this scope
     are collected into ``ForgetStats.phrases_missing`` and skipped
@@ -4309,6 +4428,11 @@ def forget_scope_phrases(
         raise ValueError(
             "forget_scope_phrases: pass either phrases=[...] or "
             "all_phrases=True (exactly one)"
+        )
+    if recompute_pairs and not keep_pairs:
+        raise ValueError(
+            "forget_scope_phrases: recompute_pairs only makes sense "
+            "with keep_pairs (otherwise no pairs remain to recompute)"
         )
 
     from grga.deep_search import DEFAULT_DB_PATH
@@ -4322,6 +4446,8 @@ def forget_scope_phrases(
     stats = ForgetStats(scope=scope_name)
     if all_phrases:
         stats.all_wiped = True
+    stats.keep_dict = keep_dict
+    stats.keep_pairs = keep_pairs
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
     conn = connect(target_db)
@@ -4330,8 +4456,6 @@ def forget_scope_phrases(
         interner = IdInterner(conn)
         scope_id_ro = interner.scope_id_ro(scope_name)
         if scope_id_ro is None:
-            # Scope was never indexed; nothing to do. Return empty stats
-            # rather than raising so scripts are idempotent.
             stats.elapsed_seconds = time.perf_counter() - started
             return stats
         scope_id = scope_id_ro
@@ -4339,51 +4463,56 @@ def forget_scope_phrases(
         conn.execute("BEGIN IMMEDIATE")
         try:
             if all_phrases:
-                # Wipe the whole asset + index + derived for this scope.
                 doc_ids = [
                     int(row[0]) for row in conn.execute(
                         "SELECT id FROM docs WHERE scope_id = ?",
                         (scope_id,),
                     ).fetchall()
                 ]
-                # Count what we are about to delete for observability.
-                # v9: ``keyword_chunks_removed`` now reports the doc-level
-                # keyword_docs rows (30× smaller than the pre-v9 count) —
-                # field name kept for JSON contract stability.
                 stats.keyword_chunks_removed = int(conn.execute(
                     "SELECT COUNT(*) FROM keyword_docs WHERE scope_id = ?",
                     (scope_id,),
                 ).fetchone()[0])
-                stats.ngram_dict_removed = int(conn.execute(
-                    "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ?",
-                    (scope_id,),
-                ).fetchone()[0])
+                if not keep_dict:
+                    stats.ngram_dict_removed = int(conn.execute(
+                        "SELECT COUNT(*) FROM auto_ngram_dict WHERE scope_id = ?",
+                        (scope_id,),
+                    ).fetchone()[0])
                 _delete_doc_index_rows(conn, doc_ids)
-                conn.execute(
-                    "DELETE FROM keyword_pairs "
-                    "WHERE scope_id = ? AND source = ?",
-                    (scope_id, CHUNK_COOCCUR_SOURCE),
-                )
-                conn.execute(
-                    "DELETE FROM complementary_pairs WHERE scope_id = ?",
-                    (scope_id,),
-                )
-                conn.execute(
-                    "DELETE FROM auto_ngram_dict WHERE scope_id = ?",
-                    (scope_id,),
-                )
-                # v8 asset tables must be wiped too — leaving them behind
-                # after a full forget would give a stale doc_df / n_chunks
-                # signal to ``related``.
-                conn.execute(
-                    "DELETE FROM keyword_stats WHERE scope_id = ?",
-                    (scope_id,),
-                )
-                conn.execute(
-                    "DELETE FROM scope_stats WHERE scope_id = ?",
-                    (scope_id,),
-                )
-                stats.pairs_recomputed = 0
+                if not keep_pairs:
+                    conn.execute(
+                        "DELETE FROM keyword_pairs "
+                        "WHERE scope_id = ? AND source = ?",
+                        (scope_id, CHUNK_COOCCUR_SOURCE),
+                    )
+                    conn.execute(
+                        "DELETE FROM complementary_pairs WHERE scope_id = ?",
+                        (scope_id,),
+                    )
+                if not keep_dict:
+                    conn.execute(
+                        "DELETE FROM auto_ngram_dict WHERE scope_id = ?",
+                        (scope_id,),
+                    )
+                if not keep_pairs:
+                    conn.execute(
+                        "DELETE FROM keyword_stats WHERE scope_id = ?",
+                        (scope_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM scope_stats WHERE scope_id = ?",
+                        (scope_id,),
+                    )
+                if keep_pairs and recompute_pairs:
+                    _recompute_scope_pairs(conn, scope_id)
+                if keep_pairs:
+                    stats.pairs_recomputed = int(conn.execute(
+                        "SELECT COUNT(*) FROM keyword_pairs "
+                        "WHERE scope_id = ? AND source = ?",
+                        (scope_id, CHUNK_COOCCUR_SOURCE),
+                    ).fetchone()[0])
+                else:
+                    stats.pairs_recomputed = 0
             else:
                 # Per-phrase cascade. Resolve kw_ids in one batch.
                 phrase_list = list(dict.fromkeys(phrases or []))
@@ -4391,17 +4520,7 @@ def forget_scope_phrases(
                     conn.execute("COMMIT")
                     stats.elapsed_seconds = time.perf_counter() - started
                     return stats
-                # keywords are stored casefolded; auto_ngram_dict phrases
-                # are stored as-detected (mixed CJK + case). Look up both
-                # sides case-insensitively so ``forget --phrase pdc主席``
-                # matches a stored ``PDC主席`` — otherwise the cascade
-                # would fire (casefolded kw_id resolves) but the asset
-                # row would silently survive, leaving an orphaned dict
-                # entry that resurfaces on the next build.
                 kw_lookup = interner.kw_ids_ro([p.casefold() for p in phrase_list])
-                # Detect phrases present in the dict for this scope by
-                # LOWER(phrase) match, then remember the *actual stored
-                # casings* so the DELETE targets exactly those rows.
                 lowered_inputs = [p.casefold() for p in phrase_list]
                 placeholders = ",".join("?" for _ in lowered_inputs)
                 dict_present_pairs = conn.execute(
@@ -4415,8 +4534,6 @@ def forget_scope_phrases(
                     cf = phrase.casefold()
                     if cf not in dict_present_lowered and cf not in kw_lookup:
                         stats.phrases_missing.append(phrase)
-                # Cascade delete keyword_docs rows for the matching kw
-                # ids in this scope.
                 target_kw_ids = [
                     kw_lookup[p.casefold()] for p in phrase_list
                     if p.casefold() in kw_lookup
@@ -4441,17 +4558,11 @@ def forget_scope_phrases(
                         [scope_id, CHUNK_COOCCUR_SOURCE,
                          *target_kw_ids, *target_kw_ids],
                     )
-                    # Also drop the affected keyword_stats rows; the pair
-                    # rows for OTHER kws are left as-is (design D6: pairs
-                    # only shrink when explicitly forgotten, chunk_df of
-                    # unaffected kws is unchanged since we did not modify
-                    # any doc's ``n_chunks_with_kw`` here).
                     conn.execute(
                         f"DELETE FROM keyword_stats "
                         f"WHERE kw_id IN ({kw_placeholders}) AND scope_id = ?",
                         [*target_kw_ids, scope_id],
                     )
-                # Delete the asset-layer rows.
                 if dict_present:
                     dict_list = sorted(dict_present)
                     dp = ",".join("?" for _ in dict_list)
@@ -4461,12 +4572,6 @@ def forget_scope_phrases(
                         [scope_id, *dict_list],
                     )
                     stats.ngram_dict_removed = len(dict_list)
-                # Report the surviving pair count as pairs_recomputed
-                # (contract-stable field). No full recompute needed in v9:
-                # deleting a kw only removes its own edges; other pairs'
-                # cooccur_count / chunk_df are unaffected. npmi for
-                # surviving pairs is stable because n_chunks did not change
-                # (no docs were touched).
                 stats.pairs_recomputed = int(conn.execute(
                     "SELECT COUNT(*) FROM keyword_pairs "
                     "WHERE scope_id = ? AND source = ?",

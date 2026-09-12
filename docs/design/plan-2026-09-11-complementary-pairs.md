@@ -296,6 +296,8 @@ JSON 一致，格式细节留给 code agent；probe 文本输出同时去掉 `el
   c ≥ 1 的对）；全量零共现检测是 O(V²)，成本不可接受。若未来需要，单独开题。
 - **复用现有处理流程、零额外计算负担**（用户要求）：build 侧只对负 npmi
   对算显著性；查询侧同复杂度索引查找。不做全图扫描、不做 O(V²) 对比。
+- **每次构建清空 complementary_pairs**（用户曾挑战"互补对应是可保存资产，
+  为什么清空"）：结论 — **维持清空**。详见 §10「已挑战问题」。
 - **只存显著子集，不存全量负边**（红线 6）：07-17 OOM 教训——低阈值边数量
   巨大；互补表只收显著对，体积可控。
 - **超几何检验是纯数学恒等式**：与 npmi、log1p 同类（07-10 R32："数学恒等式
@@ -314,9 +316,46 @@ JSON 一致，格式细节留给 code agent；probe 文本输出同时去掉 `el
 | 互补行字段面 | **只留 kw/cooccur_count/c_over_e/p_value/via_seed**（砍 npmi、expected_count） |
 | probe 输出 | **加 complementary，去 elapsed_ms**（唯一动到现有输出的减法） |
 
-剩余开放点（code agent 可自行定，不回退拍板）：
-- 文本模式 complementary 段的具体格式（字段面与 JSON 一致即可）
-- `ComplementaryKeyword` 类的命名 / 放置（与 `RelatedKeyword` 同文件）
-- `c_over_e` 字段名的最终拼写（契约语义 = c/E，不改）
-- build 门常量的命名与 env 覆盖方式（测试需要时参考 `GRGA_PPR_MIN_NPMI`
-  的既有模式）
+## 10. 已挑战问题
+
+### 10.1 "互补对应是可保存资产，为什么每次构建清空？"（用户拍板后挑战）
+
+**用户论点**：互补对跟共现对（keyword_pairs）、字典（auto_ngram_dict）一样，应该是可保存的资产，build 时清空会丢弃已发现的互补知识。
+
+**结论：维持清空**（理由如下）：
+
+**事实基**（代码证据）：
+- keyword_pairs 在增量构建 (`mode="build"`) 下是 **UPSERT 累加**：
+  ```sql
+  ON CONFLICT(...) DO UPDATE SET
+      cooccur_count = cooccur_count + excluded.cooccur_count
+  ```
+  旧 chunk 的配对数据永久保留，不清空。
+- 步骤 4 的 npmi UPDATE 覆盖全 scope：`UPDATE keyword_pairs SET npmi = ... WHERE scope_id = ? AND source = ?`
+- complementary_pairs 的重提取**从 keyword_pairs 的当前负 npmi 集合读取**——而 keyword_pairs 已累计全量 chunk 数据。所以**清空 complementary_pairs ≠ 丢数据**：未变更 chunk 的互补关系在重提取时会重新出现（数据已累计在 keyword_pairs 里）。
+
+**为什么不清除反而有害**：
+complementary_pairs 是**纯派生信号**——没有 raw 成分。
+对比三者的资产性质：
+
+| 资产 | raw 成分 | 派生成分 | 可否"原样保存" |
+|---|---|---|---|
+| auto_ngram_dict | 短语本身（如"404避难所"） | — | 可，一旦学会永留 |
+| keyword_pairs | cooccur_count（可累加） | npmi（每 build 重算） | raw 可累加，派生重算 |
+| complementary_pairs | **无**（c/E/p 全可推导） | c/E + p_value（每 build 重算） | 不可，无 raw 可留 |
+
+若不清除 complementary_pairs：
+- pair 从互补→共现（如 c 从 3 涨到 50，p 从 3.5e-20 → 0.9）后，**表内会保留已 transition 的旧行**（p=0.9 仍标记为"显著互补"——错误）
+- E[c]、p_value 已随 corpus 变化而失效（df_a/df_b/N 变了），保留等于陈腐信号
+
+**所以"保存资产"的正确机制是：keyword_pairs 累加 raw + 每 build 重算派生 npmi；complementary_pairs 每 build 从已累加的 keyword_pairs 重提取派生信号。** 两者同构，不对称。代码注释已写此 rationale：*"Pairs can transition between complementary and positive across incremental builds, so we clear the table first and re-populate from the current negative-npmi set"*（`build.py:4038-4042`）。
+
+**代价验证（符合"零额外计算负担"红线）**：重提取在步骤 4 内批量执行（`_extract_complementary_sql`，分批超几何检验），与 npmi 重算同代价，不额外增加构建负担。
+
+### 10.2 已解决（§9 清单）
+
+见 §9。
+
+## 11. 剩余开放点（code agent 可自行定，不回退拍板）
+
+ （同原 §9，内容不变）

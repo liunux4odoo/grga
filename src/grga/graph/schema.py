@@ -61,14 +61,16 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Union
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Oldest schema version that can be brought forward to :data:`SCHEMA_VERSION`
 # by a purely *additive* upgrade (``CREATE TABLE IF NOT EXISTS`` for the new
 # tables, no data rewrite). v10 → v11 adds ``scope_tags``; v11 → v12 adds
-# ``complementary_pairs``.  Both are pure-additive, so a v10 database is
-# upgraded in place rather than rejected.  Anything below this is a
-# non-backward-compatible pre-v10 shape and is rejected by
+# ``complementary_pairs``; v12 → v13 adds ``directory`` column to ``docs`` and
+# rebuilds the unique constraint to ``(scope_id, directory, doc_path)``.  All
+# are in-place upgrades (v13 rebuilds the docs table but preserves data), so a
+# v10 database is upgraded in place rather than rejected.  Anything below this
+# is a non-backward-compatible pre-v10 shape and is rejected by
 # :func:`_reject_legacy_db`.
 MIN_UPGRADABLE_VERSION = 10
 
@@ -204,17 +206,21 @@ CREATE TABLE IF NOT EXISTS keywords (
 _CREATE_DOCS = """
 -- Evidence layer: per-file metadata for incremental build detection.
 -- ``scope_id`` is denormalised for a fast per-scope filter without a
--- ``scope_directories`` JOIN. ``doc_path`` is relative to the directory
--- that ``docs`` was indexed under (recorded in ``scope_directories``).
+-- ``scope_directories`` JOIN. ``directory`` records which directory
+-- binding this doc came from (matches ``scope_directories.directory``);
+-- ``doc_path`` is relative to that directory.  The identity triple
+-- ``(scope_id, directory, doc_path)`` lets a single scope safely bind
+-- multiple directories whose relative paths may overlap.
 CREATE TABLE IF NOT EXISTS docs (
     id INTEGER PRIMARY KEY,
     scope_id INTEGER NOT NULL REFERENCES scopes(id),
+    directory TEXT NOT NULL DEFAULT '',
     doc_path TEXT NOT NULL,
     size INTEGER,
     mtime REAL,
     content_hash TEXT,
     n_chunks_with_kw INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(scope_id, doc_path)
+    UNIQUE(scope_id, directory, doc_path)
 );
 """
 
@@ -567,17 +573,65 @@ def _reject_legacy_db(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """Upgrade ``docs`` to include a ``directory`` column (default ``''``)
+    and rebuild the UNIQUE constraint from ``(scope_id, doc_path)`` to
+    ``(scope_id, directory, doc_path)``.
+
+    SQLite does not support ``ALTER TABLE ... ADD CONSTRAINT``, so the
+    table is rebuilt via the standard create-copy-drop-rename pattern.
+    Existing data is preserved with ``directory = ''`` (legacy rows).
+    """
+    # Check if the directory column already exists (idempotency).
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(docs)").fetchall()]
+    if "directory" in cols:
+        return
+    conn.execute(
+        """
+        CREATE TABLE docs_new (
+            id INTEGER PRIMARY KEY,
+            scope_id INTEGER NOT NULL REFERENCES scopes(id),
+            directory TEXT NOT NULL DEFAULT '',
+            doc_path TEXT NOT NULL,
+            size INTEGER,
+            mtime REAL,
+            content_hash TEXT,
+            n_chunks_with_kw INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(scope_id, directory, doc_path)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO docs_new
+            (id, scope_id, directory, doc_path, size, mtime, content_hash,
+             n_chunks_with_kw)
+        SELECT id, scope_id, '', doc_path, size, mtime, content_hash,
+               n_chunks_with_kw
+        FROM docs
+        """
+    )
+    conn.execute("DROP TABLE docs")
+    conn.execute("ALTER TABLE docs_new RENAME TO docs")
+    # Recreate indexes that reference docs columns.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_docs_scope ON docs (scope_id)"
+    )
+
+
 def ensure_schema(conn: sqlite3.Connection) -> int:
-    """Idempotently bring ``conn`` to schema v11.
+    """Idempotently bring ``conn`` to schema v13.
 
     * Fresh database (no legacy marker, ``user_version == 0``): create
       every current table + index, stamp ``user_version = SCHEMA_VERSION``.
     * Already at ``SCHEMA_VERSION``: fast no-op path.
     * In the additive upgrade window (``user_version`` in
-      ``[MIN_UPGRADABLE_VERSION, SCHEMA_VERSION)``, currently just v10):
-      run the idempotent ``CREATE TABLE IF NOT EXISTS`` DDL to add the
-      new tables (e.g. ``scope_tags``), then restamp ``user_version``.
-      No data is rewritten — existing rows are untouched.
+      ``[MIN_UPGRADABLE_VERSION, SCHEMA_VERSION)``, i.e. v10/v11/v12):
+      run the idempotent ``CREATE TABLE IF NOT EXISTS`` DDL for new
+      tables, then run the v12→v13 ``docs`` table rebuild for the
+      constraint / column change, then restamp ``user_version``.
+      No data is lost — v12→v13 rebuilds ``docs`` with
+      ``directory = ''`` for legacy rows.
     * Any pre-v10 shape (legacy tables present, or ``user_version`` in
       ``1..(MIN_UPGRADABLE_VERSION - 1)``) or a future version: raise
       with an actionable recovery message (:func:`_reject_legacy_db`).
@@ -597,15 +651,20 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
         _reject_legacy_db(conn)
 
     # Fresh DB *or* an additive upgrade from an older-but-compatible
-    # version (v10 → v11). Both run the same idempotent DDL — new tables
-    # are created, existing tables are left intact by ``IF NOT EXISTS`` —
-    # then restamp the version. Wrap in a caller-owned transaction if one
-    # is open, otherwise open our own.
+    # version. Run idempotent DDL for add-only tables, then the
+    # structural v12→v13 docs rebuild if needed, then restamp the
+    # version. Wrap in a caller-owned transaction if one is open,
+    # otherwise open our own.
     owned_txn = not conn.in_transaction
     if owned_txn:
         conn.execute("BEGIN IMMEDIATE")
     try:
         _create_current_tables(conn)
+        # v12 → v13: rebuild docs table with directory column + new UNIQUE.
+        # Safe to call unconditionally — it is idempotent (checks column
+        # presence first) and only touches the docs table.
+        if _table_exists(conn, "docs"):
+            _migrate_v12_to_v13(conn)
         conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
         if owned_txn:
             conn.execute("COMMIT")

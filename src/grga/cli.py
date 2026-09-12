@@ -1336,6 +1336,10 @@ def index_rebuild_command(
     refresh_ngram: str = typer.Option("append", "--refresh-ngram", help="Vocabulary policy: `append` keeps the existing dict and adds newly detected phrases (default); `never` skips detection and uses the current dict as-is; `replace` clears the dict first, then relearns from the full scope."),
     seed_ngram_from: Optional[str] = typer.Option(None, "--seed-ngram-from", help="Cold-start the tokeniser with another scope's auto n-gram dictionary (v10). Useful after `grga index import`. Target-scope entries take precedence on collision."),
     tags: List[str] = typer.Option([], "--tag", help="Attach a multi-value scope tag (schema v11). Repeatable — e.g. `--tag 科幻 --tag 小说`. Accumulate-only (existing tags survive a rebuild); remove with `grga scope tag rm`."),
+    keep_dict: bool = typer.Option(False, "--keep-dict", help="Preserve `auto_ngram_dict` across the rebuild (same effect as --refresh-ngram=never but expressed as a knowledge-preservation flag). Mutually exclusive with --refresh-ngram=replace."),
+    keep_pairs: bool = typer.Option(False, "--keep-pairs", help="Preserve keyword pairs + complementary pairs + keyword_stats + scope_stats across the rebuild. New docs' pairs are merged in via UPSERT-add (cooccur_count accumulates); npmi is frozen unless --recompute-pairs is also passed."),
+    keep_assets: bool = typer.Option(False, "--keep-assets", help="Shorthand: --keep-dict + --keep-pairs (preserve all knowledge-layer assets)."),
+    recompute_pairs: bool = typer.Option(False, "--recompute-pairs", help="After the rebuild, recompute npmi / chunk_df for ALL pairs in this scope. Only meaningful with --keep-pairs or --keep-assets."),
     include_glob: List[str] = typer.Option([], "--include-glob", help="Only index files whose path relative to --directory matches any of these loose, case-insensitive fnmatch patterns (`*` crosses `/`). Repeatable. Empty = accept all. Files excluded here are NOT removed from the index (weak semantics): they simply do not participate in this build."),
     exclude_glob: List[str] = typer.Option([], "--exclude-glob", help="Skip files whose path relative to --directory matches any of these loose, case-insensitive fnmatch patterns (`*` crosses `/`). Repeatable. Exclude wins over include. Files excluded here are NOT removed from the index (weak semantics): they simply do not participate in this build."),
     no_default_exclude: bool = typer.Option(False, "--no-default-exclude", help="Do not apply the default exclusion globs (archives, executables, node_modules/__pycache__/... that search also skips). The build's own transient-dir safety net (ignore_dirs: .git/.grga/.venv/node_modules/__pycache__) still applies."),
@@ -1343,11 +1347,17 @@ def index_rebuild_command(
     top_n_kw: Optional[int] = typer.Option(None, "--top-n-kw", help="Only used with --batch-chunks>0. Per-chunk keyword cap for pair enumeration (higher=more pairs, more RAM). Default via env GRGA_BATCH_TOP_N (default 64)."),
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
-    """Full-scope re-scan: clear the index + derived layers, then rebuild.
+    """Full-scope re-scan: clear evidence layers, then rebuild.
 
-    The n-gram vocabulary (asset layer) is preserved by default and
-    refreshed with newly detected phrases. Use ``--refresh-ngram=replace``
-    to also clear the vocabulary. See design doc §3.2.
+    By default clears the evidence layer (docs / keyword_docs /
+    heading_docs) and rebuilds from ``--directory``, while preserving
+    the n-gram vocabulary (``--refresh-ngram=append``). Use
+    ``--refresh-ngram=replace`` to also clear the vocabulary.
+
+    Use ``--keep-pairs`` / ``--keep-assets`` to preserve knowledge-layer
+    assets (keyword pairs, stats) across the rebuild — new evidence is
+    merged in, and npmi can be refreshed with ``--recompute-pairs``.
+    See design doc §3.2.
     """
     from grga.graph.build import (
         VALID_CHUNK_MODES, VALID_REFRESH_NGRAM,
@@ -1364,6 +1374,27 @@ def index_rebuild_command(
         raise typer.Exit(2)
     if max_ngram_n < 2:
         typer.echo("--max-ngram-n must be >= 2", err=True)
+        raise typer.Exit(2)
+
+    if keep_assets:
+        keep_dict = True
+        keep_pairs = True
+
+    if keep_dict and refresh_ngram == "replace":
+        typer.echo(
+            "rebuild: --keep-dict and --refresh-ngram=replace are mutually "
+            "exclusive. Use --keep-dict to preserve the vocabulary, or "
+            "drop --keep-dict to let replace clear it.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    if recompute_pairs and not keep_pairs:
+        typer.echo(
+            "rebuild: --recompute-pairs requires --keep-pairs or --keep-assets "
+            "(otherwise no pre-existing pairs remain to recompute)",
+            err=True,
+        )
         raise typer.Exit(2)
 
     rich_on_event = None
@@ -1398,6 +1429,9 @@ def index_rebuild_command(
             top_n_kw=top_n_kw,
             text_progress=text_progress,
             rich_on_event=rich_on_event,
+            keep_dict=keep_dict,
+            keep_pairs=keep_pairs,
+            recompute_pairs=recompute_pairs,
         )
     finally:
         if rich_close is not None:
@@ -1432,6 +1466,9 @@ def _run_index_build(
     top_n_kw: Optional[int] = None,
     text_progress,
     rich_on_event,
+    keep_dict: bool = False,
+    keep_pairs: bool = False,
+    recompute_pairs: bool = False,
 ):
     """Shared runner for `index build` and `index rebuild`.
 
@@ -1480,6 +1517,9 @@ def _run_index_build(
         top_n_kw=top_n_kw,
         progress=text_progress,
         on_event=rich_on_event,
+        keep_dict=keep_dict,
+        keep_pairs=keep_pairs,
+        recompute_pairs=recompute_pairs,
     )
 
 
@@ -1488,22 +1528,56 @@ def index_forget_command(
     scope: str = typer.Option(..., "--scope", "-s", help="Logical scope name (v10) whose asset layer to touch. Missing scopes are a no-op."),
     db_path: Optional[Path] = typer.Option(None, "--db-path", "--db", help="SQLite graph library path (defaults to shared deep-search DB)."),
     phrase: List[str] = typer.Option([], "--phrase", "-p", help="Phrase to forget from `auto_ngram_dict`. Repeatable. Cascades: removes `keyword_chunks` rows for the matching keyword id in this scope and `keyword_pairs` edges with the phrase on either endpoint, then re-derives `keyword_pairs` (npmi depends on scope-global n_chunks / chunk_df)."),
-    all_phrases: bool = typer.Option(False, "--all", help="Wipe the whole scope: `auto_ngram_dict` + index layer three tables + `keyword_pairs.chunk_cooccur`. `llm_promoted` pairs are preserved. Follow with `grga index build` to rebuild from scratch."),
+    all_phrases: bool = typer.Option(False, "--all", help="[deprecated] Wipe the whole scope: `auto_ngram_dict` + index layer three tables + `keyword_pairs.chunk_cooccur`. `llm_promoted` pairs are preserved. Follow with `grga index build` to rebuild from scratch. Now the default behaviour (pass no --phrase)."),
+    keep_dict: bool = typer.Option(False, "--keep-dict", help="When wiping the whole scope, preserve `auto_ngram_dict` (the n-gram tokeniser vocabulary). Evidence layer (docs / keyword_docs / heading_docs) is still cleared."),
+    keep_pairs: bool = typer.Option(False, "--keep-pairs", help="When wiping the whole scope, preserve keyword pairs + complementary pairs + keyword_stats + scope_stats (all knowledge-layer pair assets). npmi is left frozen at its current value."),
+    keep_assets: bool = typer.Option(False, "--keep-assets", help="Shorthand: --keep-dict + --keep-pairs (preserve all knowledge-layer assets)."),
+    recompute_pairs: bool = typer.Option(False, "--recompute-pairs", help="Recompute npmi / chunk_df for all preserved pairs after the wipe. Only meaningful with --keep-pairs or --keep-assets."),
     min_pair_count: int = typer.Option(5, "--min-pair-count", help="[Deprecated in v9 — accepted for backward CLI compatibility but not used. Per-phrase forget in v9 does not recompute pairs (unaffected pairs' cooccur / chunk_df / npmi are stable).]", hidden=True),
 
     json_output: bool = typer.Option(False, "--json", help="Print raw JSON stats."),
 ):
-    """Remove phrases from the vocabulary (asset layer) with cascading cleanup.
+    """Remove phrases or wipe a scope's evidence / knowledge layers.
 
-    This is the manual, minimum-viable form of the future decay mechanism.
-    Design doc §3.3-3.4.
+    Default (no --phrase): wipe the whole scope's evidence layer +
+    auto-generated knowledge assets.  ``llm_promoted`` pairs and
+    ``scope_directories`` bindings are preserved.  Use ``--keep-dict``,
+    ``--keep-pairs``, or ``--keep-assets`` to preserve specific
+    knowledge-layer tables.
+
+    With ``--phrase``: remove specific phrases from the vocabulary with
+    cascading cleanup.  This is the manual, minimum-viable form of the
+    future decay mechanism.  Design doc §3.3-3.4.
     """
     from grga.graph.build import forget_scope_phrases
 
-    if bool(phrase) == bool(all_phrases):
+    if keep_assets:
+        keep_dict = True
+        keep_pairs = True
+
+    if phrase:
+        if keep_dict or keep_pairs or keep_assets or recompute_pairs:
+            typer.echo(
+                "forget: --keep-* / --recompute-pairs only apply to the "
+                "full-wipe mode (no --phrase)",
+                err=True,
+            )
+            raise typer.Exit(2)
+    else:
+        if all_phrases:
+            emit_warning(
+                "deprecated",
+                "--all is deprecated; forgetting the whole scope is now the "
+                "default behaviour. The flag is a no-op and will be removed "
+                "in a future release.",
+                json_mode=json_output,
+            )
+        all_phrases = True  # default = full wipe
+
+    if recompute_pairs and not keep_pairs:
         typer.echo(
-            "forget: pass either --phrase <X> (repeatable) or --all "
-            "(exactly one)",
+            "forget: --recompute-pairs requires --keep-pairs or --keep-assets "
+            "(otherwise no pairs remain to recompute)",
             err=True,
         )
         raise typer.Exit(2)
@@ -1514,6 +1588,9 @@ def index_forget_command(
             db_path=str(db_path) if db_path else None,
             phrases=phrase if phrase else None,
             all_phrases=all_phrases,
+            keep_dict=keep_dict,
+            keep_pairs=keep_pairs,
+            recompute_pairs=recompute_pairs,
         )
     except ValueError as exc:
         typer.echo(f"forget: {exc}", err=True)
@@ -1523,9 +1600,20 @@ def index_forget_command(
         typer.echo(json.dumps(stats.to_dict(), ensure_ascii=False, indent=2))
         return
     if stats.all_wiped:
+        parts = [f"{stats.keyword_chunks_removed} keyword_docs rows"]
+        if not stats.keep_dict:
+            parts.append(f"{stats.ngram_dict_removed} auto_ngram phrases")
+        if not stats.keep_pairs:
+            parts.append("keyword_pairs + stats")
+        else:
+            if recompute_pairs:
+                parts.append(f"pair npmi recomputed ({stats.pairs_recomputed} pairs)")
+            else:
+                parts.append(f"pairs preserved frozen ({stats.pairs_recomputed} pairs)")
+        if stats.keep_dict:
+            parts.append("dict preserved")
         typer.echo(
-            f"forget --all: cleared {stats.ngram_dict_removed} phrases + "
-            f"{stats.keyword_chunks_removed} keyword_chunks rows for "
+            f"forget: cleared {', '.join(parts)} for "
             f"{stats.scope} in {stats.elapsed_seconds:.2f}s"
         )
     else:
