@@ -1007,10 +1007,10 @@ def _run_step4(variant: str, tmp_path: Path, fixture: dict) -> list[tuple]:
         min_npmi = fixture["min_npmi"]
         if variant == "sql":
             _step4_sql(conn, scope_id=scope_id, min_npmi=min_npmi,
-                       n_chunks=n_chunks, on_event=events.append)
+                       n_chunks=n_chunks, now=now, on_event=events.append)
         elif variant == "batch":
             _step4_batch(conn, scope_id=scope_id, min_npmi=min_npmi,
-                         n_chunks=n_chunks, on_event=events.append,
+                         n_chunks=n_chunks, now=now, on_event=events.append,
                          batch_size=_NPMI_BATCH_SIZE)
         else:
             raise ValueError(variant)
