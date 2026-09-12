@@ -54,6 +54,7 @@ from grga.file_read import (
 from grga.search import _normalize_glob_patterns
 from grga.graph.ids import IdInterner, sql_var_chunks
 from grga.graph.schema import (
+    BUILD_COMPLEMENTARY_MAX_P,
     BUILD_MIN_NPMI,
     BUILD_MIN_PAIR_COUNT,
     CHUNK_COOCCUR_SOURCE,
@@ -1567,6 +1568,61 @@ def _npmi(cooccur: int, df_a: int, df_b: int, n_chunks: int) -> Optional[float]:
     return pmi / denom
 
 
+def _hypergeom_lower_tail(k: int, N: int, K: int, n: int) -> float:
+    """Hypergeometric lower-tail cumulative probability P(X ≤ k).
+
+    Population size ``N``, success states ``K``, draws ``n``, observed
+    successes ``k``.  Returns the probability of observing *at most* ``k``
+    successes under the null of independent sampling without replacement.
+
+    Computed via the iterative ratio formula to avoid computing large
+    factorials directly.  ``k`` is clamped to ``[0, min(K, n)]`` and
+    ``N`` must be positive; otherwise returns ``1.0`` (ill-defined input
+    → treat as "not significant").
+
+    This is a pure mathematical identity in the same spirit as ``_npmi``
+    — no semantic prior, just a significance statistic derived from
+    chunk-df counts.
+    """
+    if N <= 0 or K <= 0 or n <= 0:
+        return 1.0
+    if k < 0:
+        return 0.0
+    k_max = min(K, n)
+    if k >= k_max:
+        return 1.0
+    # Swap K and n so K ≤ n — same distribution, fewer iterations when
+    # k is small relative to K (typical for the complementary case where
+    # co-occurrence is far below expectation).
+    if K > n:
+        K, n = n, K
+    # p(0) = C(N-K, n) / C(N, n)
+    # Computed via log-gamma for numerical stability on large N.
+    def _log_binom(a: int, b: int) -> float:
+        if b < 0 or b > a:
+            return float("-inf")
+        return (
+            math.lgamma(a + 1)
+            - math.lgamma(b + 1)
+            - math.lgamma(a - b + 1)
+        )
+
+    log_p_0 = _log_binom(N - K, n) - _log_binom(N, n)
+    total = math.exp(log_p_0)
+    if k == 0:
+        return min(1.0, total)
+    # Iterative: p(i+1) = p(i) * (K - i) * (n - i) / ((i + 1) * (N - K - n + i + 1))
+    log_p = log_p_0
+    for i in range(k):
+        numerator = (K - i) * (n - i)
+        denominator = (i + 1) * (N - K - n + i + 1)
+        if denominator <= 0:
+            break
+        log_p += math.log(numerator) - math.log(denominator)
+        total += math.exp(log_p)
+    return min(1.0, total)
+
+
 def _load_structure(path: Path):
     """Return a StructureDoc or None (Markdown only, best-effort)."""
     suffix = path.suffix.lower()
@@ -2631,6 +2687,10 @@ def build_graph_index(
                 "DELETE FROM keyword_pairs WHERE scope_id = ? AND source = ?",
                 (scope_id, CHUNK_COOCCUR_SOURCE),
             )
+            conn.execute(
+                "DELETE FROM complementary_pairs WHERE scope_id = ?",
+                (scope_id,),
+            )
             if refresh_ngram == "replace":
                 conn.execute(
                     "DELETE FROM auto_ngram_dict WHERE scope_id = ?",
@@ -3453,12 +3513,12 @@ def build_graph_index(
                 if _sqlite_has_ln(conn):
                     _step4_sql(
                         conn, scope_id=scope_id, min_npmi=float(min_npmi),
-                        n_chunks=n_chunks, on_event=on_event,
+                        n_chunks=n_chunks, now=now, on_event=on_event,
                     )
                 else:
                     _step4_batch(
                         conn, scope_id=scope_id, min_npmi=float(min_npmi),
-                        n_chunks=n_chunks, on_event=on_event,
+                        n_chunks=n_chunks, now=now, on_event=on_event,
                         batch_size=_NPMI_BATCH_SIZE,
                     )
                 surviving = int(conn.execute(
@@ -3746,12 +3806,12 @@ def _finalize_pairs_from_temp(
     if _sqlite_has_ln(conn):
         _step4_sql(
             conn, scope_id=scope_id, min_npmi=min_npmi,
-            n_chunks=n_chunks, on_event=on_event,
+            n_chunks=n_chunks, now=now, on_event=on_event,
         )
     else:
         _step4_batch(
             conn, scope_id=scope_id, min_npmi=min_npmi,
-            n_chunks=n_chunks, on_event=on_event,
+            n_chunks=n_chunks, now=now, on_event=on_event,
             batch_size=_NPMI_BATCH_SIZE,
         )
 
@@ -3804,12 +3864,113 @@ def _sqlite_has_ln(conn) -> bool:
         return False
 
 
+def _extract_complementary_sql(
+    conn,
+    *,
+    scope_id: int,
+    n_chunks: int,
+    batch_size: int,
+    now: str,
+) -> None:
+    """Move significantly complementary (negative-npmi) pairs into
+    ``complementary_pairs`` before they are deleted from ``keyword_pairs``.
+
+    The SQL backend recomputes npmi in pure SQL, so the negative-npmi
+    rows already live in ``keyword_pairs`` when we reach the DELETE step.
+    This helper streams them out in batches, evaluates the
+    hypergeometric lower-tail p-value in Python, and parks the
+    significant ones in ``complementary_pairs``.
+
+    Only pairs with ``npmi < 0`` AND ``p_value < BUILD_COMPLEMENTARY_MAX_P``
+    are stored.  Glued pairs (df_a == df_b == cooccur_count) are
+    skipped — they are trivially correlated, not complementary.
+
+    The batch size bounds peak Python heap the same way ``_step4_batch``
+    does.
+    """
+    if n_chunks <= 0:
+        return
+    # Pull chunk_df for all keywords in this scope once.  The dict is
+    # reused across batches.  For scopes with a huge vocabulary this
+    # could be large, but ``_step4_batch`` already does the same thing
+    # so this is no additional memory vs. the fallback path.
+    chunk_df: Dict[int, int] = {
+        int(r[0]): int(r[1]) for r in conn.execute(
+            "SELECT kw_id, chunk_df FROM keyword_stats WHERE scope_id = ?",
+            (scope_id,),
+        )
+    }
+
+    last_a = -1
+    last_b = -1
+    while True:
+        rows = conn.execute(
+            """
+            SELECT kw_a_id, kw_b_id, cooccur_count, npmi
+            FROM keyword_pairs
+            WHERE scope_id = ? AND source = ?
+              AND npmi < 0.0
+              AND (kw_a_id, kw_b_id) > (?, ?)
+            ORDER BY kw_a_id, kw_b_id
+            LIMIT ?
+            """,
+            (scope_id, CHUNK_COOCCUR_SOURCE, last_a, last_b, batch_size),
+        ).fetchall()
+        if not rows:
+            break
+
+        comp_rows: List[Tuple[int, int, int, float, float, float, str]] = []
+        for row in rows:
+            a, b, co = int(row[0]), int(row[1]), float(row[2])
+            npmi_val = float(row[3]) if row[3] is not None else None
+            df_a = chunk_df.get(a, 0)
+            df_b = chunk_df.get(b, 0)
+            co_int = int(co)
+            # Gate 1 (glued): skip — same rationale as _step4_batch.
+            glued = (
+                df_a > 0 and df_b > 0
+                and df_a == df_b == co_int
+            )
+            if (
+                npmi_val is not None
+                and npmi_val < 0.0
+                and not glued
+                and df_a > 0
+                and df_b > 0
+            ):
+                expected = df_a * df_b / n_chunks
+                if expected > 0:
+                    p_val = _hypergeom_lower_tail(
+                        co_int, n_chunks, df_a, df_b
+                    )
+                    if p_val < BUILD_COMPLEMENTARY_MAX_P:
+                        comp_rows.append((
+                            scope_id, a, b,
+                            float(co),
+                            float(expected),
+                            float(npmi_val),
+                            float(p_val),
+                            now,
+                        ))
+            last_a, last_b = a, b
+
+        if comp_rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO complementary_pairs "
+                "(scope_id, kw_a_id, kw_b_id, cooccur_count, "
+                " expected_count, npmi, p_value, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                comp_rows,
+            )
+
+
 def _step4_sql(
     conn,
     *,
     scope_id: int,
     min_npmi: float,
     n_chunks: int,
+    now: str,
     on_event: Optional[Callable[[dict], None]],
 ) -> None:
     """Recompute npmi via one UPDATE + delete degenerates via one DELETE.
@@ -3872,6 +4033,29 @@ def _step4_sql(
     # floor; (c) Gate 1 "glued" — three-way integer equality
     # df_a = df_b = cooccur_count. Using EXISTS(SELECT ... FROM df JOIN df)
     # keeps the glued check as an int comparison (mainline invariant).
+    #
+    # Rebuild complementary_pairs for this scope from scratch.
+    # Pairs can transition between complementary and positive across
+    # incremental builds (cooccurrence counts change), so we clear the
+    # table first and re-populate from the current negative-npmi set in
+    # keyword_pairs.  This preserves the invariant that
+    # complementary_pairs contains ONLY pairs that are significantly
+    # anti-co-occurring right now.
+    conn.execute(
+        "DELETE FROM complementary_pairs WHERE scope_id = ?",
+        (scope_id,),
+    )
+    # Before deleting the negative-npmi rows, sieve for
+    # *significantly* complementary pairs and park them in
+    # ``complementary_pairs``.  We can't do the hypergeometric test
+    # efficiently in pure SQL (it needs an iterative sum), so we stream
+    # the negative-npmi candidates in batches and evaluate them in
+    # Python.  Only pairs that pass the p-value gate survive; the rest
+    # are simply deleted with the rest of the below-threshold rows.
+    _extract_complementary_sql(
+        conn, scope_id=scope_id, n_chunks=n_chunks,
+        batch_size=_NPMI_BATCH_SIZE, now=now,
+    )
     conn.execute(
         """
         WITH df AS (
@@ -3913,6 +4097,7 @@ def _step4_batch(
     scope_id: int,
     min_npmi: float,
     n_chunks: int,
+    now: str,
     on_event: Optional[Callable[[dict], None]],
     batch_size: int,
 ) -> None:
@@ -3951,6 +4136,14 @@ def _step4_batch(
     last_a = -1
     last_b = -1
 
+    # Rebuild complementary_pairs for this scope from scratch.
+    # Same rationale as the SQL backend: pairs can transition between
+    # complementary and positive across incremental builds, so we clear
+    # first and re-populate.
+    conn.execute(
+        "DELETE FROM complementary_pairs WHERE scope_id = ?",
+        (scope_id,),
+    )
     while True:
         # Row-value tuple compare is index-aware since SQLite 3.15 (2016):
         # ``(kw_a_id, kw_b_id) > (?, ?)`` becomes a true PK-range seek. The
@@ -3975,6 +4168,7 @@ def _step4_batch(
 
         updates: List[Tuple[float, int, int, int]] = []
         drops: List[Tuple[int, int, int]] = []
+        comp_rows: List[Tuple[int, int, int, float, float, float, str]] = []
         for row in rows:
             a, b, co = int(row[0]), int(row[1]), int(row[2])
             df_a = chunk_df.get(a, 0)
@@ -3987,6 +4181,33 @@ def _step4_batch(
             glued = df_a > 0 and df_b > 0 and df_a == df_b == co
             if npmi is None or glued or (min_npmi > 0.0 and npmi < min_npmi):
                 drops.append((scope_id, a, b))
+                # Complementary-pair gate: only for pairs that have
+                # negative npmi (truly anti-co-occurring) and that are
+                # being dropped by the positive npmi filter.  Glued pairs
+                # are skipped — they are trivially correlated, not
+                # complementary.
+                if (
+                    npmi is not None
+                    and npmi < 0.0
+                    and not glued
+                    and n_chunks > 0
+                    and df_a > 0
+                    and df_b > 0
+                ):
+                    expected = df_a * df_b / n_chunks
+                    if expected > 0:
+                        p_val = _hypergeom_lower_tail(
+                            co, n_chunks, df_a, df_b
+                        )
+                        if p_val < BUILD_COMPLEMENTARY_MAX_P:
+                            comp_rows.append((
+                                scope_id, a, b,
+                                float(co),
+                                float(expected),
+                                float(npmi),
+                                float(p_val),
+                                now,
+                            ))
             else:
                 updates.append((float(npmi), scope_id, a, b))
             last_a, last_b = a, b
@@ -4007,6 +4228,14 @@ def _step4_batch(
                 "WHERE scope_id = ? AND kw_a_id = ? AND kw_b_id = ? "
                 "AND source = 'chunk_cooccur'",
                 updates,
+            )
+        if comp_rows:
+            conn.executemany(
+                "INSERT OR REPLACE INTO complementary_pairs "
+                "(scope_id, kw_a_id, kw_b_id, cooccur_count, "
+                " expected_count, npmi, p_value, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                comp_rows,
             )
 
     surviving = int(conn.execute(
@@ -4134,6 +4363,10 @@ def forget_scope_phrases(
                     "DELETE FROM keyword_pairs "
                     "WHERE scope_id = ? AND source = ?",
                     (scope_id, CHUNK_COOCCUR_SOURCE),
+                )
+                conn.execute(
+                    "DELETE FROM complementary_pairs WHERE scope_id = ?",
+                    (scope_id,),
                 )
                 conn.execute(
                     "DELETE FROM auto_ngram_dict WHERE scope_id = ?",

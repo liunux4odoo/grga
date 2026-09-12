@@ -84,6 +84,7 @@ class RemoveStats:
     keyword_docs_removed: int = 0
     heading_docs_removed: int = 0
     pairs_removed: int = 0
+    complementary_pairs_removed: int = 0
     stats_rows_removed: int = 0
     votes_removed: int = 0
     ngram_rows_removed: int = 0
@@ -99,6 +100,7 @@ class RemoveStats:
             "keyword_docs_removed": self.keyword_docs_removed,
             "heading_docs_removed": self.heading_docs_removed,
             "pairs_removed": self.pairs_removed,
+            "complementary_pairs_removed": self.complementary_pairs_removed,
             "stats_rows_removed": self.stats_rows_removed,
             "votes_removed": self.votes_removed,
             "ngram_rows_removed": self.ngram_rows_removed,
@@ -636,6 +638,11 @@ def remove_scope(
                 "DELETE FROM keyword_pairs WHERE scope_id = ?", (scope_id,)
             )
             stats.pairs_removed = int(cur.rowcount or 0)
+            cur = c.execute(
+                "DELETE FROM complementary_pairs WHERE scope_id = ?",
+                (scope_id,),
+            )
+            stats.complementary_pairs_removed = int(cur.rowcount or 0)
             cur = c.execute(
                 "DELETE FROM keyword_stats WHERE scope_id = ?", (scope_id,)
             )

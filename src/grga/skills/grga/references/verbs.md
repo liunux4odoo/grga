@@ -24,7 +24,7 @@ Envelope fields (`--json`):
 
 ```
 {ok, directory, patterns, terms, pcre2, implicit_operator, implicit_notice,
- total_lines, file_count, truncated, warning, skipped_files, elapsed_ms,
+ total_lines, file_count, truncated, warning, skipped_files,
  per_file?[{path, matches}], sample?{sampled_lines, avg_line_bytes, est_total_bytes}}
 ```
 
@@ -34,6 +34,10 @@ Envelope fields (`--json`):
 - `--per-file` — attach per-file match counts (descending), useful for spotting a single dominating file.
 - Query-semantic flags (`--mode` / `--case-sensitive` / `--iglob` / `--multiline` / `--path-only` / `--implicit-and` / `--implicit-or`) are **identical** to `search`, so the probed query and the executed query are the same. `--timeout` is a global budget covering both the count and the sampling pass.
 - On failure the JSON is **homogeneous** with the success shape (same fields, zeroed) plus `ok:false` and `error`.
+- `neighbors`（可选，仅内容探测且目录命中已绑定 scope 时出现）：首关键字在 `keyword_pairs` 图里的 top-5 近邻，按 `npmi` 降序。每项仅含 `kw` + `npmi`（float，round 6），作为"换词候选"提示。**键缺席 ≠ 空数组**：缺席 = 该目录没有可用图索引（无命中 scope / DB 不可用 / 查询异常）；`[]` = 有索引但该 seed 在图里无候选。多关键字时只对第一个 seed 输出。
+- `complementary`（可选，仅内容探测且目录命中已绑定 scope 时出现）：首关键字的**互补对**——共现显著低于随机期望的词。每项 `{kw, cooccur_count, c_over_e, p_value, via_seed}`，按 `c_over_e` 升序（偏离期望最极端者在前）。**不是别名检测器**：互补对只是统计信号，可能是别名、可能是范畴两极、可能是不同时间线称呼——语义归 caller 判断。键缺席语义同 `neighbors`。
+  - 什么时候用：T1 换词阶段就能发现"这个词有个从未同段出现的孪生词"，作为词汇盲区补充线索。
+  - 注意：`c_over_e` 是排序键（= cooccur / expected），`p_value` 是显著性门槛，两者独立——显著区内 p 值都极小，排序看偏离强度。
 
 `probe` makes **no** decision itself — it returns numbers, never rewrites the query, never judges "too many / too few". The caller owns the threshold logic.
 
@@ -157,6 +161,25 @@ Modes:
   `--min-npmi` 过紧 / scope 未 index）。前者换词 / `suggest reformulate`，
   后者换更具体 seed 或松开 `--min-npmi`。**避免 caller 为每个 seed 额外
   调一次 `grga graph inspect` 探路。**
+
+- **`complementary`**（仅 `--mode graph`）：互补对——共现**显著低于**
+  随机期望的词对（负 npmi + 超几何下尾 p_value < 0.05）。作为共现线索
+  的**补充**，与 `results` 并列。**不是别名检测器**：互补对只是统计
+  信号，语义归 caller 判断。
+
+  每行字段（最小集，刻意比 `results` 收敛）：
+  - `kw`：候选关键词（casefold）。
+  - `cooccur_count`：实际共现次数（证据量：c=1 vs c=50 的可信度不同）。
+  - `c_over_e`：cooccur / expected — 偏离随机期望的比率（排序键，升序）。
+  - `p_value`：超几何下尾显著性（caller 自设门槛）。
+  - `via_seed`：从哪个 seed 扩展来的（多 seed 不融合）。
+
+  排序：`(via_seed, c_over_e, kw)`。数量：与 `results` 共享
+  `--limit` / `limit_per_seed`。空语义：seed 在词表但无显著互补对 → `[]`。
+
+  什么时候用：T2 bookend 阶段发现"这个概念可能还有另一种叫法"，
+  或者排查"为什么两个高度相关的词从未同段出现"。不要把它当别名表用——
+  范畴两极、时间线称呼等也会产生互补信号。
 
 - `heading` — documents that share a full or leaf **Markdown heading path**
   with a seed-carrying document. Cross-scope by default (heading paths

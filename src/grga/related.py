@@ -311,6 +311,39 @@ class RelatedKeyword:
 
 
 @dataclass
+class ComplementaryKeyword:
+    """A single complementary (significantly anti-co-occurring) keyword.
+
+    Returned alongside ``RelatedKeyword`` in graph-mode related output.
+    The field surface is intentionally smaller than ``RelatedKeyword`` —
+    only what a caller needs to decide whether a pair is interesting.
+
+    Fields:
+        kw:            casefold candidate keyword.
+        cooccur_count: raw chunk co-occurrence count (evidence量).
+        c_over_e:      cooccur / expected — the deviation-from-expectation
+                       ratio (主排序键, 升序).
+        p_value:       hypergeometric lower-tail significance.
+        via_seed:      the seed that expanded to this candidate.
+    """
+
+    kw: str
+    cooccur_count: float
+    c_over_e: float
+    p_value: float
+    via_seed: str
+
+    def to_dict(self) -> dict:
+        return {
+            "kw": self.kw,
+            "cooccur_count": float(self.cooccur_count),
+            "c_over_e": round(float(self.c_over_e), 6),
+            "p_value": float(self.p_value),
+            "via_seed": self.via_seed,
+        }
+
+
+@dataclass
 class SeedResolution:
     """Per-seed vocabulary probe (envelope-level, multi-seed related).
 
@@ -349,17 +382,23 @@ class RelatedKeywordsResult:
     """Envelope returned by :func:`related_keywords`.
 
     Wraps the flat candidate stream (``results``) with a per-seed
-    vocabulary probe (``resolved_seeds``). The probe is the only piece of
-    envelope-level metadata the v3 graph contract exposes — everything else
-    (fusion, dedup, hit counts) stays derivable on the caller side.
+    vocabulary probe (``resolved_seeds``) and a complementary-pair
+    stream (``complementary``).  The probe is the only piece of
+    envelope-level metadata the v3 graph contract exposes — everything
+    else (fusion, dedup, hit counts) stays derivable on the caller
+    side.  ``complementary`` is an additive v12 field — pairs whose
+    chunk co-occurrence is *significantly below* the random expectation
+    (plan-2026-09-11-complementary-pairs).
     """
 
     results: List[RelatedKeyword]
+    complementary: List[ComplementaryKeyword]
     resolved_seeds: List[SeedResolution]
 
     def to_dict(self) -> dict:
         return {
             "results": [r.to_dict() for r in self.results],
+            "complementary": [c.to_dict() for c in self.complementary],
             "resolved_seeds": [s.to_dict() for s in self.resolved_seeds],
         }
 
@@ -436,13 +475,13 @@ def related_keywords(
     # preserves the pre-fallback zero-side-effect behaviour for empty
     # inputs (which callers may use as a defensive guard).
     if not any(_fold(s) for s in seeds):
-        return RelatedKeywordsResult(results=[], resolved_seeds=[])
+        return RelatedKeywordsResult(results=[], complementary=[], resolved_seeds=[])
     conn = connect(target_db)
     try:
         ensure_schema(conn)
         seed_folded = _resolve_seed_args(conn, seeds)
         if not seed_folded:
-            return RelatedKeywordsResult(results=[], resolved_seeds=[])
+            return RelatedKeywordsResult(results=[], complementary=[], resolved_seeds=[])
         return _related_keywords_impl(
             conn,
             seed_folded,
@@ -631,7 +670,8 @@ def _related_keywords_impl(
             # An explicit filter was requested but nothing matched. Bail
             # out rather than degrading to the cross-scope path.
             return RelatedKeywordsResult(
-                results=[], resolved_seeds=resolved_seeds
+                results=[], complementary=[],
+                resolved_seeds=resolved_seeds
             )
 
     seed_ids: List[Tuple[int, str]] = []
@@ -639,7 +679,9 @@ def _related_keywords_impl(
         if s in text_to_id:
             seed_ids.append((text_to_id[s], s))
     if not seed_ids:
-        return RelatedKeywordsResult(results=[], resolved_seeds=resolved_seeds)
+        return RelatedKeywordsResult(
+            results=[], complementary=[], resolved_seeds=resolved_seeds
+        )
 
     # Perf: the composite indexes ``idx_kp_{a,b}_npmi (scope_id, kw_?_id,
     # npmi DESC)`` support an ordered-LIMIT walk ONLY when ``scope_id`` is
@@ -668,7 +710,8 @@ def _related_keywords_impl(
         ]
         if not scope_ids:
             return RelatedKeywordsResult(
-                results=[], resolved_seeds=resolved_seeds,
+                results=[], complementary=[],
+                resolved_seeds=resolved_seeds,
             )
 
     seen_kw_ids: set = set()
@@ -774,7 +817,9 @@ def _related_keywords_impl(
         per_seed_rows.append((seed_text, ranked))
 
     if not seen_kw_ids:
-        return RelatedKeywordsResult(results=[], resolved_seeds=resolved_seeds)
+        return RelatedKeywordsResult(
+            results=[], complementary=[], resolved_seeds=resolved_seeds,
+        )
 
     # Batched translate: nbr kw_id → text + chunk_df. Chunk-partitioned to
     # dodge SQLITE_MAX_VARIABLE_NUMBER. ``keyword_stats`` rows are per-scope;
@@ -845,8 +890,115 @@ def _related_keywords_impl(
                 )
             )
     all_results.sort(key=lambda r: (r.via_seed, -r.npmi, r.kw))
+
+    # ------------------------------------------------------------------
+    # Complementary pairs — same scope/tag filter, different table.
+    # plan-2026-09-11-complementary-pairs.
+    # ------------------------------------------------------------------
+
+    # Collect complementary kw ids across all seeds so we can do a
+    # single batch id→text translate at the end.
+    comp_seen_kw_ids: set = set()
+    # Per-seed: (seed_text, [(nbr_id, cooccur, expected, p_value, scope_set)])
+    comp_per_seed: List[
+        Tuple[str, List[Tuple[int, float, float, float, "frozenset[int]"]]]
+    ] = []
+
+    for (seed_id, seed_text) in seed_ids:
+        comp_rows_a: List = []
+        comp_rows_b: List = []
+        for sid in scope_ids:
+            comp_rows_a.extend(conn.execute(
+                "SELECT kw_b_id, cooccur_count, expected_count, p_value, scope_id "
+                "FROM complementary_pairs "
+                "WHERE scope_id = ? AND kw_a_id = ? "
+                "ORDER BY (cooccur_count / NULLIF(expected_count, 0)) ASC "
+                "LIMIT ?",
+                (sid, seed_id, int(limit_per_seed)),
+            ).fetchall())
+            comp_rows_b.extend(conn.execute(
+                "SELECT kw_a_id, cooccur_count, expected_count, p_value, scope_id "
+                "FROM complementary_pairs "
+                "WHERE scope_id = ? AND kw_b_id = ? "
+                "ORDER BY (cooccur_count / NULLIF(expected_count, 0)) ASC "
+                "LIMIT ?",
+                (sid, seed_id, int(limit_per_seed)),
+            ).fetchall())
+
+        # Merge across scopes: for a given (nbr_id), keep the row with
+        # the *smallest* c_over_e (most complementary), and accumulate
+        # the scope set.  cooccur / expected are per-scope, so we sum
+        # them across scopes to get a combined c_over_e.
+        merged: Dict[int, Tuple[float, float, float, set]] = {}
+        for r in list(comp_rows_a) + list(comp_rows_b):
+            nbr_id = int(r[0])
+            cooccur = float(r[1])
+            expected = float(r[2])
+            p_val = float(r[3])
+            sid = int(r[4])
+            key = nbr_id
+            prev = merged.get(key)
+            if prev is None:
+                merged[key] = (cooccur, expected, p_val, {sid})
+            else:
+                prev_co, prev_exp, prev_p, prev_scopes = prev
+                new_co = prev_co + cooccur
+                new_exp = prev_exp + expected
+                new_scopes = prev_scopes | {sid}
+                # Keep the more significant (smaller) p_value as the
+                # representative — this is conservative for the caller's
+                # significance filter.
+                new_p = min(prev_p, p_val)
+                merged[key] = (new_co, new_exp, new_p, new_scopes)
+
+        ranked = sorted(
+            [
+                (nbr_id, cooccur, expected, p_val, frozenset(scopes))
+                for nbr_id, (cooccur, expected, p_val, scopes) in merged.items()
+                if expected > 0
+            ],
+            key=lambda t: (t[1] / t[2], t[0]),
+        )[:limit_per_seed]
+
+        for (nbr_id, _co, _exp, _p, scope_set) in ranked:
+            comp_seen_kw_ids.add(nbr_id)
+        comp_per_seed.append((seed_text, ranked))
+
+    # Batch translate complementary kw ids → text.
+    comp_kw_text: Dict[int, str] = {}
+    comp_id_list = list(comp_seen_kw_ids)
+    if comp_id_list:
+        chunk = 900
+        for i in range(0, len(comp_id_list), chunk):
+            piece = comp_id_list[i:i + chunk]
+            ph = ",".join("?" for _ in piece)
+            for r in conn.execute(
+                f"SELECT id, kw FROM keywords WHERE id IN ({ph})", piece
+            ):
+                comp_kw_text[int(r[0])] = str(r[1])
+
+    all_complementary: List[ComplementaryKeyword] = []
+    for seed_text, ranked in comp_per_seed:
+        for (nbr_id, cooccur, expected, p_val, _scope_set) in ranked:
+            kw = comp_kw_text.get(nbr_id, "")
+            if not kw:
+                continue
+            c_over_e = cooccur / expected if expected > 0 else 1.0
+            all_complementary.append(
+                ComplementaryKeyword(
+                    kw=kw,
+                    cooccur_count=cooccur,
+                    c_over_e=c_over_e,
+                    p_value=p_val,
+                    via_seed=seed_text,
+                )
+            )
+    all_complementary.sort(key=lambda c: (c.via_seed, c.c_over_e, c.kw))
+
     return RelatedKeywordsResult(
-        results=all_results, resolved_seeds=resolved_seeds
+        results=all_results,
+        complementary=all_complementary,
+        resolved_seeds=resolved_seeds,
     )
 
 

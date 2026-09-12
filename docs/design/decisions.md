@@ -4,6 +4,39 @@ Records deviations and explicit decisions made outside the main plan
 documents. Each entry names the plan step it relates to, the decision,
 and the rationale.
 
+## 2026-09-12 · 互补对信号（complementary pairs）
+
+**Plan doc**：`docs/design/plan-2026-09-11-complementary-pairs.md`
+
+**背景**：现有图只有正关联（keyword_pairs，npmi ≥ min_npmi）。但互补分布本身
+是强信号——别名对天然不同段出现，同一实体的两种称呼在正文里几乎不共现，
+这对 caller 来说是有用的盲区线索。
+
+**Decision**：新增 `complementary_pairs` 知识表（schema v12），收录"共现显著
+低于随机期望"（负 npmi + 超几何下尾 p < 0.05）的词对。**查询面不新增动词、
+不新增 mode**：`related --mode graph` 与 `probe` 的 JSON 输出里各并列一个
+新字段 `complementary`，与共现 key / 邻居词同场给出。probe 同时移除
+`elapsed_ms`（无消费方的装饰性输出）。
+
+已拍板的决策点：
+
+| # | 决策点 | 结论 |
+|---|---|---|
+| D1 | 定位 | **不是别名检测器**。互补对是泛信号（别名/范畴两极/时间线称呼），语义归因留给 caller |
+| D2 | 正侧关系 | 正侧（keyword_pairs / related results / probe neighbors）**零改动**；本方案是加法 |
+| D3 | 写入门槛 | `p_value < 0.05`（超几何下尾）；caller 可在返回值上再筛。只对 npmi < 0 的对计算，不做全图扫描 |
+| D4 | 查询排序 | `c_over_e` 升序（偏离期望最极端者在前）。显著性是门槛，不是排序键 |
+| D5 | 字段面（related/probe 输出） | 仅 `kw / cooccur_count / c_over_e / p_value / via_seed` 5 字段；砍 `npmi`（跨词对不可比、留着诱导错误比较）、砍 `expected_count`（可推导） |
+| D6 | 查询入口 | 并入 `related` 输出字段（与 results 并列）；`probe` 同样并入。不新增 mode / 动词 |
+| D7 | probe 输出 | 加 `complementary`，去 `elapsed_ms`（本方案唯一动到现有输出的地方，减法） |
+| D8 | c=0 零共现对 | **不做**。全量零共现检测是 O(V²)，成本不可接受 |
+| D9 | 计算负担 | build 侧只对负 npmi 对算显著性；查询侧同复杂度索引查找。零额外计算负担 |
+| D10 | 存储 | 只存显著子集（受 07-17 OOM 教训约束），不存全量负边 |
+| D11 | 复用 | 复用 `related_keywords` 的 scope/tag 解析、多 seed、limit、JSON 信封；probe 复用 `_attach_neighbors` 同款路径 |
+| D12 | 红线 | 禁止 `is_alias` / `quality` / `confidence` / `semantic_tag` 等任何 L2+ 判断字段 |
+
+---
+
 ## 2026-09-11 · probe 附带 neighbors 最小字段面
 
 **Plan doc**：`docs/design/plan-2026-09-11-probe-neighbors.md`

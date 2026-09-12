@@ -34,6 +34,14 @@
   输出 seed 的邻居 npmi 分布（min/median/max），caller 自己判断 0.3 算强还是弱；
   只暴露数据、不加评价。
 
+- **[P0] · #4 互补对信号（negative npmi）** ✅ 已落地
+  新增 `complementary_pairs` 表；`related --mode graph` 与 `probe` 输出并列
+  `complementary` 字段：收录"共现显著低于随机期望"（显著负 npmi，超几何下尾）
+  的词对，作为共现对线索的补充。probe 顺带移除 `elapsed_ms`（无消费方）。
+  *不是别名检测器——互补对是泛信号（别名/范畴两极/时间线称呼），语义归因留给 caller。*
+  *正侧（keyword_pairs / related results / probe neighbors）零改动，查询零额外计算负担（索引查找）。*
+  *方案：`docs/design/plan-2026-09-11-complementary-pairs.md`*
+
 - **[Backlog] · deep-search 定位重审**
   v1 遗产（2187 行 Advanced Planner），与 v2 五动词 + skill T0-T4 重叠。
   减法方向：对齐到原语动词之上，或退役。

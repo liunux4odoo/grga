@@ -68,6 +68,7 @@ class ExportStats:
     scopes_included: List[str] = field(default_factory=list)
     n_keywords: int = 0
     n_pairs: int = 0
+    n_complementary_pairs: int = 0
     n_stats: int = 0
     n_scope_stats: int = 0
     n_auto_ngram: int = 0
@@ -81,6 +82,7 @@ class ExportStats:
             "scopes_included": list(self.scopes_included),
             "n_keywords": int(self.n_keywords),
             "n_pairs": int(self.n_pairs),
+            "n_complementary_pairs": int(self.n_complementary_pairs),
             "n_stats": int(self.n_stats),
             "n_scope_stats": int(self.n_scope_stats),
             "n_auto_ngram": int(self.n_auto_ngram),
@@ -98,6 +100,7 @@ class ImportStats:
     into_scope: str
     n_keywords_new: int = 0
     n_pairs: int = 0
+    n_complementary_pairs: int = 0
     n_stats: int = 0
     n_auto_ngram: int = 0
     n_votes: int = 0
@@ -111,6 +114,7 @@ class ImportStats:
             "into_scope": self.into_scope,
             "n_keywords_new": int(self.n_keywords_new),
             "n_pairs": int(self.n_pairs),
+            "n_complementary_pairs": int(self.n_complementary_pairs),
             "n_stats": int(self.n_stats),
             "n_auto_ngram": int(self.n_auto_ngram),
             "n_votes": int(self.n_votes),
@@ -311,11 +315,12 @@ _ATTACH_COPY_TABLES = {
     # so a schema change breaks tests loudly rather than silently
     # copying garbage columns).
     "keyword_pairs": "scope_id, kw_a_id, kw_b_id, source, cooccur_count, npmi, updated_at",
+    "complementary_pairs": "scope_id, kw_a_id, kw_b_id, cooccur_count, expected_count, npmi, p_value, updated_at",
     "keyword_stats": "scope_id, kw_id, chunk_df, doc_df, total_occurrences, updated_at",
     "scope_stats":   "scope_id, n_chunks, n_docs, vocab_size, updated_at",
     "auto_ngram_dict": "scope_id, phrase, n, count, npmi, branch_ent, updated_at",
     "llm_extension_votes": "scope_id, kw_a_id, kw_b_id, vote_count, last_voted, promoted_at",
-    # scope_tags is knowledge-layer (v11): a tag describes what the scope
+    # scope_tags is knowledge-layer (v11): a tag describes what a scope
     # IS, so it travels with the pack. Only ``scope_id`` + ``tag``; no
     # kw_id remap needed on either export or import.
     "scope_tags": "scope_id, tag",
@@ -361,12 +366,14 @@ def _fill_pack_via_attach(
                 SELECT id, kw FROM src.keywords WHERE id IN (
                     SELECT kw_a_id FROM src.keyword_pairs WHERE scope_id IN ({ph})
                     UNION SELECT kw_b_id FROM src.keyword_pairs WHERE scope_id IN ({ph})
+                    UNION SELECT kw_a_id FROM src.complementary_pairs WHERE scope_id IN ({ph})
+                    UNION SELECT kw_b_id FROM src.complementary_pairs WHERE scope_id IN ({ph})
                     UNION SELECT kw_id   FROM src.keyword_stats  WHERE scope_id IN ({ph})
                     UNION SELECT kw_a_id FROM src.llm_extension_votes WHERE scope_id IN ({ph})
                     UNION SELECT kw_b_id FROM src.llm_extension_votes WHERE scope_id IN ({ph})
                 )
                 """,
-                scope_ids * 5,
+                scope_ids * 7,
             )
             stats.n_keywords = int(cur.rowcount or 0)
             # 3-7) Copy each knowledge asset table via _ATTACH_COPY_TABLES.
@@ -383,6 +390,8 @@ def _fill_pack_via_attach(
                 # contract stays stable.
                 if table == "keyword_pairs":
                     stats.n_pairs = n
+                elif table == "complementary_pairs":
+                    stats.n_complementary_pairs = n
                 elif table == "keyword_stats":
                     stats.n_stats = n
                 elif table == "scope_stats":
@@ -557,6 +566,9 @@ def import_knowledge_pack(
                 stats.n_pairs = _import_pairs(
                     pack, dst, pack_scope_id, new_scope_id, kw_remap
                 )
+                stats.n_complementary_pairs = _import_complementary_pairs(
+                    pack, dst, pack_scope_id, new_scope_id, kw_remap
+                )
                 stats.n_stats = _import_stats(
                     pack, dst, pack_scope_id, new_scope_id, kw_remap
                 )
@@ -695,6 +707,41 @@ def _import_pairs(
     dst.executemany(
         "INSERT INTO keyword_pairs (scope_id, kw_a_id, kw_b_id, source, "
         "cooccur_count, npmi, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        remapped,
+    )
+    return len(remapped)
+
+
+def _import_complementary_pairs(
+    pack: sqlite3.Connection,
+    dst: sqlite3.Connection,
+    pack_scope_id: int,
+    new_scope_id: int,
+    kw_remap: dict,
+) -> int:
+    """Import complementary pairs from a pack, remapping kw ids.
+
+    Not all packs have this table (pre-v12 packs lack it).  If the
+    table is missing, silently return 0 — the import still succeeds,
+    just without complementary-pair data (callers can rebuild later).
+    """
+    row = pack.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='complementary_pairs'"
+    ).fetchone()
+    if row is None:
+        return 0
+    rows = pack.execute(
+        "SELECT scope_id, kw_a_id, kw_b_id, cooccur_count, "
+        "expected_count, npmi, p_value, updated_at "
+        "FROM complementary_pairs WHERE scope_id = ?",
+        (pack_scope_id,),
+    ).fetchall()
+    remapped = _remap_ids(rows, ("kw_a_id", "kw_b_id"), kw_remap, new_scope_id)
+    dst.executemany(
+        "INSERT OR REPLACE INTO complementary_pairs "
+        "(scope_id, kw_a_id, kw_b_id, cooccur_count, "
+        " expected_count, npmi, p_value, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         remapped,
     )
     return len(remapped)

@@ -337,7 +337,8 @@ JSON 返回结构（成功）：
   "file_count": 37,
   "per_file": [{"path": "docs/a.md", "matches": 812}],
   "sample": {"sampled_lines": 32, "avg_line_bytes": 118, "est_total_bytes": 151512},
-  "elapsed_ms": 87,
+  "neighbors": [{"kw": "foobar", "npmi": 0.618}],
+  "complementary": [{"kw": "f00", "cooccur_count": 3, "c_over_e": 0.16, "p_value": 3.5e-20, "via_seed": "foo"}],
   "truncated": false,
   "warning": null,
   "skipped_files": []
@@ -350,8 +351,9 @@ JSON 返回结构（成功）：
 - `patterns` / `terms` / `pcre2` / `implicit_operator` / `implicit_notice`：与 `search` 输出一致，帮助调用方了解查询被如何解释。
 - `sample.est_total_bytes`：`total_lines * avg_line_bytes` 的**粗估**，只给数量级参考，不宜做严格算术。
 - `neighbors`（可选，仅内容探测且目录命中已绑定 scope 时出现）：首关键字在 `keyword_pairs` 图里的 top-5 近邻，按 `npmi` 降序。每项仅含 `kw`（词）+ `npmi`（float，round 6）两个字段，作为"换词候选"提示。**键缺席 ≠ 空数组**：缺席 = 该目录没有可用图索引（无命中 scope / DB 不可用 / 查询异常）；`[]` = 有索引但该 seed 在图里无候选（未知词 / 孤立节点）。多关键字时只对第一个 seed 输出，其余 seed 的邻域走 `related`（T2）。
+- `complementary`（可选，仅内容探测且目录命中已绑定 scope 时出现）：首关键字的**互补对**——共现显著低于随机期望的词。每项 `{kw, cooccur_count, c_over_e, p_value, via_seed}`，按 `c_over_e` 升序（偏离期望最极端者在前）。**不是别名检测器**：互补对只是统计信号，可能是别名、可能是范畴两极、可能是不同时间线称呼——语义归 caller 判断。键缺席语义同 `neighbors`。
 
-失败时 JSON 结构与成功时**同构**（同样包含 `patterns` / `terms` / `pcre2` / `implicit_operator` / `implicit_notice` / `directory` / `total_lines` / `file_count` / `elapsed_ms` 等字段，值为默认零/空），额外携带 `ok: false` 与 `error` 字段，方便调用方用统一的 schema 解析：
+失败时 JSON 结构与成功时**同构**（同样包含 `patterns` / `terms` / `pcre2` / `implicit_operator` / `implicit_notice` / `directory` / `total_lines` / `file_count` 等字段，值为默认零/空），额外携带 `ok: false` 与 `error` 字段，方便调用方用统一的 schema 解析：
 
 ```json
 {
@@ -363,8 +365,7 @@ JSON 返回结构（成功）：
   "pcre2": false,
   "implicit_operator": "and",
   "total_lines": 0,
-  "file_count": 0,
-  "elapsed_ms": 180000
+  "file_count": 0
 }
 ```
 

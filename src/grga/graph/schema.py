@@ -15,10 +15,15 @@ Knowledge tables (portable — enter a knowledge pack):
 * ``scopes``               — logical domain name (e.g. ``physics-cn``).
                              *Shard key* of every knowledge asset.
 * ``keywords``             — global casefold vocabulary.
-* ``keyword_pairs``        — per-scope co-occurrence (``chunk_cooccur``
-                             or ``llm_promoted``) with ``cooccur_count``
-                             and ``npmi``.
-* ``keyword_stats``        — per-scope ``chunk_df`` / ``doc_df`` /
+ * ``keyword_pairs``        — per-scope co-occurrence (``chunk_cooccur``
+                              or ``llm_promoted``) with ``cooccur_count``
+                              and ``npmi``.
+ * ``complementary_pairs``  — per-scope *significantly anti-co-occurring*
+                              pairs (negative npmi + low p-value).  Same
+                              normalised ``kw_a_id < kw_b_id`` shape as
+                              ``keyword_pairs`` but carries ``c_over_e``
+                              and ``p_value`` instead of ``npmi``.
+ * ``keyword_stats``        — per-scope ``chunk_df`` / ``doc_df`` /
                              ``total_occurrences``.
 * ``scope_stats``          — per-scope ``n_chunks`` (npmi denominator)
                              / ``n_docs`` / ``vocab_size``.
@@ -56,14 +61,15 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Union
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Oldest schema version that can be brought forward to :data:`SCHEMA_VERSION`
 # by a purely *additive* upgrade (``CREATE TABLE IF NOT EXISTS`` for the new
-# tables, no data rewrite). v10 → v11 only adds ``scope_tags`` (multi-value
-# scope labels), so a v10 database is upgraded in place rather than rejected.
-# Anything below this is a non-backward-compatible pre-v10 shape and is
-# rejected by :func:`_reject_legacy_db`.
+# tables, no data rewrite). v10 → v11 adds ``scope_tags``; v11 → v12 adds
+# ``complementary_pairs``.  Both are pure-additive, so a v10 database is
+# upgraded in place rather than rejected.  Anything below this is a
+# non-backward-compatible pre-v10 shape and is rejected by
+# :func:`_reject_legacy_db`.
 MIN_UPGRADABLE_VERSION = 10
 
 # Allowed ``keyword_pairs.source`` values (exhaustive; anything else is
@@ -78,6 +84,12 @@ LLM_PROMOTED_SOURCE = "llm_promoted"
 # ``llm_promoted`` pairs bypass these; ``npmi`` is NULL for them.
 BUILD_MIN_PAIR_COUNT = 5
 BUILD_MIN_NPMI = 0.2
+
+# Write-time significance gate for complementary (negative-npmi) pairs.
+# Pairs whose hypergeometric lower-tail p-value is above this threshold
+# are considered noise and not stored in ``complementary_pairs``.
+# Callers can always re-filter on the returned ``p_value`` field.
+BUILD_COMPLEMENTARY_MAX_P = 0.05
 
 
 def resolve_scope_name(name: Optional[str]) -> Optional[str]:
@@ -222,6 +234,31 @@ CREATE TABLE IF NOT EXISTS keyword_pairs (
 ) WITHOUT ROWID;
 """
 
+_CREATE_COMPLEMENTARY_PAIRS = """
+-- Complementary (significantly *anti*-co-occurring) keyword pairs.
+-- Schema v12 (plan-2026-09-11-complementary-pairs).
+--
+-- Stores pairs whose chunk co-occurrence is significantly *below* the
+-- random expectation (negative npmi + low hypergeometric p-value).
+-- Knowledge-layer: travels with the knowledge pack, same lifecycle as
+-- ``keyword_pairs``.
+--
+-- Same normalisation as keyword_pairs: undirected, ``kw_a_id < kw_b_id``.
+-- No ``source`` column — all rows are derived from chunk co-occurrence
+-- at build time.
+CREATE TABLE IF NOT EXISTS complementary_pairs (
+    scope_id       INTEGER NOT NULL REFERENCES scopes(id),
+    kw_a_id        INTEGER NOT NULL REFERENCES keywords(id),
+    kw_b_id        INTEGER NOT NULL REFERENCES keywords(id),
+    cooccur_count  REAL NOT NULL DEFAULT 0,
+    expected_count REAL NOT NULL DEFAULT 0,
+    npmi           REAL,
+    p_value        REAL NOT NULL DEFAULT 1.0,
+    updated_at     TEXT,
+    PRIMARY KEY (scope_id, kw_a_id, kw_b_id)
+) WITHOUT ROWID;
+"""
+
 _CREATE_ASSET_TABLES = """
 CREATE TABLE IF NOT EXISTS keyword_stats (
     scope_id INTEGER NOT NULL REFERENCES scopes(id),
@@ -318,6 +355,15 @@ CREATE INDEX IF NOT EXISTS idx_kp_a_npmi
     ON keyword_pairs (scope_id, kw_a_id, npmi DESC);
 CREATE INDEX IF NOT EXISTS idx_kp_b_npmi
     ON keyword_pairs (scope_id, kw_b_id, npmi DESC);
+-- Complementary pairs — the b-side index mirrors the pattern used for
+-- keyword_pairs.  The a-side lookup is covered by the primary key's
+-- leading columns (scope_id, kw_a_id).  We index by p_value so that
+-- the significance-gate check (p_value < threshold) can be satisfied
+-- from the index; query-side sorting is by c_over_e (computed from
+-- cooccur_count / expected_count), which is cheap for LIMIT-sized
+-- result sets (~30 rows).
+CREATE INDEX IF NOT EXISTS idx_cp_b_p
+    ON complementary_pairs (scope_id, kw_b_id, p_value);
 CREATE INDEX IF NOT EXISTS idx_heading_docs_head
     ON heading_docs (heading_path);
 CREATE INDEX IF NOT EXISTS idx_keyword_counts_count
@@ -383,6 +429,7 @@ def _create_current_tables(conn: sqlite3.Connection) -> None:
         + _CREATE_KEYWORDS
         + _CREATE_DOCS
         + _CREATE_KEYWORD_PAIRS
+        + _CREATE_COMPLEMENTARY_PAIRS
         + _CREATE_ASSET_TABLES
         + _CREATE_EVIDENCE_TABLES
         + _CREATE_INDEXES
