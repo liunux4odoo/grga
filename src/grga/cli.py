@@ -1828,6 +1828,111 @@ def index_export_command(
         )
 
 
+@index_app.command("export-candidates")
+def index_export_candidates_command(
+    seeds: Optional[str] = typer.Option(
+        None, "--seeds",
+        help="Initial concept set, comma-separated (e.g. '韩立,李化元'). "
+             "Mutually exclusive with --auto-seed.",
+    ),
+    auto_seed: Optional[int] = typer.Option(
+        None, "--auto-seed",
+        help="Cold-start: auto-select N seeds from the scope's vocabulary "
+             "(high chunk_df, non-stopword). Mutually exclusive with --seeds.",
+    ),
+    top: int = typer.Option(
+        20, "--top", "-n",
+        help="Per-seed neighborhood size (npmi-ordered candidates).",
+    ),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o", resolve_path=True,
+        help="Output JSONL path (written atomically). Default stdout.",
+    ),
+    max_context_chars: int = typer.Option(
+        2000, "--max-context-chars",
+        help="Per-candidate original-text context cap (characters).",
+    ),
+    scopes: List[str] = typer.Option(
+        [], "--scope", "-s",
+        help="Logical scope name. Repeatable — pass multiple `--scope` flags "
+             "to union across them. At least one scope is required unless "
+             "--cross-scope is set.",
+    ),
+    cross_scope: bool = typer.Option(
+        False, "--cross-scope",
+        help="Union across every indexed scope (ignores --scope).",
+    ),
+    db_path: Optional[Path] = typer.Option(
+        None, "--db-path", "--db", help="SQLite graph library path.",
+    ),
+):
+    """Export a dream raw-material candidate package (JSONL).
+
+    grga only moves material here — it never runs an LLM, never writes to
+    the graph DB, and never changes search/probe/expand/related behaviour.
+    The caller's LLM turns the package into entities + relations (see
+    docs/design/plan-2026-10-14-dream-ontology.md).
+    """
+    from grga.export_candidates import export_candidates, write_jsonl
+
+    if (seeds is not None and seeds.strip()) and auto_seed is not None:
+        typer.echo(
+            "export-candidates: --seeds and --auto-seed are mutually exclusive",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if not cross_scope and not [s for s in scopes if s and s.strip()]:
+        typer.echo(
+            "export-candidates: pass --scope <name> (repeatable) or --cross-scope",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if top <= 0:
+        typer.echo("export-candidates: --top must be >= 1", err=True)
+        raise typer.Exit(2)
+    if max_context_chars <= 0:
+        typer.echo(
+            "export-candidates: --max-context-chars must be >= 1", err=True,
+        )
+        raise typer.Exit(2)
+
+    seed_list = [s for s in (seeds or "").split(",") if s and s.strip()]
+    scope_list = [s for s in scopes if s and s.strip()]
+
+    export = export_candidates(
+        seed_list,
+        top=top,
+        max_context_chars=max_context_chars,
+        db_path=str(db_path) if db_path else None,
+        scopes=scope_list,
+        cross_scope=cross_scope,
+        auto_seed=auto_seed,
+    )
+
+    write_jsonl(export.rows, out)
+    if out is not None:
+        typer.echo(
+            f"exported {len(export.rows)} candidate(s) → {out}",
+            err=True,
+        )
+    if export.unknown_seeds:
+        typer.echo(
+            f"unknown seeds (not in index): {', '.join(export.unknown_seeds)}",
+            err=True,
+        )
+    if export.isolated_seeds:
+        typer.echo(
+            f"indexed but no candidates (hub / isolated / min-npmi too high): "
+            f"{', '.join(export.isolated_seeds)}",
+            err=True,
+        )
+    typer.echo(
+        f"{len(export.rows)} candidates from seeds {export.seeds or '(auto)'} "
+        f"(top {top}, max-context {max_context_chars})",
+        err=True,
+    )
+
+
 @index_app.command("import")
 def index_import_command(
     pack: Path = typer.Argument(..., exists=True, dir_okay=False, resolve_path=True, help="Knowledge pack (.grgapkg) to import."),

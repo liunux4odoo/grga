@@ -14,6 +14,7 @@ src/grga/
 ├── cli.py, __main__.py         # CLI 入口（Typer 命令注册）
 ├── {probe,search,expand,       # v2 五动词原语（design §4）
 │   related,suggest}.py
+├── export_candidates.py        # index export-candidates：梦境原料包（L2 邻域 + L1 上下文 → JSONL），只读不写、零 LLM（plan-2026-10-14-dream-ontology）
 ├── mcp/                        # MCP server（可选 extra `[mcp]`）：6 个 tool 适配器
 ├── deep_search.py              # v1 多跳搜索（重量级，legacy 主体）
 ├── models.py, meta.py          # 数据类 Hit / Context + 位置元数据填充
@@ -209,6 +210,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | `docs/design/plan-2026-07-15-build-memory-oom.md` | **build OOM 修复方案**：ngram 检测 + pair npmi 重算 TEMP TABLE 化（v9.1 方法学的第二/第三次应用）；附文件级断点续跑完整设计留档（本轮不做，证据触发再启） |
 | `docs/design/plan-2026-09-11-complementary-pairs.md` | **互补对（complementary_pairs）设计**：显著负 npmi + 低 p-value 的 pair 单独存表；probe/related 读侧附加 complementary 信号 |
 | `docs/design/plan-2026-09-12-complementary-noise-filtering.md` | **互补对噪声过滤**：阶段 1 全局停用词门槛（无开关，默认开）+ 迭代 2 c/E 强度门槛与互补对专用停用词表 `_COMPLEMENTARY_STOPWORDS`（无开关，默认开）+ 阶段 2 语体隔离检测（文件重叠下限 + chunk-vs-file npmi 偏离，`--no-filter-comp-segregation` 可关）；各层均纯减法，只影响 `complementary_pairs` 写入 |
+| `docs/design/plan-2026-10-14-dream-ontology.md` | **梦境整理（dream）**：外部 caller 用自己的 LLM 从 grga 导出的原料整理实体/关系，写成旁路 wiki；grga 只做 `index export-candidates`（原料导出 + 存储契约），零 LLM 调用、核心 DB 零改动、检索侧零负担 |
 | `docs/design/plan-2026-09-10-build-interrupt-recovery.md` | **build 中断恢复与状态管理提案（待评估）**：中断行为核实结论固化（处理中批次重处理）、构建完成标记识别残缺状态、中断恢复测试、per-batch floor 累计化、WAL、rebuild 提前清空缺口 |
 | `docs/design/related-signals-v3.md` | `related --json` 当前契约（graph 返候选关键字） |
 | `docs/design/deprecated/related-signals-v2.md` | **已归档** · v2 契约（PPR + expansion + keyword_contributions） |
@@ -234,6 +236,7 @@ CLI 与 GUI 共享后端，GUI 不引入新后端逻辑。AGENTS.md 有一条针
 | 改 build 期 pair / 聚合逻辑 | `graph/build.py::_finalize_pairs_from_temp`（TEMP TABLE + SQL self-join，方法学见 `docs/design/db-memory-optimization-lessons.md`） |
 | 改 related 性能 / 候选查询 | `related.py::related_keywords`（index-only 早停查 `keyword_pairs`）；写入期见 `graph/build.py`；设计见 `docs/design/plan-2026-07-12-keyword-primary.md`，历史 perf 实验 `experiments/related_perf_2026_07_12/` |
 | 加一种 LLM intent | `suggest.py` + 新增 `prompts/suggest_<intent>.txt` |
+| 导出梦境原料（候选包） | `export_candidates.py::export_candidates`（复用 related 邻域 + L1 上下文 → JSONL，零 LLM/零写库）；CLI `grga index export-candidates` 在 `cli.py` |
 | 加新 Markdown 结构信号 | `structure/md.py`（解析）+ `structure/sidecar.py`（缓存） |
 | 加退出码 / JSON 错误码 | `exit_codes.py`（**只加不改**） |
 | 调工具下载逻辑 | `toolchain.py`；`paths.py` 处理路径优先级 |

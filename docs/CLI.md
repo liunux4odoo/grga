@@ -605,6 +605,41 @@ grga index build --scope X --directory /path \
 
 详细调优见 [`build-tuning.md`](build-tuning.md)。
 
+## 导出梦境候选（`index export-candidates`）
+
+`grga index export-candidates` 从 L2 共现图导出**梦境（dream）原料包**（JSONL）：
+每行一个候选共现对，附带 L1 原文上下文片段。grga 只负责"搬运原料"，**不调用
+任何 LLM、不写数据库、不改任何检索动词行为**——整理成实体/关系是外部 caller
+LLM 的事（设计见 [`design/plan-2026-10-14-dream-ontology.md`](design/plan-2026-10-14-dream-ontology.md)）。
+
+```bash
+grga index export-candidates --seeds "韩立,李化元" --scope work \
+     --top 20 --out candidates.jsonl --max-context-chars 2000
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--seeds` | — | 初始概念集，逗号分隔；与 `--auto-seed` 互斥 |
+| `--auto-seed N` | — | 冷启动：从 scope 词表自动选 N 个种子（高 chunk_df、非停用词） |
+| `--top N` | `20` | 每 seed 取 top-N 邻域（npmi 排序） |
+| `--out` | stdout | JSONL 输出路径；**原子写入**（临时文件→rename，Ctrl-C 不留半截文件） |
+| `--max-context-chars` | `2000` | 每个候选的原文上下文截断上限 |
+| `--scope` / `-s` | 必填 | 逻辑 scope 名，可重复（union）；不传 `--cross-scope` 时至少一个 |
+| `--cross-scope` | 关 | 跨全部 scope union（忽略 `--scope`） |
+| `--db-path` | 共享 DB | SQLite 图库路径 |
+
+每行 JSONL schema：
+
+```json
+{"seed": "韩立", "candidate": "李化元", "npmi": 0.42, "cooccur_count": 87,
+ "source_kws": ["韩立", "李化元"], "scope": "work",
+ "context": "韩立拜入李化元门下，习得青元剑诀……"}
+```
+
+- `context` = `expand --level line` 语义的命中行附近片段，截断到
+  `--max-context-chars`；证据缺失（知识-only scope / 无法读取的文件）时为空串。
+- 保证：幂等（同参数重跑输出一致）、DB 零改动、可安全重放。
+
 ## 管理内置工具
 
 `grga tools` 用于查看、安装和更新打包到本地的命令行工具。运行时会优先使用 wheel 内置工具，找不到时再回退系统 `PATH`。
