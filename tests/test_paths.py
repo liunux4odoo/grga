@@ -12,7 +12,7 @@ from grga import paths
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for key in ("GRGA_TOOLS_DIR", "GRGA_STATE_DIR", "GRGA_CACHE_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "LOCALAPPDATA", "APPDATA"):
+    for key in ("GRGA_TOOLS_DIR", "GRGA_STATE_DIR", "GRGA_CACHE_DIR", "GRGA_DREAM_DIR", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "LOCALAPPDATA", "APPDATA"):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch
 
@@ -182,4 +182,69 @@ def test_cache_dir_does_not_create_directory(monkeypatch, tmp_path):
     root = tmp_path / "cache"
     monkeypatch.setenv("GRGA_CACHE_DIR", str(root))
     result = paths.resolve_cache_dir()
+    assert not result.exists()
+
+
+# --------------------------------------------------------------------------- #
+# dream assets root (plan-2026-10-14 §后续 code 任务)
+# --------------------------------------------------------------------------- #
+
+def test_dream_dir_grga_dream_dir_override(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_DREAM_DIR", "/tmp/x")
+    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/xdg")
+    assert paths.resolve_dream_dir() == Path("/tmp/x")
+
+
+def test_dream_dir_empty_string_ignored(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_DREAM_DIR", "")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/home/user")))
+    assert paths.resolve_dream_dir() == Path("/home/user/.local/share/grga/dream")
+
+
+def test_dream_dir_whitespace_only_ignored(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_DREAM_DIR", "   ")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/home/user")))
+    assert paths.resolve_dream_dir() == Path("/home/user/.local/share/grga/dream")
+
+
+def test_dream_dir_xdg_data_home(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/data")
+    assert paths.resolve_dream_dir() == Path("/tmp/data/grga/dream")
+
+
+def test_dream_dir_platform_default_posix(monkeypatch):
+    _force_posix(monkeypatch)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/home/user")))
+    assert paths.resolve_dream_dir() == Path("/home/user/.local/share/grga/dream")
+
+
+def test_dream_dir_platform_default_windows(monkeypatch):
+    _force_windows(monkeypatch)
+    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\me\\AppData\\Local")
+    assert paths.resolve_dream_dir() == Path("C:\\Users\\me\\AppData\\Local") / "grga" / "dream"
+
+
+def test_dream_dir_windows_no_localappdata_falls_back(monkeypatch):
+    _force_windows(monkeypatch)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("C:\\Users\\me")))
+    assert paths.resolve_dream_dir() == Path("C:\\Users\\me/AppData/Local/grga/dream")
+
+
+def test_dream_dir_no_platform_segment(monkeypatch):
+    """Dream dir must not carry a platform segment (unlike tools)."""
+    _force_posix(monkeypatch)
+    monkeypatch.setenv("GRGA_DREAM_DIR", "/tmp/root")
+    assert paths.resolve_dream_dir() == Path("/tmp/root")
+
+
+def test_dream_dir_does_not_create_directory(monkeypatch, tmp_path):
+    _force_posix(monkeypatch)
+    root = tmp_path / "dream"
+    monkeypatch.setenv("GRGA_DREAM_DIR", str(root))
+    result = paths.resolve_dream_dir()
     assert not result.exists()

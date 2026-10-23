@@ -1,8 +1,9 @@
 """Central resolver for grga directory paths.
 
-This module resolves the tools cache, state directory, and general cache
-directory, following XDG Base Directory conventions with grga-specific
-overrides. Each resolver function documents its own priority chain.
+This module resolves the tools cache, state directory, general cache
+directory, and the dream assets root, following XDG Base Directory
+conventions with grga-specific overrides. Each resolver function documents
+its own priority chain.
 
 Tools cache notes
 -----------------
@@ -21,6 +22,7 @@ from pathlib import Path
 
 APP_NAME = "grga"
 TOOLS_SUBDIR = "tools"
+DREAM_SUBDIR = "dream"
 
 
 def _is_windows():
@@ -114,3 +116,38 @@ def resolve_cache_dir():
         return base / APP_NAME / "cache"
 
     return Path.home() / ".cache" / APP_NAME
+
+
+def resolve_dream_dir():
+    """Return the dream assets root directory (``<root>/dream``).
+
+    Dream assets are user-editable knowledge (entity/relation wiki files
+    written by the caller's LLM), so they live in the **data** directory —
+    never the cache — and carry **no platform segment** (unlike the tools
+    cache). See ``docs/design/plan-2026-10-14-dream-ontology.md`` §目录布局.
+
+    Priority:
+      1. ``$GRGA_DREAM_DIR`` (explicit override)
+      2. ``$XDG_DATA_HOME/grga/dream``
+      3. platform default data dir
+         * Linux / macOS: ``~/.local/share/grga/dream``
+         * Windows:       ``%LOCALAPPDATA%\\grga\\dream``
+
+    The path is **not** created; creation is deferred to write time so
+    read-only filesystems do not fail on resolution (same contract as the
+    other ``resolve_*`` helpers).
+    """
+    override = _env("GRGA_DREAM_DIR")
+    if override:
+        return Path(override)
+
+    xdg = _env("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / APP_NAME / DREAM_SUBDIR
+
+    if _is_windows():
+        local = _env("LOCALAPPDATA")
+        base = Path(local) if local else Path.home() / "AppData" / "Local"
+        return base / APP_NAME / DREAM_SUBDIR
+
+    return Path.home() / ".local" / "share" / APP_NAME / DREAM_SUBDIR

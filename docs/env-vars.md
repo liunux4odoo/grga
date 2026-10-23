@@ -62,6 +62,7 @@ grga 启动时会自动加载 `$XDG_CONFIG_HOME/grga/.env`（未设置 `XDG_CONF
 |---|---|---|
 | `GRGA_TOOLS_DIR` | *(未设置)* | 工具缓存根目录的**显式覆盖**。设置后忽略所有 XDG / 平台默认 |
 | `GRGA_STATE_DIR` | *(未设置)* | 状态目录（迁移标记、sentinel）的显式覆盖 |
+| `GRGA_DREAM_DIR` | *(未设置)* | 梦境资产根目录（`dream/<scope>/entities/` 等旁路 wiki，见 `plan-2026-10-14-dream-ontology.md`）的显式覆盖。数据目录、非缓存；空串/纯空白视为未设 |
 | `GRGA_PREFER_SYSTEM` | `0` | 置 `1` 反转解析顺序：优先系统 `PATH` → 再看托管缓存。等价于 `--prefer-system` |
 | `GRGA_OFFLINE` | `0` | 置 `1` 禁止任何网络访问；缺工具时以退出码 5 立即失败。等价于 `--offline` |
 | `GRGA_INSECURE` | `0` | 置 `1` 跳过下载的 sha256 校验。**仅用于调试损坏镜像**，生产环境切勿启用 |
@@ -77,6 +78,12 @@ grga 启动时会自动加载 `$XDG_CONFIG_HOME/grga/.env`（未设置 `XDG_CONF
 1. `$XDG_STATE_HOME/grga`
 2. `$XDG_DATA_HOME/grga`（与工具缓存共根）
 3. 平台默认
+
+**梦境资产根目录解析顺序**（未设 `GRGA_DREAM_DIR` 时）：
+
+1. `$XDG_DATA_HOME/grga/dream`
+2. Linux/macOS：`~/.local/share/grga/dream`
+3. Windows：`%LOCALAPPDATA%\grga\dream`
 
 ## XDG 基础目录
 

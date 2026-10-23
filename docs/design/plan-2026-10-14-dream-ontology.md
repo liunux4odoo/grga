@@ -1,6 +1,6 @@
 # grga 梦境整理（dream）开发方案
 
-> **状态**：✅ 已实现（2026-10-22）；`--auto-seed` 已落地（冷启动启发式：高 chunk_df + 非停用词）
+> **状态**：✅ 主体已实现（2026-10-22）；**后续 code 任务 `resolve_dream_dir()` 已实现**（2026-10-23，落 `paths.py`，见文末 §后续 code 任务）；`--auto-seed` 已落地（冷启动启发式：高 chunk_df + 非停用词）
 > **范围**：grga 只提供**原料导出 + 存储契约**；整理逻辑由外部 caller agent 用自己的 LLM 完成。`related` 读取梦境资产是后置独立开关，不在本方案。
 
 ## 背景与定位
@@ -25,7 +25,7 @@ grga 核心资产（`keyword_pairs` 等）是纯统计共现对——客观但�
 | D8 | 读原文 | 允许 caller LLM 读原文：`related` 筛候选(L2) → `expand` 取上下文(L1) → LLM 判断(L3)；Relation 必读、Entity 轻读 |
 | D9 | 执行时机 | 外部决定，grga 不自动触发 |
 | D10 | 核心动词 | search/probe/expand/related 行为不变 |
-| D11 | 消费方式 | skill 引导 caller 在 **L1 检索开始前**条件性读取梦境资产（别名消歧 + 查询词扩展）；作为 **hint 非 truth**，须回原文验证；无梦境资产时 L1 流程不变 |
+| D11 | 消费方式 | 梦境资产作为 **T0/T1 检索的隐含搜索来源**：检索时把相关实体的 `members` **折叠进查询词本身**（如 `大史` → `大史 \|\| 史强`）；**不单独执行"梦境搜索"**；hint 非 truth 须回原文验证；无梦境资产时 T0/T1 流程不变 |
 | D12 | 产出克制 | caller 整理时**只产出高置信、必要的实体/关系**，不过度扩展（不追求单次覆盖整个 scope）；宁可多次小规模、不要单次大规模，控制单次 LLM 成本 |
 | D13 | 置信度迭代 | **迭代读取已有资产**（members 去重 + confidence 更新 + 关系补全）；confidence **可正常增减**，但每次变动必须伴随**正反证据记录**（实体文件 body"## 证据"小节）；**下调必须有反证**，无证据不允许；证据数量**不设固定值，由 caller 自行判断**（保持记录精简即可） |
 
@@ -100,11 +100,17 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
 ### 目录布局（旁路，DB 零改动）
 
 ```
-<dream 根目录>/          # 建议 <grga data>/dream/
+<dream 根目录>/          # 定案：$XDG_DATA_HOME/grga/dream（默认 ~/.local/share/grga/dream）
   README.md              # 最近整理状态
   checked.md             # 查过未入梦短语（扁平，每行一个，≤10k 行滚动）
   <scope>/entities/*.md
 ```
+
+**根目录定案（2026-10-23）**：跟随 grga XDG 数据目录——`$XDG_DATA_HOME/grga/dream`，
+未设 `XDG_DATA_HOME` 时默认 `~/.local/share/grga/dream`（Linux/macOS）。
+与 `resolve_state_dir()` / `resolve_tools_root()` 同基座（`$XDG_DATA_HOME/grga`），
+**不走 cache home**（梦境资产是用户可编辑的知识资产，非可删缓存）。可配
+`GRGA_DREAM_DIR` 显式覆盖。
 
 ## caller 工作流（skill 指南：生产 + 消费）
 
@@ -118,11 +124,11 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
 6. 结束：软收敛（一层新增高置信 <3 条即停）/ 无价值剪枝 / caller 步数上限；新实体作新 seed 再导出
 7. **产出克制（D12）**：只落高置信、必要的实体/关系；不追求单次覆盖整个 scope，按 seed 分批小规模推进；可留待下次再扩，勿贪多
 
-### 消费：L1 检索时的前置步骤（D11）
+### 消费：梦境资产作为 T0/T1 检索的隐含来源（D11）
 
-1. **条件触发**：scope 下存在 `dream/<scope>/entities/` 才执行；无梦境资产时 L1 流程与现在完全一致
-2. **动作**：检索开始前扫一遍相关实体的 `members`，做别名消歧 + 查询词扩展（如已知"大史 = 史强"，搜"大史"前先纳入"史强"）
-3. **原则**：梦境资产是 **hint 非 truth**——读到的别名/关系必须回原文验证（`search`/`expand`），不得盲信
+1. **触发检查**：scope 下存在 `dream/<scope>/entities/` 才生效；无梦境资产时 T0/T1 流程与现在完全一致
+2. **折叠进查询词**：构建 T0 `probe` / T1 `search` 查询词时，把相关实体的 `members` 并进查询词（如已知"大史 = 史强"，搜"大史"时查询词为 `大史 \|\| 史强`）——**这是查询词构造的一部分，不是先读梦境再搜索**
+3. **hint 非 truth**：折叠进的别名/关系必须回原文验证（`search`/`expand`），不得盲信
 
 ## 长时运行与打断
 
@@ -152,7 +158,7 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
 5. 按 skill 指南 caller 能独立完成小规模整理（2 seed → 实体文件 + checked.md），产出符合 wiki schema
 6. Ctrl-C 打断导出：`--out` 文件不存在或内容完整；DB 无残留锁，同参数重跑一致
 7. 跑完导出后 `related`/`search` 输出与之前完全一致（DB 未变）
-8. 消费路径可执行：scope 有梦境资产时，caller 按 skill 指南能在 L1 检索前完成别名消歧（如"大史"→ 扩展"史强"）；无梦境资产时 L1 流程无任何额外步骤
+8. 消费路径可执行：scope 有梦境资产时，caller 按 skill 指南能在构建 T0/T1 查询词时完成别名折叠（如"大史"→ 查询词 `大史 \|\| 史强`），**无独立"梦境搜索"步骤**；无梦境资产时 T0/T1 流程无任何额外步骤
 9. 产出克制：单次小规模整理（`--seeds 2`）产出的实体数保持克制（低置信/重复的不落盘），不会一次膨胀出大量低质量实体
 10. 迭代 + 证据：第二轮梦境（不 `--force`）不会重复处理已入梦实体；confidence 变动伴随 `## 证据` 条目，下调有反证、无证据不改动；证据数量由 caller 判断，无固定上限
 
@@ -166,10 +172,47 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
 
 ## 待确认项
 
-1. dream 根目录位置：建议 `<grga data>/dream/`
-2. `--max-context-chars` 与 expand（`--level line`）映射：code agent 按现有契约实现
-3. 双向关系相反谓词由 caller LLM 生成（师从/弟子语义不同）还是程序反查
-4. `--auto-seed N` 是否 v1 就做：倾向后置（先 `--seeds` 跑通流程）
+1. ~~dream 根目录位置~~ ✅ 已定案（2026-10-23）：`$XDG_DATA_HOME/grga/dream`（默认 `~/.local/share/grga/dream`），可配 `GRGA_DREAM_DIR` 覆盖
+2. ~~`--max-context-chars` 与 expand（`--level line`）映射~~ ✅ 已落地（2026-10-22 实现：`context` 按 expand line 语义取 ±3 行，截断到 `--max-context-chars`）
+3. 双向关系相反谓词由 caller LLM 生成（师从/弟子语义不同）还是程序反查：caller 侧决策，不阻塞 code 任务
+4. ~~`--auto-seed N` 是否 v1 就做~~ ✅ 已落地（2026-10-22 实现：chunk_df DESC + 非停用词 + 长度≥2 冷启动）
+
+---
+
+## 后续 code 任务（已实现，2026-10-23）
+
+**目标**：grga 提供梦境资产根目录的规范解析函数，供 caller 与未来命令定位资产位置。
+
+**WHAT（约束）**：
+- 新增一个路径解析函数（位于 `paths.py`，与现有 `resolve_state_dir` / `resolve_tools_root` / `resolve_cache_dir` 同风格、同基座逻辑）。
+- 解析优先级（高→低）：
+  1. `GRGA_DREAM_DIR` 显式覆盖（最高优先）
+  2. `$XDG_DATA_HOME/grga/dream`（未设 `XDG_DATA_HOME` 时平台默认 `~/.local/share/grga/dream`，Linux/macOS）
+- **不含 platform segment**（区别于 tools 目录）；**解析不创建目录**（与现有 resolve_* 一致，创建延后到实际写入时）。
+- 不改变任何现有函数 / 命令行为。
+
+**验收（可执行）**：
+1. 设 `GRGA_DREAM_DIR=/tmp/x` → 函数返回 `/tmp/x`
+2. 不设 `GRGA_DREAM_DIR`、设 `XDG_DATA_HOME=/tmp/data` → 返回 `/tmp/data/grga/dream`
+3. 都不设 → 返回 `~/.local/share/grga/dream`
+4. 解析函数调用后**不创建任何目录**（断言目标路径不存在）
+5. 现有测试全绿（无回归）
+
+**边界维度**：
+- `GRGA_DREAM_DIR` 为空串 → 视为未设（走下一优先级），与现有 `_env` 的 strip 语义一致
+- Windows 平台默认 → 与 `resolve_state_dir` 的 Windows 分支一致（`%LOCALAPPDATA%\grga\dream`）
+- 环境变量含空白 → strip 后判定
+
+**非目标（明确不做）**：不实现梦境资产的读写 / 校验（caller 责任）；不接 `related --use-dream`；不创建目录。
+
+**✅ 实现记录（2026-10-23）**：`src/grga/paths.py::resolve_dream_dir()`。
+- 优先级：`GRGA_DREAM_DIR` → `$XDG_DATA_HOME/grga/dream` → 平台默认
+  （Linux/macOS `~/.local/share/grga/dream`，Windows `%LOCALAPPDATA%\grga\dream`），
+  与 `resolve_state_dir` / `resolve_tools_root` 同 `_env`（strip）+ 同基座逻辑。
+- 无 platform segment；解析不创建目录（与现有 resolve_* 一致）。
+- 测试 `tests/test_paths.py` +9 项（覆盖验收 1-4：override / XDG / 平台默认 /
+  空串 / 纯空白 / Windows 回退 / 无 platform segment / 不创建目录）。
+- `docs/env-vars.md` 同步 `GRGA_DREAM_DIR` 与解析顺序。
 
 ---
 
@@ -200,12 +243,13 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
   截断、scope 限定、cross-scope union、mutex、auto-seed、DB 字节不变、
   幂等、`--out` 无 temp 残留、unknown seed 报告、后端直调。
 - **Skill 指南**（2026-10-23 补）：`src/grga/skills/grga/references/dream.md`
-  新增「生产 + 消费」两篇——生产（导出 → 先读资产 → LLM 整理 → wiki 落盘 +
-  `## 证据` → 去重 → 三层结束 → 产出克制）+ 消费（L1 前条件性读
-  `dream/<scope>/entities/` 做别名消歧，hint 非 truth，无资产则 L1 流程不变）；
-  `SKILL.md` 前端描述、Supporting commands（`export-candidates`）、
-  References 表同步。顺带修正 skill 参考里互补对（`complementary`）的陈旧
-  描述（迭代 3 已从 `probe`/`related` 输出移除）。
+  新增「生产 + 消费」两篇——生产（**显式**：导出 → 先读资产 → LLM 整理 →
+  wiki 落盘 + `## 证据` → 去重 → 三层结束 → 产出克制）+ 消费（**隐含搜索
+  来源**：构建 T0/T1 查询词时把 `dream/<scope>/entities/` 相关实体的
+  `members` 折叠进查询词，不单独执行"梦境搜索"，hint 非 truth，无资产则
+  T0/T1 流程不变）；`SKILL.md` 前端描述、Supporting commands
+  （`export-candidates`）、References 表同步。顺带修正 skill 参考里互补对
+  （`complementary`）的陈旧描述（迭代 3 已从 `probe`/`related` 输出移除）。
 
 **未实现（按方案边界排除）**：wiki schema 落盘（caller 责任）、
 `checked.md`/`run_state.md`（caller 责任）、`related --use-dream` 后置开关、
