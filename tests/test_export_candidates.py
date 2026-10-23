@@ -260,3 +260,42 @@ class TestExportBackend:
                 "seed", "candidate", "npmi", "cooccur_count",
                 "source_kws", "scope", "context",
             }
+
+    def test_missing_db_is_error_and_creates_nothing(self, dream_env, tmp_path):
+        """A nonexistent --db-path must error (exit 1) and never create a DB.
+
+        The export is read-only: a missing index is "no signal", not a
+        trigger to create an empty graph DB (plan hard constraint §1).
+        """
+        from grga.export_candidates import export_candidates
+
+        missing = tmp_path / "nope" / "graph.db"
+        with pytest.raises(LookupError):
+            export_candidates(
+                ["史强"], top=10, db_path=missing, scopes=["work"],
+            )
+        assert not missing.exists(), "missing DB must not be created"
+
+        # And the backend must not have created a parent dir either.
+        assert not missing.parent.exists()
+
+
+# --------------------------------------------------------------------------- #
+# CLI validation errors
+# --------------------------------------------------------------------------- #
+
+class TestExportCliErrors:
+    def test_missing_db_exit_1_no_side_effect(self, tmp_path):
+        missing = tmp_path / "nope" / "graph.db"
+        result = _invoke(["--seeds", "史强", "--scope", "work"],
+                         missing, tmp_path / "sc")
+        assert result.exit_code == 1
+        assert "graph DB not found" in result.output
+        assert not missing.exists(), "CLI must not create a missing DB"
+
+    def test_neither_seeds_nor_auto_seed_is_error(self, tmp_path):
+        sidecars = tmp_path / "sc"
+        # No --seeds, no --auto-seed → exit 2
+        result = _invoke(["--scope", "work"], tmp_path / "g.db", sidecars)
+        assert result.exit_code == 2
+        assert "--seeds" in result.output

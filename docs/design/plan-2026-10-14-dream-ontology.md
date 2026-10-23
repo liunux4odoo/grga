@@ -193,6 +193,9 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
   写入（同目录 temp + `os.replace`，Ctrl-C 无半截文件）；stdout 为默认。
 - **保证**：零 LLM 调用（不读 `GRGA_OPENAI_API_KEY`）；核心 DB 零改动
   （纯 SELECT，导出前后 DB 字节一致）；幂等可重放；检索动词零改动。
+  （2026-10-23 加固：`--db-path` 指向不存在的库时直接报错 exit 1，绝不
+  创建空 DB —— 缺失索引是"无信号"，不是写触发；`--seeds` 与 `--auto-seed`
+  都缺时 exit 2。）
 - **测试** `tests/test_export_candidates.py`（13 项）：schema 完整、context
   截断、scope 限定、cross-scope union、mutex、auto-seed、DB 字节不变、
   幂等、`--out` 无 temp 残留、unknown seed 报告、后端直调。

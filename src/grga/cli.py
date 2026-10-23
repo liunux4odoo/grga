@@ -1897,17 +1897,30 @@ def index_export_candidates_command(
         raise typer.Exit(2)
 
     seed_list = [s for s in (seeds or "").split(",") if s and s.strip()]
+    if not seed_list and auto_seed is None:
+        typer.echo(
+            "export-candidates: pass --seeds <terms> or --auto-seed N",
+            err=True,
+        )
+        raise typer.Exit(2)
     scope_list = [s for s in scopes if s and s.strip()]
 
-    export = export_candidates(
-        seed_list,
-        top=top,
-        max_context_chars=max_context_chars,
-        db_path=str(db_path) if db_path else None,
-        scopes=scope_list,
-        cross_scope=cross_scope,
-        auto_seed=auto_seed,
-    )
+    try:
+        export = export_candidates(
+            seed_list,
+            top=top,
+            max_context_chars=max_context_chars,
+            db_path=str(db_path) if db_path else None,
+            scopes=scope_list,
+            cross_scope=cross_scope,
+            auto_seed=auto_seed,
+        )
+    except LookupError as exc:
+        typer.echo(f"export-candidates: {exc}", err=True)
+        raise typer.Exit(1)
+    except ValueError as exc:
+        typer.echo(f"export-candidates: {exc}", err=True)
+        raise typer.Exit(2)
 
     write_jsonl(export.rows, out)
     if out is not None:

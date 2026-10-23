@@ -104,6 +104,11 @@ def export_candidates(
     from grga.deep_search import DEFAULT_DB_PATH
 
     target_db = Path(db_path).expanduser() if db_path else DEFAULT_DB_PATH
+    if not target_db.is_file():
+        # Refuse rather than let ``connect()`` create an empty graph DB.
+        # This command is read-only: a missing index is "no signal", never
+        # a write trigger (hard constraints §: core DB zero changes).
+        raise LookupError(f"graph DB not found: {target_db}")
     scope_names = None if cross_scope else _normalise_scopes(scopes)
 
     conn = connect(target_db)
