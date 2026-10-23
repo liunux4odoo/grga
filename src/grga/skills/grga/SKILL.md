@@ -1,6 +1,6 @@
 ---
 name: grga
-description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and a tiered probe → search → expand/related → suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index was built by the user; empty `related` / `graph inspect` means "no signal available", not a build trigger. Entity / identity / relationship questions (who is X, are A and B the same entity) route to a `related`-first workflow; literal location questions route to `probe → search → expand`. It may consume **dream assets** (`index export-candidates` material organized into `dream/<scope>/entities/*.md` by the caller's LLM) as an **implicit search source**: when present, aliases / relations from the relevant entities are folded into the T0/T1 retrieval itself (e.g. `大史` pulls in `史强` via `--implicit-or`) — **not** a separate "dream search" step. Dream assets are hint, not truth — always verify against the raw text. Producing dream material is an **explicit** workflow (`export-candidates` → organize into wiki), never part of the retrieval loop. It does not fetch URLs, does not modify source files, and calls an LLM only inside `suggest`.
+description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and a tiered probe → search → expand/related → suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index was built by the user; empty `related` / `graph inspect` means "no signal available", not a build trigger. Entity / identity / relationship questions (who is X, are A and B the same entity) route to a `related`-first workflow; literal location questions route to `probe → search → expand`. It may consume **entity assets** (wiki files under `entities/<scope>/`, produced by the caller's LLM from `index export-candidates` material) via an **explicit pre-search disambiguation query**: before the first `search`, deliberately read the relevant entity files, fold aliases into the query (e.g. `大史` pulls in `史强` via `--implicit-or`) and verify relations against the raw text — **not** implicit in the search itself. Entity assets are hint, not truth — always verify against the raw text. Producing entity material is an **explicit** workflow (`export-candidates` → organize into wiki), never part of the retrieval loop. It does not fetch URLs, does not modify source files, and calls an LLM only inside `suggest`.
 ---
 
 # grga skill
@@ -38,6 +38,12 @@ state and without paying LLM cost until absolutely necessary.
   inside the skill loop**: an empty / missing index is "no signal", and
   the fallthrough stays `probe` sweep → different seed → `related
   --mode heading` → T3 `suggest`.
+- **Entity assets have uncertain credibility.** Wiki files under
+  `entities/<scope>/` are LLM-produced hints — the `confidence` value is
+  the producing LLM's own self-assessment, which can be wrong, stale, or
+  biased. **Never treat them as ground truth**: any alias / relation read
+  from them must be verified against the raw text (`search` / `expand`)
+  before it enters an answer.
 
 ## Start here: pick the entry verb
 
@@ -129,10 +135,10 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
   means the keyword is not in the offline index — treat as "no signal".
   Full CLI, filters, and field semantics in `references/verbs.md`.
 - `grga index export-candidates --seeds "…" --scope <name> [--cross-scope] [--out f.jsonl]`
-  — **dream raw-material export** (read-only, no LLM, no DB writes).
+  — **entity-asset raw-material export** (read-only, no LLM, no DB writes).
   Emits one JSONL candidate pair per line (`{seed, candidate, npmi,
   cooccur_count, source_kws, scope, context}`). Feed it to your LLM to
-  organize entities/relations into `dream/<scope>/entities/` — see
+  organize entities/relations into `entities/<scope>/` — see
   `references/dream.md`. **Not** a build/write command: it only moves
   material out.
 
@@ -140,7 +146,7 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
 > `index promote`) is **out of scope for this skill**. The user is
 > expected to have built the graph beforehand. Do not run those
 > commands from within the skill loop. (`index export-candidates` is
-> read-only and safe inside the loop when producing dream material.)
+> read-only and safe inside the loop when producing entity-asset material.)
 
 ## Tiered reflection workflow
 
@@ -256,20 +262,30 @@ people co-occur with the seed"; test each, do not discard as noise.
 locate-me shortcut. Call for the candidates you care about, not for all
 of them — the mirror is query-on-demand.
 
-### Dream (梦境) assets: an implicit search source
+### Entity assets (实体资产): explicit pre-search disambiguation query
 
-**Consumption is implicit in T0/T1, never a separate "dream search".** Dream
-assets are one more source a search draws on, like the corpus itself. When
-`dream/<scope>/entities/` exists for the scope you are searching, the
-`members` of entities relevant to this query are folded into the **query
-terms themselves** — not read as a separate pre-step. Example: knowing
-`史强 = 大史`, searching `大史` pulls in `史强` via `--implicit-or` at the
-point where you formulate the T0 `probe` / T1 `search`. **No dream assets →
-T0/T1 run exactly as written** — zero extra steps.
+**Consumption is an explicit step before search, not implicit in it.** Entity
+assets (produced by your LLM from `index export-candidates` material, wiki
+files under `entities/<scope>/`) are a **distinct source you consult
+deliberately** — the caller can tell entity-asset clues apart from search
+results, because reading them is its own action. When `entities/<scope>/`
+exists for the scope you are about to search:
 
-- Dream assets are **hint, not truth**: any alias / relation folded into the
-  query must be verified against the raw text (`search` / `expand`) before it
-  enters an answer. Never blind-trust the wiki.
+1. **Query the assets explicitly** — read the relevant entity files (e.g.
+   `entities/work/史强.md`) and collect their `members` / relations.
+2. **Decide & verify** — fold aliases into your query where useful (knowing
+   `史强 = 大史`, searching `大史` becomes `大史 || 史强`) and verify
+   relations against the raw text (`search` / `expand`).
+3. **Then search** — `probe` / `search` run as usual.
+
+**No entity assets → T0/T1 run exactly as written** — zero extra steps.
+
+- Entity assets have **uncertain credibility** — they are hint, not truth.
+  The `confidence` field is the producing LLM's own self-assessment and may
+  be wrong, stale, or biased (e.g. a confident-but-wrong alias merge). Any
+  alias / relation read from them must be verified against the raw text
+  (`search` / `expand`) before it enters an answer. Never blind-trust the
+  wiki; treat every entity-asset clue as a lead to check, not a fact.
 - **Production is explicit** (never part of the retrieval loop): `grga index
   export-candidates` → your LLM → wiki files, run as a deliberate,
   separate workflow — see `references/dream.md`.
@@ -344,7 +360,7 @@ Detailed material loaded on demand:
 | File | Read when |
 |---|---|
 | `references/verbs.md` | Need a verb's full CLI usage or per-field semantics. |
-| `references/dream.md` | Producing dream material (**explicit**: `index export-candidates` → organize into `dream/<scope>/entities/` wiki) or the consumption model (implicit search source folded into T0/T1 query terms). |
+| `references/dream.md` | Producing entity material (**explicit**: `index export-candidates` → organize into `entities/<scope>/` wiki) or the consumption model (explicit pre-search disambiguation query). |
 | `references/storage-model.md` | Scoped query is thin and weighing `-d` vs cross-scope union; deciding `--db` override; indexing multiple corpora. |
 | `references/reflection-loop.md` | Executing a tier (T0-T3); need per-tier decision tables, seed selection, stuck-signal thresholds, `graph inspect` disambiguation, or `suggest` context relaxation. |
 | `references/anti-patterns.md` | Considering a `grep` / `sqlite3` / copy-to-clean-path shortcut, or an identity-disambiguation query. |

@@ -1,35 +1,38 @@
-# Dream (梦境) — 生产 + 消费指南
+# Entity assets (实体资产) — 生产 + 消费指南
 
-Referenced from "Dream (梦境) assets" in `SKILL.md`. Full design:
+Referenced from "Entity assets (实体资产)" in `SKILL.md`. Full design:
 `docs/design/plan-2026-10-14-dream-ontology.md` (本仓库，非 skill 内)。
 
-梦境是**可选**的 L3 补充工作流：外部 caller agent 用自己的 LLM，从 grga
-导出的原料里整理出**实体 + 关系**资产，写成旁路 wiki 文件。grga 自身
-**不调 LLM、不写数据库、不改任何检索动词**——它只负责
+实体资产是**可选**的 L3 补充工作流（早期称"梦境 dream"）：外部 caller agent
+用自己的 LLM，从 grga 导出的原料里整理出**实体 + 关系**资产，写成旁路 wiki
+文件。grga 自身**不调 LLM、不写数据库、不改任何检索动词**——它只负责
 `grga index export-candidates`（原料导出）。
 
 两条主线，各自独立：
 
 - **生产**：显式动作——什么时候导出、怎么整理、怎么落盘、怎么去重收敛
-  （本文件上篇）。**梦境生产是显式的，永远不是检索循环的一部分**。
-- **消费**：**隐含在 T0/T1 检索里**——梦境资产是搜索的一个特别来源，像语料库
-  一样；检索时把相关实体的 `members` 折叠进查询词本身，**不单独执行"梦境
-  搜索"**（本文件下篇，D11）。**无梦境资产时，T0/T1 流程与现在完全一致**。
+  （本文件上篇）。**实体资产生产是显式的，永远不是检索循环的一部分**。
+- **消费**：**检索前的显式独立步骤**——实体资产是你主动去查的独立来源，
+  caller 能区分"实体资产线索"与"search 结果"；显式查询得到别名/关系清单，
+  再决定折进查询词 / 回原文验证（本文件下篇，D11）。**无实体资产时，
+  T0/T1 流程与现在完全一致**。
 
 ### 存放位置
 
-梦境资产是**用户可编辑的 wiki 文件**（非 DB、非缓存），落在 grga 的 XDG
+实体资产是**用户可编辑的 wiki 文件**（非 DB、非缓存），落在 grga 的 XDG
 数据目录：
 
 ```
-$XDG_DATA_HOME/grga/dream/           # 未设 XDG_DATA_HOME 时默认 ~/.local/share/grga/dream/
+$XDG_DATA_HOME/grga/entities/       # 未设 XDG_DATA_HOME 时默认 ~/.local/share/grga/entities/
   README.md
   checked.md
-  <scope>/entities/*.md
+  <scope>/
+    韩立.md
+    史强.md
 ```
 
-可用 `GRGA_DREAM_DIR` 显式覆盖根目录。下文 `dream/<scope>/entities/` 均指
-此根下的相对路径。
+code 内部用 `GRGA_DREAM_DIR` 覆盖根目录（保留原名，已发布契约）。下文
+`entities/<scope>/` 均指此根下的相对路径（实体文件直接放 scope 下）。
 
 ---
 
@@ -56,11 +59,11 @@ grga index export-candidates --seeds "韩立,李化元" --scope work \
 
 ### 2. 先读已有资产（迭代，D13）
 
-开始整理前，先读 `dream/<scope>/entities/*.md` 的现有 `members` 与
+开始整理前，先读 `entities/<scope>/*.md` 的现有 `members` 与
 `## 证据`，以及 `checked.md`：
 
 - `members` 命中的词 → 跳过，不重复归并；
-- `checked.md` 里查过但未入梦的短语 → 不再整理；
+- `checked.md` 里查过但未入资产的短语 → 不再整理；
 - 已有实体的 `confidence` 变动必须伴随正反证据（见 §4）。
 
 ### 3. 用自己的 LLM 整理
@@ -74,7 +77,7 @@ grga index export-candidates --seeds "韩立,李化元" --scope work \
 
 ### 4. 落盘（wiki schema，DB 零改动）
 
-实体文件 `dream/<scope>/entities/<name>.md`，front matter **恰好 7 字段**：
+实体文件 `entities/<scope>/<name>.md`，front matter **恰好 7 字段**：
 
 ```markdown
 ---
@@ -107,7 +110,7 @@ updated: 2026-10-14T17:15:00+08:00
 
   - **下调必须有反证条目**；无证据的裸数字改动不允许；
   - 证据数量不设固定上限，由 caller 判断（可聚合如 `+3 / -1`）。
-- 其他落盘：`README.md`（最近整理状态）、`checked.md`（查过未入梦短语）、
+- 其他落盘：`README.md`（最近整理状态）、`checked.md`（查过未入资产短语）、
   `run_state.md`（种子队列 / 已跑轮次 / 累计产出，中断恢复用）。
 - front matter 解析失败 → 报错并指明文件。
 
@@ -127,33 +130,42 @@ LLM 限流 → 单条跳过（幂等）不中断整轮。
 
 ---
 
-## 下篇 · 消费：梦境资产作为 T0/T1 检索的隐含来源（D11）
+## 下篇 · 消费：实体消歧查询（检索前的显式独立步骤，D11）
 
-**消费隐含在 T0/T1 里，不是单独的"梦境搜索"步骤**。梦境资产是搜索的
-一个特别来源——当 scope 下有 `dream/<scope>/entities/` 时，把与查询相关
-实体的 `members` **折叠进查询词本身**，让一次 `probe` / `search` 天然覆盖
-别名。**无梦境资产时 T0/T1 流程与现在完全一致**（不加任何步骤）。
+**消费是 search 之前的一个显式独立步骤，不是隐含在 search 里**。实体资产
+（你从 `index export-candidates` 原料整理出的 wiki 文件，位于
+`entities/<scope>/`）是一个**你主动去查的独立来源**——你能区分"实体资产
+线索"和"search 结果"，因为读它是独立动作。**无实体资产时 T0/T1 流程与
+现在完全一致**（不加任何步骤）。
+
+> **⚠️ 可信度不确定**：实体资产的 `confidence` 是生产时 LLM 的**自评**，
+> 可能错误、可能过期、可能有偏（例如一个"自信但错误"的别名归并）。实体
+> 资产是 **hint 不是 truth**——每条线索都要当"待核实的线索"对待，**绝不
+> 当事实**；进入答案前必须回原文验证。
 
 ### 怎么做
 
-1. **触发检查**：`scope` 下有没有 `entities/` 目录（有 `--scope` 就用它；
-   没有就检查默认 scope）。
-2. **折叠进查询词**：构建 T0 `probe` / T1 `search` 的查询词时，扫一遍与
-   本次查询相关的实体的 `members`，把别名并入查询词。例如已知
-   "大史 = 史强"，搜"大史"时查询词就写成 `"大史 史强" --implicit-or`
-   （或 `大史 || 史强`）——这是**查询词构造的一部分**，不是先读梦境再搜索。
-3. **hint 非 truth**：折叠进的别名 / 关系**必须回原文验证**（`search` /
-   `expand`），**不得盲信**。梦境资产只是减少盲区的线索，不是答案。
+1. **触发检查**：scope 下有没有 `entities/<scope>/` 目录（有 `--scope` 就
+   用它；没有就检查默认 scope）。
+2. **显式查询**：检索开始前，主动读相关实体文件（如 `entities/work/史强.md`），
+   收集它们的 `members` 与关系——**这是独立动作，你明确知道这些线索来自
+   实体资产**（区别于 search 结果）。
+3. **决策与验证**：决定哪些别名折进查询词（如已知"大史 = 史强"，搜"大史"
+   时查询词写成 `"大史 史强" --implicit-or` 或 `大史 || 史强`）；**关系
+   必须回原文验证**（`search` / `expand`）——实体资产可信度不确定，任何
+   读到的别名/关系都不得盲信。
+4. **然后 search**：`probe` / `search` 照常执行。
 
 ### 例子
 
-- 查询 `大史`，实体 `史强.md` 的 `members: [史强, 大史]` → 查询词构造为
-  `"大史 史强" --implicit-or`（或 `大史 || 史强`）再 `search`。
+- 查询 `大史`，实体 `史强.md` 的 `members: [史强, 大史]` → 显式查询得到
+  别名清单 → 构造查询词 `"大史 史强" --implicit-or`（或 `大史 || 史强`）
+  再 `search`。
 - 查询 `青元剑诀`，实体 `李化元.md` 的关系 `[[韩立]]：师从` → 这是线索，
   **先 `search` 验证**，不直接当作既定事实回答。
 
 ### 边界
 
-- `related --use-dream`（让 related 直接读梦境）是**后置独立开关**，当前
-  不实现；消费路径只在本 skill 指南层面生效（折进查询词）。
-- 梦境资产**不进 DB**，删除 / 重命名实体文件即删除资产。
+- `related --use-dream`（让 related 直接读实体资产）是**后置独立开关**，当前
+  不实现；消费路径只在本 skill 指南层面生效（显式前置查询）。
+- 实体资产**不进 DB**，删除 / 重命名实体文件即删除资产。

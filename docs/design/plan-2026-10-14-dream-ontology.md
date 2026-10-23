@@ -1,15 +1,16 @@
-# grga 梦境整理（dream）开发方案
+# grga 实体资产整理开发方案（原「梦境 dream」）
 
-> **状态**：✅ 主体已实现（2026-10-22）；**后续 code 任务 `resolve_dream_dir()` 已实现**（2026-10-23，落 `paths.py`，见文末 §后续 code 任务）；`--auto-seed` 已落地（冷启动启发式：高 chunk_df + 非停用词）
-> **范围**：grga 只提供**原料导出 + 存储契约**；整理逻辑由外部 caller agent 用自己的 LLM 完成。`related` 读取梦境资产是后置独立开关，不在本方案。
+> **状态**：✅ 主体已实现（2026-10-22）；`resolve_dream_dir()` 已实现（2026-10-23，落 `paths.py`）；`--auto-seed` 已落地
+> **术语定案（2026-10-23）**：用户可见层改用**实体整理 / 实体消歧查询**（替代"梦境"隐喻，避免生产/消费混淆）；**内部 code 标识符保留 dream**（`resolve_dream_dir` / `GRGA_DREAM_DIR`，已发布契约不改）；资产目录 `~/.local/share/grga/entities/`
+> **范围**：grga 只提供**原料导出 + 存储契约**；整理逻辑由外部 caller agent 用自己的 LLM 完成。`related` 读取实体资产是后置独立开关，不在本方案。
 
 ## 背景与定位
 
-grga 核心资产（`keyword_pairs` 等）是纯统计共现对——客观但不含语义：`related` 只能告知"两词常共现"，给不出关系类型；语义判断（同一实体？什么关系？）目前由 caller 自己完成。本方案为 caller 提供可选的 L3 补充工作流：**梦境（dream）**——外部决定时机，caller 用自己的 LLM 从 grga 导出的原料里整理出**实体 + 关系**资产，写成旁路 wiki 文件。
+grga 核心资产（`keyword_pairs` 等）是纯统计共现对——客观但不含语义：`related` 只能告知"两词常共现"，给不出关系类型；语义判断（同一实体？什么关系？）目前由 caller 自己完成。本方案为 caller 提供可选的 L3 补充工作流：**实体资产整理**（早期称"梦境 dream"）——外部决定时机，caller 用自己的 LLM 从 grga 导出的原料里整理出**实体 + 关系**资产，写成旁路 wiki 文件。
 
 **定位**：辅助 caller 从原文找线索的 L3 补充，不是完备知识图谱。
 
-**关键边界**：梦境由外部执行 → **不用 grga 内部 LLM**（`GRGA_OPENAI_API_KEY` 等），grga 只做"导出原料 + 定义存储契约"，否则等于 grga 自己在产出侧做语义判断。**废除内置 `grga index dream`** 的双重理由：①哲学——grga 不自己做语义判断；②可靠性——否则长时稳定/打断/失败恢复全成 grga 的 checkpoint/限流/崩溃恢复负担（见 §长时运行）。
+**关键边界**：实体资产由外部执行 → **不用 grga 内部 LLM**（`GRGA_OPENAI_API_KEY` 等），grga 只做"导出原料 + 定义存储契约"，否则等于 grga 自己在产出侧做语义判断。**废除内置 `grga index dream`** 的双重理由：①哲学——grga 不自己做语义判断；②可靠性——否则长时稳定/打断/失败恢复全成 grga 的 checkpoint/限流/崩溃恢复负担（见 §长时运行）。
 
 ## 设计决策（唯一决策出处）
 
@@ -20,12 +21,12 @@ grga 核心资产（`keyword_pairs` 等）是纯统计共现对——客观但�
 | D3 | grga 角色 | 只提供原料导出 + 存储契约；`grga index dream` 废除，零 LLM 调用 |
 | D4 | 整理者 | 外部 caller agent，用自己的 LLM，按 skill 指南整理 |
 | D5 | 原料导出 | 独立命令 `grga index export-candidates`（内部复用 related 邻域 + expand 上下文），合成 JSONL 候选包；不进 `related`，检索侧零负担 |
-| D6 | 去重 | `members` 命中跳过；`checked.md` 记录查过未入梦短语 |
+| D6 | 去重 | `members` 命中跳过；`checked.md` 记录查过但未入资产短语 |
 | D7 | 结束机制 | 硬上限/软收敛/scope 边界，三层 OR，任一即停 |
 | D8 | 读原文 | 允许 caller LLM 读原文：`related` 筛候选(L2) → `expand` 取上下文(L1) → LLM 判断(L3)；Relation 必读、Entity 轻读 |
 | D9 | 执行时机 | 外部决定，grga 不自动触发 |
 | D10 | 核心动词 | search/probe/expand/related 行为不变 |
-| D11 | 消费方式 | 梦境资产作为 **T0/T1 检索的隐含搜索来源**：检索时把相关实体的 `members` **折叠进查询词本身**（如 `大史` → `大史 \|\| 史强`）；**不单独执行"梦境搜索"**；hint 非 truth 须回原文验证；无梦境资产时 T0/T1 流程不变 |
+| D11 | 消费方式 | **实体消歧查询是检索前的显式独立步骤**（caller 可区分"实体资产线索"与"search 结果"两个来源）：先显式查询 `entities/<scope>/` 得到实体/别名/关系清单（明确标注来源），再决定哪些折进查询词 / 哪些要回原文验证，最后才 search；hint 非 truth 须验证；无实体资产时 T0/T1 流程不变 |
 | D12 | 产出克制 | caller 整理时**只产出高置信、必要的实体/关系**，不过度扩展（不追求单次覆盖整个 scope）；宁可多次小规模、不要单次大规模，控制单次 LLM 成本 |
 | D13 | 置信度迭代 | **迭代读取已有资产**（members 去重 + confidence 更新 + 关系补全）；confidence **可正常增减**，但每次变动必须伴随**正反证据记录**（实体文件 body"## 证据"小节）；**下调必须有反证**，无证据不允许；证据数量**不设固定值，由 caller 自行判断**（保持记录精简即可） |
 
@@ -61,7 +62,7 @@ grga index export-candidates --seeds "韩立,李化元" --scope work \
 
 ### wiki schema（caller 遵循）
 
-实体文件 `dream/<scope>/entities/<name>.md`：
+实体文件 `entities/<scope>/<name>.md`：
 
 ```markdown
 ---
@@ -100,35 +101,37 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
 ### 目录布局（旁路，DB 零改动）
 
 ```
-<dream 根目录>/          # 定案：$XDG_DATA_HOME/grga/dream（默认 ~/.local/share/grga/dream）
+<entities 根目录>/       # 定案：$XDG_DATA_HOME/grga/entities（默认 ~/.local/share/grga/entities）
   README.md              # 最近整理状态
-  checked.md             # 查过未入梦短语（扁平，每行一个，≤10k 行滚动）
-  <scope>/entities/*.md
+  checked.md             # 查过但未入资产短语（扁平，每行一个，≤10k 行滚动）
+  <scope>/               # 每个 scope 一个目录
+    <实体名>.md          # 实体文件直接放 scope 下（去掉内层 entities/ 冗余）
 ```
 
-**根目录定案（2026-10-23）**：跟随 grga XDG 数据目录——`$XDG_DATA_HOME/grga/dream`，
-未设 `XDG_DATA_HOME` 时默认 `~/.local/share/grga/dream`（Linux/macOS）。
+**根目录定案（2026-10-23）**：跟随 grga XDG 数据目录——`$XDG_DATA_HOME/grga/entities`，
+未设 `XDG_DATA_HOME` 时默认 `~/.local/share/grga/entities`（Linux/macOS）。
 与 `resolve_state_dir()` / `resolve_tools_root()` 同基座（`$XDG_DATA_HOME/grga`），
-**不走 cache home**（梦境资产是用户可编辑的知识资产，非可删缓存）。可配
-`GRGA_DREAM_DIR` 显式覆盖。
+**不走 cache home**（实体资产是用户可编辑的知识资产，非可删缓存）。code 内部
+`resolve_dream_dir()` / `GRGA_DREAM_DIR` 保留原名（已发布契约），实际目录为
+`entities`。
 
 ## caller 工作流（skill 指南：生产 + 消费）
 
-### 生产：梦境整理
+### 生产：实体整理
 
 1. 导出：`grga index export-candidates ... --out candidates.jsonl`
-2. **先读已有资产**（迭代，D13）：读 `entities/` 现有 members 与证据，避免重复归并
+2. **先读已有资产**（迭代，D13）：读 `<scope>/` 现有 members 与证据，避免重复归并
 3. 用自己的 LLM 整理：读每行 → 归并实体进 `members` → 判断关系输出谓词（必须读 `context`）→ 低置信/无价值追加 `checked.md`
 4. 落盘：按 wiki schema 写实体文件，关系双向补全；**confidence 变动同时追加 `## 证据` 条目**（下调必须带反证）
 5. 去重：`members` 内词跳过；`checked.md` 已有短语不再整理
 6. 结束：软收敛（一层新增高置信 <3 条即停）/ 无价值剪枝 / caller 步数上限；新实体作新 seed 再导出
 7. **产出克制（D12）**：只落高置信、必要的实体/关系；不追求单次覆盖整个 scope，按 seed 分批小规模推进；可留待下次再扩，勿贪多
 
-### 消费：梦境资产作为 T0/T1 检索的隐含来源（D11）
+### 消费：实体消歧查询（检索前的显式独立步骤，D11）
 
-1. **触发检查**：scope 下存在 `dream/<scope>/entities/` 才生效；无梦境资产时 T0/T1 流程与现在完全一致
-2. **折叠进查询词**：构建 T0 `probe` / T1 `search` 查询词时，把相关实体的 `members` 并进查询词（如已知"大史 = 史强"，搜"大史"时查询词为 `大史 \|\| 史强`）——**这是查询词构造的一部分，不是先读梦境再搜索**
-3. **hint 非 truth**：折叠进的别名/关系必须回原文验证（`search`/`expand`），不得盲信
+1. **触发检查**：scope 下存在 `entities/<scope>/` 才生效；无实体资产时 T0/T1 流程与现在完全一致
+2. **显式查询**：检索开始前，显式读 `entities/<scope>/` 的相关实体，得到实体/别名/关系清单——**这是独立动作，caller 明确知道这些线索来自实体资产**（区别于 search 结果）
+3. **决策与验证**：caller 决定哪些别名折进查询词（如"大史"→ `大史 \|\| 史强`）、哪些关系需回原文验证（`search`/`expand`）；hint 非 truth，不得盲信
 
 ## 长时运行与打断
 
@@ -158,14 +161,14 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
 5. 按 skill 指南 caller 能独立完成小规模整理（2 seed → 实体文件 + checked.md），产出符合 wiki schema
 6. Ctrl-C 打断导出：`--out` 文件不存在或内容完整；DB 无残留锁，同参数重跑一致
 7. 跑完导出后 `related`/`search` 输出与之前完全一致（DB 未变）
-8. 消费路径可执行：scope 有梦境资产时，caller 按 skill 指南能在构建 T0/T1 查询词时完成别名折叠（如"大史"→ 查询词 `大史 \|\| 史强`），**无独立"梦境搜索"步骤**；无梦境资产时 T0/T1 流程无任何额外步骤
+8. 消费路径可执行：scope 有实体资产时，caller 按 skill 指南能在检索前**显式查询** `entities/<scope>/` 得到实体/别名清单，再决定折进查询词（如"大史"→ `大史 \|\| 史强`）并回原文验证；无实体资产时 T0/T1 流程无任何额外步骤
 9. 产出克制：单次小规模整理（`--seeds 2`）产出的实体数保持克制（低置信/重复的不落盘），不会一次膨胀出大量低质量实体
 10. 迭代 + 证据：第二轮梦境（不 `--force`）不会重复处理已入梦实体；confidence 变动伴随 `## 证据` 条目，下调有反证、无证据不改动；证据数量由 caller 判断，无固定上限
 
 ## 边界（D 表之外的排除项）
 
-- ❌ `related` 读取梦境资产：后置独立开关（如 `related --use-dream`），届时"多查一层文件"，不涉及架构改动
-- ❌ 强制 L2 实现：属检索思路/纪律（SKILL.md 已体现），不在方案；梦境目标 1 降低强制成本，二者互补但互不依赖
+- ❌ `related` 读取实体资产：后置独立开关（如 `related --use-dream`），届时"多查一层文件"，不涉及架构改动
+- ❌ 强制 L2 实现：属检索思路/纪律（SKILL.md 已体现），不在方案；实体资产目标 1 降低强制成本，二者互补但互不依赖
 - ❌ 导出 complementary 候选：complementary 仍观察验证阶段，只导出 related 正侧
 - ❌ 资产校验/质量打分：延续不评价原则，`confidence` 是 caller LLM 自评
 - ❌ 长时编排/checkpoint/限流退避/崩溃恢复：caller 责任（§长时运行）
@@ -244,12 +247,12 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
   幂等、`--out` 无 temp 残留、unknown seed 报告、后端直调。
 - **Skill 指南**（2026-10-23 补）：`src/grga/skills/grga/references/dream.md`
   新增「生产 + 消费」两篇——生产（**显式**：导出 → 先读资产 → LLM 整理 →
-  wiki 落盘 + `## 证据` → 去重 → 三层结束 → 产出克制）+ 消费（**隐含搜索
-  来源**：构建 T0/T1 查询词时把 `dream/<scope>/entities/` 相关实体的
-  `members` 折叠进查询词，不单独执行"梦境搜索"，hint 非 truth，无资产则
-  T0/T1 流程不变）；`SKILL.md` 前端描述、Supporting commands
-  （`export-candidates`）、References 表同步。顺带修正 skill 参考里互补对
-  （`complementary`）的陈旧描述（迭代 3 已从 `probe`/`related` 输出移除）。
+  wiki 落盘 + `## 证据` → 去重 → 三层结束 → 产出克制）+ 消费（**检索前的
+  显式独立步骤**：显式查询 `entities/<scope>/` 得到实体/别名/关系清单，再
+  决定折进查询词 / 回原文验证，hint 非 truth，无资产则 T0/T1 流程不变）；
+  `SKILL.md` 前端描述、Supporting commands（`export-candidates`）、
+  References 表同步。顺带修正 skill 参考里互补对（`complementary`）的陈旧
+  描述（迭代 3 已从 `probe`/`related` 输出移除）。
 
 **未实现（按方案边界排除）**：wiki schema 落盘（caller 责任）、
 `checked.md`/`run_state.md`（caller 责任）、`related --use-dream` 后置开关、
