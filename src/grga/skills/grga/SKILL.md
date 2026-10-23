@@ -1,6 +1,6 @@
 ---
 name: grga
-description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and a tiered probe → search → expand/related → suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index was built by the user; empty `related` / `graph inspect` means "no signal available", not a build trigger. Entity / identity / relationship questions (who is X, are A and B the same entity) route to a `related`-first workflow; literal location questions route to `probe → search → expand`. It does not fetch URLs, does not modify source files, and calls an LLM only inside `suggest`.
+description: This skill should be used when a caller agent needs to search a local repository, expand a hit into wider context, find related documents through a keyword co-occurrence / heading graph, or ask an LLM to reformulate a stalled query. It exposes the five grga read verbs (probe / search / expand / related / suggest) and a tiered probe → search → expand/related → suggest reflection loop so the caller can size a query cheaply, act on evidence, and escalate to LLM only when necessary. The skill is **retrieval-only** — it assumes the offline graph index was built by the user; empty `related` / `graph inspect` means "no signal available", not a build trigger. Entity / identity / relationship questions (who is X, are A and B the same entity) route to a `related`-first workflow; literal location questions route to `probe → search → expand`. It optionally consumes **dream assets** (`index export-candidates` material organized into `dream/<scope>/entities/*.md` by the caller's LLM) as a **pre-L1 hint** for alias disambiguation — read them before the first `search` only when present, and always verify against the raw text. It does not fetch URLs, does not modify source files, and calls an LLM only inside `suggest`.
 ---
 
 # grga skill
@@ -128,11 +128,19 @@ semantics in `references/verbs.md`; authoritative JSON schemas in
   `graph inspect` — see `references/reflection-loop.md`). Empty output
   means the keyword is not in the offline index — treat as "no signal".
   Full CLI, filters, and field semantics in `references/verbs.md`.
+- `grga index export-candidates --seeds "…" --scope <name> [--cross-scope] [--out f.jsonl]`
+  — **dream raw-material export** (read-only, no LLM, no DB writes).
+  Emits one JSONL candidate pair per line (`{seed, candidate, npmi,
+  cooccur_count, source_kws, scope, context}`). Feed it to your LLM to
+  organize entities/relations into `dream/<scope>/entities/` — see
+  `references/dream.md`. **Not** a build/write command: it only moves
+  material out.
 
 > Offline index construction (`grga index build` / `index rebuild` /
 > `index promote`) is **out of scope for this skill**. The user is
 > expected to have built the graph beforehand. Do not run those
-> commands from within the skill loop.
+> commands from within the skill loop. (`index export-candidates` is
+> read-only and safe inside the loop when producing dream material.)
 
 ## Tiered reflection workflow
 
@@ -248,6 +256,23 @@ people co-occur with the seed"; test each, do not discard as noise.
 locate-me shortcut. Call for the candidates you care about, not for all
 of them — the mirror is query-on-demand.
 
+### Dream (梦境) assets: pre-L1 alias disambiguation
+
+**Conditional, before the first `search`** (D11): if `dream/<scope>/entities/`
+exists for the scope you are about to search, read the `members` of the
+entities relevant to this query and fold their aliases into your query terms
+(e.g. know `史强 = 大史`, so searching `大史` also pulls in `史强` via
+`--implicit-or`). **No dream assets → L1 flow is exactly as written above**
+— zero extra steps.
+
+- Dream assets are **hint, not truth**: any alias / relation read from them
+  must be verified against the raw text (`search` / `expand`) before it
+  enters an answer. Never blind-trust the wiki.
+- Producing dream material (`grga index export-candidates` → your LLM →
+  wiki files) is an **optional, separate** workflow — see
+  `references/dream.md`. It never runs inside the retrieval loop unless you
+  choose to run it.
+
 ### Stuck signals & escalation
 
 Watch these while inside T0/T1; when one fires, follow the table. Full
@@ -318,6 +343,7 @@ Detailed material loaded on demand:
 | File | Read when |
 |---|---|
 | `references/verbs.md` | Need a verb's full CLI usage or per-field semantics. |
+| `references/dream.md` | Producing dream material (`index export-candidates` → organize into `dream/<scope>/entities/` wiki) or consuming it (pre-L1 alias disambiguation). |
 | `references/storage-model.md` | Scoped query is thin and weighing `-d` vs cross-scope union; deciding `--db` override; indexing multiple corpora. |
 | `references/reflection-loop.md` | Executing a tier (T0-T3); need per-tier decision tables, seed selection, stuck-signal thresholds, `graph inspect` disambiguation, or `suggest` context relaxation. |
 | `references/anti-patterns.md` | Considering a `grep` / `sqlite3` / copy-to-clean-path shortcut, or an identity-disambiguation query. |

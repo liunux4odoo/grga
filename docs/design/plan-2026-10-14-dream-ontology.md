@@ -25,7 +25,7 @@ grga 核心资产（`keyword_pairs` 等）是纯统计共现对——客观但�
 | D8 | 读原文 | 允许 caller LLM 读原文：`related` 筛候选(L2) → `expand` 取上下文(L1) → LLM 判断(L3)；Relation 必读、Entity 轻读 |
 | D9 | 执行时机 | 外部决定，grga 不自动触发 |
 | D10 | 核心动词 | search/probe/expand/related 行为不变 |
-| D11 | 消费方式 | skill 引用 caller 在 **L1 检索开始前**条件性读取梦境资产（别名消歧 + 查询词扩展）；作为 **hint 非 truth**，须回原文验证；无梦境资产时 L1 流程不变 |
+| D11 | 消费方式 | skill 引导 caller 在 **L1 检索开始前**条件性读取梦境资产（别名消歧 + 查询词扩展）；作为 **hint 非 truth**，须回原文验证；无梦境资产时 L1 流程不变 |
 | D12 | 产出克制 | caller 整理时**只产出高置信、必要的实体/关系**，不过度扩展（不追求单次覆盖整个 scope）；宁可多次小规模、不要单次大规模，控制单次 LLM 成本 |
 | D13 | 置信度迭代 | **迭代读取已有资产**（members 去重 + confidence 更新 + 关系补全）；confidence **可正常增减**，但每次变动必须伴随**正反证据记录**（实体文件 body"## 证据"小节）；**下调必须有反证**，无证据不允许；证据数量**不设固定值，由 caller 自行判断**（保持记录精简即可） |
 
@@ -196,6 +196,13 @@ front matter 7 字段：`name`(主名) / `members`(别名组=去重核心) / `co
 - **测试** `tests/test_export_candidates.py`（13 项）：schema 完整、context
   截断、scope 限定、cross-scope union、mutex、auto-seed、DB 字节不变、
   幂等、`--out` 无 temp 残留、unknown seed 报告、后端直调。
+- **Skill 指南**（2026-10-23 补）：`src/grga/skills/grga/references/dream.md`
+  新增「生产 + 消费」两篇——生产（导出 → 先读资产 → LLM 整理 → wiki 落盘 +
+  `## 证据` → 去重 → 三层结束 → 产出克制）+ 消费（L1 前条件性读
+  `dream/<scope>/entities/` 做别名消歧，hint 非 truth，无资产则 L1 流程不变）；
+  `SKILL.md` 前端描述、Supporting commands（`export-candidates`）、
+  References 表同步。顺带修正 skill 参考里互补对（`complementary`）的陈旧
+  描述（迭代 3 已从 `probe`/`related` 输出移除）。
 
 **未实现（按方案边界排除）**：wiki schema 落盘（caller 责任）、
 `checked.md`/`run_state.md`（caller 责任）、`related --use-dream` 后置开关、
